@@ -25,7 +25,7 @@ def build_package():
 
 @grpc_app.command("generate")
 def generate_grpc():
-    """编译 Protobuf 目录下的所有 .proto 文件到 app/grpc 目录下。"""
+    """编译 Protobuf 目录下的所有 .proto 文件到 app/Protobuf 目录下。"""
     import grpc_tools.protoc
 
     proto_dir = Path("Protobuf")
@@ -35,8 +35,8 @@ def generate_grpc():
         print("No proto files found under Protobuf", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    # 目标生成目录为 app/grpc
-    out_dir = Path("app/grpc")
+    # 目标生成目录为 app/Protobuf
+    out_dir = Path("app/Protobuf")
     if out_dir.exists():
         try:
             shutil.rmtree(out_dir)
@@ -47,20 +47,13 @@ def generate_grpc():
     except Exception:
         pass
 
-    # 为所有子目录生成 __init__.py 以使其成为 Python 包
-    api_dir = out_dir / "api"
-    try:
-        api_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-    
-    # 写入 api/__init__.py 修正模块导入路径
-    api_init = api_dir / "__init__.py"
+    # 写入 app/Protobuf/__init__.py 修正模块导入路径
+    api_init = out_dir / "__init__.py"
     try:
         api_init.write_text(
             "import sys\n"
             "from pathlib import Path\n"
-            "sys.path.append(str(Path(__file__).parent.resolve()))\n",
+            "sys.path.append(str(Path(__file__).parent.parent.resolve()))\n",
             encoding="utf-8"
         )
     except Exception:
@@ -70,9 +63,9 @@ def generate_grpc():
     args = [
         "grpc_tools.protoc",
         "-I.",
-        f"--python_out={out_dir}",
-        f"--grpc_python_out={out_dir}",
-        f"--pyi_out={out_dir}",
+        "--python_out=app",
+        "--grpc_python_out=app",
+        "--pyi_out=app",
     ]
     
     proto_args = []
@@ -106,13 +99,8 @@ def generate_grpc():
         except Exception:
             pass
 
-    protobuf_gen_dir = out_dir / "Protobuf"
     try:
-        if protobuf_gen_dir.exists():
-            init_file = protobuf_gen_dir / "__init__.py"
-            if not init_file.exists():
-                init_file.touch()
-            create_inits(protobuf_gen_dir)
+        create_inits(out_dir)
     except Exception:
         pass
 
