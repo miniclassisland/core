@@ -1,4 +1,4 @@
-"""CIMS 身份认证与权限依赖项。
+"""MINIClassIsland 身份认证与权限依赖项。
 
 提供基于 Redis 会话与 API 令牌的认证与验证，以及基于角色 (RBAC) 权限制约的 FastAPI 依赖注入项。
 """
