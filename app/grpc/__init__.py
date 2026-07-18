@@ -1,1 +1,4 @@
-"""gRPC 服务层聚合包。"""
+"""MINIClassIsland gRPC 服务与状态管理器包。
+"""
+
+from .session import SessionManager
