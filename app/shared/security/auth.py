@@ -88,6 +88,21 @@ async def revoke_token(token: str, *, tenant_id: str = "") -> bool:
 
 # ---- 会话认证依赖注入项 (HTTP Session) ----
 
+_SESSION_TOKEN_BYTES = 32
+_SESSION_DEFAULT_TTL = 3600
+
+
+async def create_session_token(user_id: str, *, ttl: int = _SESSION_DEFAULT_TTL) -> str:
+    """创建绑定用户身份的会话令牌。"""
+    rd = get_redis(REDIS_DB_AUTH)
+    token = secrets.token_urlsafe(_SESSION_TOKEN_BYTES)
+    key = f"session:{token}"
+    await rd.hset(key, mapping={"user_id": user_id})
+    await rd.expire(key, ttl)
+    logger.info("会话令牌已创建: user=%s", user_id)
+    return token
+
+
 async def resolve_user_from_token(token: str) -> Optional[str]:
     """从 Redis 用户会话会话中提取关联的 User ID。"""
     rd = get_redis(REDIS_DB_AUTH)
