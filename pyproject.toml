@@ -1,7 +1,7 @@
 [project]
-name = "cims-backend"
+name = "miniclassisland-core"
 version = "0.1.0"
-description = "ClassIsland Management Server Backend"
+description = "MINIClassIsland Management Server Backend"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -22,9 +22,11 @@ dependencies = [
     "argon2-cffi~=25.1.0",
     "pydantic[email]~=2.12.0",
     "pyotp~=2.9.0",
+    "python-multipart~=0.0.18",
 ]
 
 [project.scripts]
+miniclassisland = "app.main:main"
 cims = "app.main:main"
 
 [dependency-groups]
@@ -64,4 +66,3 @@ omit = [
     "app/grpc/api/Protobuf/*",
     "app/main.py",
 ]
-
