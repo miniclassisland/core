@@ -50,7 +50,7 @@ class GPGKeyManager:
                 logger.warning("密钥损坏，重新生成: %s", self._key_file)
 
         k = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
-        u = pgpy.PGPUID.new("CIMS Server", comment="ClassIsland")
+        u = pgpy.PGPUID.new("MINIClassIsland Server", comment="ClassIsland")
         k.add_uid(
             u,
             usage={KeyFlags.EncryptCommunications},
