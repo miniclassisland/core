@@ -11,13 +11,19 @@ from app.shared.security.crypto import set_cc_state
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import ClientRecord, SystemConfig
 from app.shared.services.pairing import PairingCode
-from app.Protobuf.Client import HandshakeScReq_pb2, ClientRegisterCsReq_pb2
+from app.Protobuf.Client import (
+    HandshakeScReq_pb2,
+    ClientRegisterCsReq_pb2,
+    ClientCommandDeliverScReq_pb2,
+    ConfigUploadScReq_pb2,
+    AuditScReq_pb2,
+)
 from app.Protobuf.Server import (
     HandshakeScRsp_pb2,
     ClientRegisterScRsp_pb2,
-    ClientCommandDeliverCsReq_pb2,
-    ConfigUploadScReq_pb2,
-    AuditScReq_pb2,
+    ClientCommandDeliverScRsp_pb2,
+    ConfigUploadScRsp_pb2,
+    AuditScRsp_pb2,
 )
 from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
 
@@ -247,7 +253,7 @@ async def test_command_deliver_servicer():
 
     # 构造请求迭代器，发送一个 Ping，随后结束流
     async def request_generator():
-        yield ClientCommandDeliverCsReq_pb2.ClientCommandDeliverCsReq(
+        yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
             Type=CommandTypes_pb2.Ping
         )
         # 稍等一会儿
