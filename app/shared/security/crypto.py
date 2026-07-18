@@ -87,3 +87,32 @@ async def get_remaining_recovery_count(user_id: str) -> int:
     """查询指定用户剩余可用的一次性恢复码个数。"""
     rd = get_redis(REDIS_DB_AUTH)
     return await rd.scard(f"{_RECOVERY_KEY_PREFIX}:{user_id}")
+
+
+# ---- CC 攻击防护全局请求状态管理 ----
+
+_is_cc_attack_active: bool = False
+_global_requests: list[float] = []
+_ip_failures: dict[str, list[float]] = {}
+
+
+def get_cc_state() -> bool:
+    """获取当前是否处于 CC 高频攻击保护。"""
+    return _is_cc_attack_active
+
+
+def set_cc_state(state: bool):
+    """设置当前 CC 保护状态。"""
+    global _is_cc_attack_active
+    _is_cc_attack_active = state
+
+
+def get_ip_failures_dict() -> dict:
+    """获取所有记录 IP 失败时间的引用。"""
+    return _ip_failures
+
+
+def get_global_requests() -> list:
+    """获取记录全局请求时间戳的引用。"""
+    return _global_requests
+
