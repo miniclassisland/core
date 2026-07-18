@@ -1,2 +1,2 @@
-"""CIMS 共享服务业务逻辑包。
+"""MINIClassIsland 共享服务业务逻辑包。
 """
