@@ -1,4 +1,4 @@
-"""CIMS 所有共享的 Pydantic 数据输入输出验证 Schema 定义。
+"""MINIClassIsland 所有共享的 Pydantic 数据输入输出验证 Schema 定义。
 
 整合了原 legacy/app/api/schemas/ 下 20 个零散小文件，统一维护管理。
 """
@@ -217,7 +217,7 @@ class ClientManifest(BaseModel):
     ComponentsSource: Dict[str, Any]
     CredentialSource: Dict[str, Any]
     ServerKind: int = 1
-    OrganizationName: str = "CIMS Server"
+    OrganizationName: str = "MINIClassIsland Server"
     CoreVersion: str = "2.0.0.0"
 
     model_config = ConfigDict(populate_by_name=True)
