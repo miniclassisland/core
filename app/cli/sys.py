@@ -205,7 +205,7 @@ def init_system(
     username: Optional[str] = typer.Option(None, help="管理员用户名"),
     email: Optional[str] = typer.Option(None, help="管理员邮箱"),
     password: Optional[str] = typer.Option(None, help="管理员密码"),
-    interactive: bool = typer.Option(True, "--interactive/--no-interactive", help="是否以交互模式运行向导"),
+    interactive: bool = typer.Option(True, help="是否以交互模式运行向导"),
 ):
     """系统首次安装初始化配置引导向导（支持命令行参数直接注入或交互式收集）。"""
     if not interactive and (not db_url or not redis_url or not username or not email or not password or not domain):
