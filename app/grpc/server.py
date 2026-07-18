@@ -28,7 +28,7 @@ from app.shared.utils.tenant import (
     set_search_path,
 )
 from app.shared.utils.logging import get_client_ip_from_grpc
-from app.shared.security.crypto import get_cc_state
+from app.shared.security.middlewares import get_cc_state
 from app.shared.services.pairing import check_approved, create_pairing_request
 
 # Protobuf 协议包导入 (支持编译后的位置：app.Protobuf)
