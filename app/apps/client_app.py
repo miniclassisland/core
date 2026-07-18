@@ -1,25 +1,25 @@
 """客户端 API 应用定义。
-
-挂载面向终端设备的资源下载、Manifest 获取以及引导配置接口。
 """
 
 import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.client.router import router as client_router
-from app.api.client.token_get import router as token_get_router
-from app.api.management_config.routes import router as mc_router
-from app.core.auth.http_middleware import TenantMiddleware
-from app.core.logging import RequestLoggingMiddleware, PORT_TAG_CLIENT
-from app.core.security.middleware import CCProtectMiddleware
-from app.core.security.errors import apply_app_safeguards
+
+from app.client import router as client_router
+from app.client import token_get_router
+from app.shared.security.middlewares import TenantMiddleware, CCProtectMiddleware
+from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_CLIENT
 from .lifespan import app_lifespan
 
 logger = logging.getLogger(__name__)
 
-# 客户端 App 实例（绑定全局生命周期）
-client_app = FastAPI(title="CIMS 客户端 API", version="0.2.0", lifespan=app_lifespan)
+# 客户端 App 实例（绑定生命周期钩子）
+client_app = FastAPI(
+    title="MINIClassIsland 客户端 API",
+    version="0.2.0",
+    lifespan=app_lifespan,
+)
 
 # CORS 中间件（允许前端跨域获取资源）
 client_app.add_middleware(
@@ -30,19 +30,17 @@ client_app.add_middleware(
     allow_headers=["*"],
 )
 
+# 多租户子域名解析与请求日志安全中间件
 client_app.add_middleware(TenantMiddleware)
 client_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_CLIENT)
 client_app.add_middleware(CCProtectMiddleware)
 
-apply_app_safeguards(client_app)
-
-# 挂载业务路由
+# 挂载客户端业务及引导向导路由
 client_app.include_router(client_router, prefix="/api", tags=["Client"])
-client_app.include_router(mc_router, prefix="/api", tags=["Guide"])
 client_app.include_router(token_get_router, tags=["TokenGet"])
 
 
 @client_app.get("/")
 async def root():
     """终端 API 状态检测。"""
-    return {"message": "CIMS Backend is running"}
+    return {"message": "MINIClassIsland Backend is running"}
