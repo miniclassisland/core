@@ -297,3 +297,16 @@ class RolePermission(Base):
     )
     role_code: Mapped[str] = mapped_column(String(32), index=True)
     permission_code: Mapped[str] = mapped_column(String(64))
+
+
+# 资源类型到数据库模型的映射表
+MODEL_MAP = {
+    "ClassPlan": CPFile,
+    "TimeLayout": TLFile,
+    "Subjects": SubFile,
+    "Policy": PolicyFile,
+    "DefaultSettings": SettingsFile,
+    "Components": ComponentsFile,
+    "Credentials": CredentialsFile,
+}
+
