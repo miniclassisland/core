@@ -1,2 +1,2 @@
-"""CIMS 共享 Schema 包。
+"""MINIClassIsland 共享 Schema 包。
 """
