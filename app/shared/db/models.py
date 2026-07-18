@@ -13,7 +13,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
-    """CIMS 所有数据库模型的共有基类。"""
+    """MINIClassIsland 所有数据库模型的共有基类。"""
     pass
 
 
