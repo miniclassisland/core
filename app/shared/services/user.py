@@ -7,7 +7,7 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, tuple
+from typing import Optional, Tuple
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
