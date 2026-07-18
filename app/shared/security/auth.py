@@ -195,3 +195,62 @@ def require_permission(*perms: str):
         return user_id
 
     return _checker
+
+
+# ---- 资源访问令牌 (Resource Token) 生命周期管理 ----
+
+_RES_TOKEN_LENGTH = 64
+_RES_DEFAULT_TTL = 300
+_RES_DEFAULT_MAX_USES = 1
+
+
+async def create_token(
+    tenant_id: str,
+    resource_type: str,
+    name: str,
+    *,
+    ttl: int = _RES_DEFAULT_TTL,
+    max_uses: int = _RES_DEFAULT_MAX_USES,
+    client_ip: str = "",
+) -> str:
+    """存储资源访问令牌及关联的元数据。"""
+    rd = get_redis()
+    token = secrets.token_urlsafe(_RES_TOKEN_LENGTH)
+    key = f"token:{token}"
+
+    await rd.hset(
+        key,
+        mapping={
+            "tenant_id": tenant_id,
+            "resource_type": resource_type,
+            "name": name,
+            "remaining_uses": str(max_uses),
+            "client_ip": client_ip,
+        },
+    )
+    await rd.expire(key, ttl)
+    return token
+
+
+async def resolve_token(token: str) -> Optional[tuple[str, str, str, str]]:
+    """将令牌字符串转换为元数据，并递减剩余可用次数。"""
+    rd = get_redis()
+    key = f"token:{token}"
+    data = await rd.hgetall(key)
+
+    if not data:
+        return None
+
+    remaining = int(data["remaining_uses"]) - 1
+    if remaining <= 0:
+        await rd.delete(key)
+    else:
+        await rd.hset(key, "remaining_uses", str(remaining))
+
+    return (
+        data["tenant_id"],
+        data["resource_type"],
+        data["name"],
+        data.get("client_ip", ""),
+    )
+
