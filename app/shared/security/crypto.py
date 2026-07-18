@@ -1,4 +1,4 @@
-"""CIMS 密码学与安全服务。
+"""MINIClassIsland 密码学与安全服务。
 
 包含 Argon2id 密码哈希、TOTP (pyotp) 生成及验证，以及 Redis 2FA 恢复码管理器。
 """
@@ -47,7 +47,7 @@ def generate_totp_secret() -> str:
 
 def get_totp_uri(secret: str, email: str) -> str:
     """构建 otpauth 协议 URI，用于客户端扫码绑定。"""
-    return pyotp.totp.TOTP(secret).provisioning_uri(name=email, issuer_name="CIMS")
+    return pyotp.totp.TOTP(secret).provisioning_uri(name=email, issuer_name="MINIClassIsland")
 
 
 def verify_totp(secret: str, code: str) -> bool:
