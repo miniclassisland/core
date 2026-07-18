@@ -1,4 +1,4 @@
-"""CIMS 客户端设备配对与注册管理服务。
+"""MINIClassIsland 客户端设备配对与注册管理服务。
 """
 
 import secrets
