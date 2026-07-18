@@ -19,9 +19,12 @@ logger = logging.getLogger(__name__)
 
 # ---- 1. CC防护限流状态与检查 ----
 
-_ip_failures: Dict[str, Tuple[int, float]] = {}  # ip -> (count, last_failure_time)
-_global_requests: list[float] = []
-_cc_active: bool = False
+from app.shared.security.crypto import (
+    get_cc_state,
+    set_cc_state,
+    get_ip_failures_dict,
+    get_global_requests,
+)
 
 IP_FAILURE_LIMIT = 20
 IP_BLOCK_DURATION = 300
@@ -30,15 +33,23 @@ GLOBAL_CC_WINDOW = 1.0
 
 
 def check_ip_blocked(ip: str) -> bool:
-    if ip not in _ip_failures:
+    ip_failures = get_ip_failures_dict()
+    if ip not in ip_failures:
         return False
-    count, last_time = _ip_failures[ip]
+    fails = ip_failures[ip]
+    if isinstance(fails, list):
+        now = time.time()
+        while fails and fails[0] < now - IP_BLOCK_DURATION:
+            fails.pop(0)
+        return len(fails) >= IP_FAILURE_LIMIT
+    
+    count, last_time = fails
     if count >= IP_FAILURE_LIMIT:
         if time.time() - last_time < IP_BLOCK_DURATION:
             return True
         else:
             try:
-                del _ip_failures[ip]
+                del ip_failures[ip]
             except KeyError:
                 pass
     return False
@@ -46,27 +57,29 @@ def check_ip_blocked(ip: str) -> bool:
 
 def record_ip_failure(ip: str) -> None:
     now = time.time()
-    if ip not in _ip_failures:
-        _ip_failures[ip] = (1, now)
+    ip_failures = get_ip_failures_dict()
+    if ip not in ip_failures:
+        ip_failures[ip] = [now]
     else:
-        count, _ = _ip_failures[ip]
-        _ip_failures[ip] = (count + 1, now)
+        fails = ip_failures[ip]
+        if isinstance(fails, list):
+            fails.append(now)
+        else:
+            count, _ = fails
+            ip_failures[ip] = (count + 1, now)
 
 
 def monitor_global_frequency() -> None:
-    global _cc_active
     now = time.time()
-    _global_requests.append(now)
-    while _global_requests and _global_requests[0] < now - GLOBAL_CC_WINDOW:
-        _global_requests.pop(0)
-    if len(_global_requests) > GLOBAL_CC_LIMIT:
-        _cc_active = True
+    global_reqs = get_global_requests()
+    global_reqs.append(now)
+    while global_reqs and global_reqs[0] < now - GLOBAL_CC_WINDOW:
+        global_reqs.pop(0)
+    if len(global_reqs) > GLOBAL_CC_LIMIT:
+        set_cc_state(True)
     else:
-        _cc_active = False
+        set_cc_state(False)
 
-
-def get_cc_state() -> bool:
-    return _cc_active
 
 
 class CCProtectMiddleware(BaseHTTPMiddleware):
