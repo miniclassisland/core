@@ -229,3 +229,44 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
         finally:
             schema_ctx.reset(s_tok)
             tenant_ctx.reset(t_tok)
+
+
+class TenantMiddleware(BaseHTTPMiddleware):
+    """基于二级域名 Host 解析并在协程上下文中挂载租户隔离环境的客户端专属中间件。"""
+
+    async def dispatch(
+        self, request: Request, call_next: RequestResponseEndpoint
+    ) -> Response:
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        path = request.url.path
+        if path in {"/", "/get"}:
+            return await call_next(request)
+
+        from app.shared.utils.tenant import extract_slug_from_host, resolve_account
+        slug = extract_slug_from_host(request.headers.get("host", ""))
+        if not slug:
+            return JSONResponse(
+                status_code=403,
+                content={"code": "ERR_TENANT_NO_ACCESS", "msg": "未识别出租户"},
+            )
+
+        from app.shared.db.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            account = await resolve_account(slug, db)
+        if not account:
+            return JSONResponse(
+                status_code=403,
+                content={"code": "ERR_RESOURCE_LOCKED", "msg": "服务不可用"},
+            )
+
+        t_tok = tenant_ctx.set(account.id)
+        s_tok = schema_ctx.set(f"tenant_{slug}")
+        try:
+            request.state.tenant_id = account.id
+            request.state.tenant_slug = slug
+            return await call_next(request)
+        finally:
+            schema_ctx.reset(s_tok)
+            tenant_ctx.reset(t_tok)
+
