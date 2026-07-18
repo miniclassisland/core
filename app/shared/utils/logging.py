@@ -1,4 +1,4 @@
-"""CIMS 统一日志与客户端 IP 提取系统。
+"""MINIClassIsland 统一日志与客户端 IP 提取系统。
 
 接管 FastAPI / uvicorn / gRPC 日志流，提供统一格式化和反代场景下的客户端 IP 解析。
 """
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     import grpc
 
 # ---- 日志配置常量 ----
-_LOG_DIR = Path(".cims") / "logs"
+_LOG_DIR = Path(".miniclassisland") / "logs"
 _LOG_FORMAT = "%(asctime)s.%(msecs)03d | %(levelname)-5s | %(port_tag)s | %(name)-30s | %(message)s"
 _LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -148,7 +148,7 @@ def setup_logging(*, level: int = logging.INFO) -> None:
 
     # 文件输出
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    log_file = _LOG_DIR / f"cims-{today}.log"
+    log_file = _LOG_DIR / f"miniclassisland-{today}.log"
     file_handler = TimedRotatingFileHandler(
         filename=str(log_file),
         when="midnight",
@@ -182,7 +182,7 @@ def setup_logging(*, level: int = logging.INFO) -> None:
 
 def get_port_logger(tag: str) -> logging.Logger:
     """获取打有特定端口标签的 Logger。"""
-    name = f"cims.{tag.lower()}"
+    name = f"miniclassisland.{tag.lower()}"
     logger = logging.getLogger(name)
     if not any(isinstance(f, _PortTagFilter) for f in logger.filters):
         logger.addFilter(_PortTagFilter(tag))
