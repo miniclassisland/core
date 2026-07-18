@@ -135,6 +135,17 @@ def toggle_startup():
 
 # ---- 3. 系统状态与日志监控 (Status and Monit) ----
 
+@sys_app.command("pid")
+def show_pid():
+    """查看正在运行的后台守护进程的 PID。"""
+    from app.shared.utils.pid import PID
+    pid = PID.read()
+    if pid is None:
+        print("not running", file=sys.stderr)
+    else:
+        print(f"MINIClassIsland Daemon is running with PID: {pid}")
+
+
 @sys_app.command("status")
 def get_status():
     """检测并输出当前系统的配置初始化状态。"""
