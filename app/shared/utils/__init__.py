@@ -1,2 +1,2 @@
-"""CIMS 共享基础设施工具包。
+"""MINIClassIsland 共享基础设施工具包。
 """
