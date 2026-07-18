@@ -25,14 +25,14 @@ def build_package():
 
 @grpc_app.command("generate")
 def generate_grpc():
-    """编译 api/Protobuf 目录下的所有 .proto 文件到 app/grpc 目录下。"""
+    """编译 Protobuf 目录下的所有 .proto 文件到 app/grpc 目录下。"""
     import grpc_tools.protoc
 
-    proto_dir = Path("api/Protobuf")
+    proto_dir = Path("Protobuf")
     # 查找所有的 .proto 文件
     proto_files = list(proto_dir.rglob("*.proto"))
     if not proto_files:
-        print("No proto files found under api/Protobuf", file=sys.stderr)
+        print("No proto files found under Protobuf", file=sys.stderr)
         raise typer.Exit(code=1)
 
     # 目标生成目录为 app/grpc
@@ -69,7 +69,7 @@ def generate_grpc():
     # 准备 protoc 编译命令参数
     args = [
         "grpc_tools.protoc",
-        "-Iapi/",
+        "-I.",
         f"--python_out={out_dir}",
         f"--grpc_python_out={out_dir}",
         f"--pyi_out={out_dir}",
@@ -78,9 +78,9 @@ def generate_grpc():
     proto_args = []
     for p in proto_files:
         parts = p.parts
-        if "api" in parts:
-            idx = parts.index("api")
-            proto_args.append(os.path.join(*parts[idx+1:]))
+        if "Protobuf" in parts:
+            idx = parts.index("Protobuf")
+            proto_args.append(os.path.join(*parts[idx:]))
         else:
             proto_args.append(str(p))
             
