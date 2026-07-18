@@ -305,3 +305,29 @@ def verify_oobe_token(token: str) -> bool:
     return bool(OOBE_TOKEN) and token == OOBE_TOKEN
 
 
+# ---- 2FA 临时令牌管理 (2FA Temp Token) ----
+
+_TEMP_2FA_PREFIX = "2fa_pending"
+_TEMP_2FA_TTL = 300
+
+
+async def create_2fa_temp_token(user_id: str) -> str:
+    """创建临时令牌用于 2FA 验证流程。"""
+    rd = get_redis(REDIS_DB_AUTH)
+    token = secrets.token_urlsafe(32)
+    await rd.setex(f"{_TEMP_2FA_PREFIX}:{token}", _TEMP_2FA_TTL, user_id)
+    return token
+
+
+async def pop_2fa_temp_token(token: str) -> str:
+    """提取并销毁临时令牌，返回 user_id。"""
+    rd = get_redis(REDIS_DB_AUTH)
+    key = f"{_TEMP_2FA_PREFIX}:{token}"
+    uid = await rd.get(key)
+    if not uid:
+        raise HTTPException(status_code=401, detail="临时令牌无效或已过期")
+    await rd.delete(key)
+    return uid
+
+
+
