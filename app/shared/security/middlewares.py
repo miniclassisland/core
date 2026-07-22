@@ -172,6 +172,7 @@ async def _check_legacy_token(token: str, path: str = "") -> bool:
 # ---- 3. Multi-Tenant Context Middleware ----
 
 _ACCOUNT_PATH_RE = re.compile(r"^/accounts?/([^/]+)(?:/|$)")
+_ACCOUNT_RESERVED_SUBPATHS = {"list", "search", "apply", "availability"}
 
 
 class AccountContextMiddleware(BaseHTTPMiddleware):
@@ -193,6 +194,8 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         account_id = match.group(1)
+        if account_id in _ACCOUNT_RESERVED_SUBPATHS:
+            return await call_next(request)
 
         from app.shared.db.session import AsyncSessionLocal
         from app.shared.db.models import Account
