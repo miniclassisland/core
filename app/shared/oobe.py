@@ -12,6 +12,13 @@ ERR_SYSTEM_OOBE = "ERR_SYSTEM_OOBE"
 def _create_stub() -> FastAPI:
     """Generate stub application returning 503 Service Unavailable."""
     app = FastAPI(title="MINIClassIsland (OOBE Stub)", docs_url=None, redoc_url=None)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
+    )
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
     async def _catch_all(request: Request, path: str):
