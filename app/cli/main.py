@@ -1,5 +1,6 @@
 import typer
 
+from app import __version__
 from app.cli.account import account_app
 from app.cli.cd import cd_app
 from app.cli.ci import ci_app
@@ -26,7 +27,7 @@ cli.add_typer(cd_app, name="cd")
 def about():
     """About MINIClassIsland."""
     print("MINI ClassIsland Core Management Backend System")
-    print("Version: 0.1.0")
+    print(f"Version: {__version__}")
 
 
 def main():
