@@ -1,7 +1,7 @@
 [project]
 name = "miniclassisland-core"
 version = "0.1.0"
-description = "MINIClassIsland Management Server Backend"
+description = "MINIClassIsland Core"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
