@@ -36,7 +36,7 @@ async def start_servers():
         c_app, m_app, a_app = client_app, management_app, admin_app
     else:
         from app.shared.security.auth import generate_oobe_codes
-        from app.shared.oobe_app import oobe_stub_app, oobe_admin_app
+        from app.shared.oobe import oobe_stub_app, oobe_admin_app
 
         generate_oobe_codes()
         c_app, m_app, a_app = oobe_stub_app, oobe_stub_app, oobe_admin_app
