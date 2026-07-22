@@ -16,3 +16,6 @@ router.include_router(totp_router)
 router.include_router(settings_router)
 router.include_router(bulk_router)
 router.include_router(account_router)
+
+from .app import admin_app
+
