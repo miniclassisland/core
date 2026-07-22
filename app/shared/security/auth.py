@@ -300,6 +300,12 @@ def generate_oobe_codes() -> None:
     logger.critical("=================================================")
 
 
+def get_oobe_token() -> str:
+    """Get currently issued OOBE setup token dynamically."""
+    global OOBE_TOKEN
+    return OOBE_TOKEN
+
+
 def verify_oobe_passcode(code: str) -> bool:
     """Verify 8-character alphanumeric passcode."""
     global OOBE_PASSCODE

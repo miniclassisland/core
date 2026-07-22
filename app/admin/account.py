@@ -12,7 +12,7 @@ from app.shared.security.auth import (
     require_role,
     verify_oobe_passcode,
     verify_oobe_token,
-    OOBE_TOKEN,
+    get_oobe_token,
 )
 from app.shared.services.user import list_pending_users, reject_user, approve_user
 from app.shared.utils.oobe import write_config_file, init_database
@@ -38,36 +38,24 @@ def _to_out(user) -> UserOut:
 # ---- 1. Account / Tenant Administration ----
 
 @router.get("/account", response_model=list[AccountOut], tags=["Account"])
-async def list_all_accounts(
+async def list_accounts(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """List all tenant accounts (Super Admin only)."""
-    rows = (await db.execute(select(Account))).scalars().all()
-    return [
-        AccountOut(
-            id=a.id,
-            name=a.name,
-            slug=a.slug,
-            api_key=a.api_key,
-            is_active=a.is_active,
-            created_at=str(a.created_at),
-        )
-        for a in rows
-    ]
+    """List all accounts across system."""
+    res = await db.execute(select(Account))
+    return res.scalars().all()
 
 
-# ---- 2. User Registration Approvals ----
+# ---- 2. Pending Approvals ----
 
-@router.get("/user/pending/list", response_model=list[UserOut], tags=["Pending"])
-async def get_pending_users(
-    offset: int = 0,
-    limit: int = 50,
+@router.get("/user/pending", response_model=list[UserOut], tags=["Pending"])
+async def get_pending(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """List all pending registration user applications."""
-    users = await list_pending_users(db, offset=offset, limit=limit)
+    """List all pending user registration applications."""
+    users = await list_pending_users(db)
     return [_to_out(u) for u in users]
 
 
@@ -104,7 +92,7 @@ async def verify_passcode(passcode: str = Form(...)):
     """Verify pairing passcode and issue elevated execution token."""
     if not verify_oobe_passcode(passcode):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid passcode or expired")
-    return {"token": OOBE_TOKEN}
+    return {"token": get_oobe_token()}
 
 
 @router.post("/oobe/configure", tags=["OOBE"])
