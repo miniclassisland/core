@@ -27,6 +27,17 @@ class MINIClassIslandSettings(BaseSettings):
     database_url: str = ""
     redis_url: str = ""
 
+    # PostgreSQL environment variables fallback
+    pg_user: str = "postgres"
+    pg_pwd: str = "password"
+    pg_addr: str = "localhost:5432"
+    pg_db: str = "miniclassisland"
+
+    # Redis environment variables fallback
+    redis_pwd: str = ""
+    redis_addr: str = "localhost:6379"
+    redis_db: int = 0
+
     # Multi-tenant base domain
     miniclassisland_base_domain: str = "miniclassisland.com"
 
@@ -64,8 +75,11 @@ def _load_file_config() -> dict:
 _file_cfg = _load_file_config()
 
 # Module-level global constants
-DATABASE_URL: str = _file_cfg.get("database_url") or _settings.database_url
-REDIS_URL: str = _settings.redis_url
+_default_db_url = f"postgresql+psycopg://{_settings.pg_user}:{_settings.pg_pwd}@{_settings.pg_addr}/{_settings.pg_db}"
+_default_redis_url = f"redis://{f':{_settings.redis_pwd}@' if _settings.redis_pwd else ''}{_settings.redis_addr}/{_settings.redis_db}"
+
+DATABASE_URL: str = _file_cfg.get("database_url") or _settings.database_url or _default_db_url
+REDIS_URL: str = _file_cfg.get("redis_url") or _settings.redis_url or _default_redis_url
 
 # Redis logical database IDs
 REDIS_DB_AUTH: int = 0
