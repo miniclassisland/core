@@ -114,7 +114,8 @@ class _ColorFormatter(logging.Formatter):
         tag_color = self._COLORS.get(tag, self._RESET)
         level_color = self._LEVEL_COLORS.get(record.levelname, self._RESET)
 
-        original_tag = record.port_tag
+        original_has_tag = hasattr(record, "port_tag")
+        original_tag = getattr(record, "port_tag", None)
         original_levelname = record.levelname
 
         padded_tag = f"{tag:<7}"
@@ -123,7 +124,10 @@ class _ColorFormatter(logging.Formatter):
 
         result = super().format(record)
 
-        record.port_tag = original_tag
+        if original_has_tag:
+            record.port_tag = original_tag
+        else:
+            delattr(record, "port_tag")
         record.levelname = original_levelname
         return result
 
