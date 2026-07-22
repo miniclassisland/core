@@ -3,6 +3,18 @@ import os
 import pytest
 import pytest_asyncio
 
+# Force tests to use dedicated test database miniclassisland_test to protect runtime database
+TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql+psycopg://postgres:password@localhost:5432/miniclassisland_test")
+os.environ["DATABASE_URL"] = TEST_DB_URL
+
+import app.shared.utils.config as cfg
+from app.shared.db import session as db_session
+cfg.DATABASE_URL = TEST_DB_URL
+from sqlalchemy.ext.asyncio import create_async_engine
+test_engine = create_async_engine(TEST_DB_URL, echo=False)
+db_session.engine = test_engine
+db_session.AsyncSessionLocal.configure(bind=test_engine)
+
 # Remove tests directory from sys.path to avoid shadowing third-party modules like grpc
 paths_to_remove = []
 for path in sys.path:
@@ -20,12 +32,12 @@ for path in paths_to_remove:
 
 @pytest_asyncio.fixture(autouse=True)
 async def db_cleaner():
-    """Clean all database tables before each test to ensure test isolation."""
-    from app.shared.db.session import engine
+    """Clean all database tables in test database before each test to ensure test isolation."""
     from app.shared.db.models import Base
     from sqlalchemy import text
 
-    async with engine.begin() as conn:
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(text(f'TRUNCATE TABLE "{table.name}" CASCADE;'))
 
