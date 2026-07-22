@@ -28,7 +28,7 @@ def create_user_cmd(
     username: str = typer.Argument(..., help="用户名"),
     email: str = typer.Argument(..., help="用户邮箱"),
     password: str = typer.Argument(..., help="用户密码"),
-    role: str = typer.Option("normal", help="用户初始角色"),
+    role: str = typer.Option("normal", "--role", help="用户初始角色"),
 ):
     """创建新的用户账号。"""
     async def _run():
