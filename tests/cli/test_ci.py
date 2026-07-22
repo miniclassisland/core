@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 from typer.testing import CliRunner
 from app.cli.main import cli
 
-runner = CliRunner(mix_stderr=False)
+runner = CliRunner()
 
 
 def test_build_success():
@@ -16,7 +16,7 @@ def test_build_success():
         mock_run.return_value = MagicMock(returncode=0, stdout="Mocked build stdout", stderr="")
         res = runner.invoke(cli, ["ci", "build"])
         assert res.exit_code == 0
-        assert "built successfully" in res.stdout
+        assert "built successfully" in res.output
 
 
 def test_build_failure():
@@ -25,7 +25,7 @@ def test_build_failure():
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="Mocked error message")
         res = runner.invoke(cli, ["ci", "build"])
         assert res.exit_code == 1
-        assert "Build failed" in res.stderr
+        assert "Build failed" in res.output
 
 
 def test_generate_grpc_no_protos():
@@ -34,7 +34,7 @@ def test_generate_grpc_no_protos():
         mock_rglob.return_value = []
         res = runner.invoke(cli, ["ci", "grpc", "generate"])
         assert res.exit_code == 1
-        assert "No proto files found" in res.stderr
+        assert "No proto files found" in res.output
 
 
 def test_generate_grpc_compilation_failure():
@@ -44,7 +44,7 @@ def test_generate_grpc_compilation_failure():
         mock_protoc.return_value = -1  # 编译出错
         res = runner.invoke(cli, ["ci", "grpc", "generate"])
         assert res.exit_code == 255  # -1 as exit code is 255 in Typer
-        assert "Failed to compile" in res.stderr
+        assert "Failed to compile" in res.output
 
 
 def test_generate_grpc_success():
