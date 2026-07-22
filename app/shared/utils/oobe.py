@@ -42,13 +42,16 @@ def write_config_file(config: dict) -> None:
 
 async def init_database(config: dict) -> None:
     """Connect to database and execute complete initialization."""
-    # Dynamically inject DATABASE_URL into config module
+    # Dynamically inject DATABASE_URL into config module and update DB session factory
     import app.shared.utils.config as cfg
+    from app.shared.db import session as db_session
     cfg.DATABASE_URL = config["db_url"]
     
-    # Re-create engine
+    # Re-create engine and update session factory binding
     from sqlalchemy.ext.asyncio import create_async_engine
     new_engine = create_async_engine(config["db_url"], echo=False)
+    db_session.engine = new_engine
+    db_session.AsyncSessionLocal.configure(bind=new_engine)
 
     async with new_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
