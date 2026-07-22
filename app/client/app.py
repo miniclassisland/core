@@ -21,7 +21,12 @@ client_app = FastAPI(
     lifespan=app_lifespan,
 )
 
-# CORS middleware
+# Multi-tenant subdomain resolution, logging, and security middleware
+client_app.add_middleware(TenantMiddleware)
+client_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_CLIENT)
+client_app.add_middleware(CCProtectMiddleware)
+
+# CORS middleware (MUST be added LAST to be the outermost middleware handling all early 401/403/429 error responses)
 client_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -29,11 +34,6 @@ client_app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Multi-tenant subdomain resolution, logging, and security middleware
-client_app.add_middleware(TenantMiddleware)
-client_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_CLIENT)
-client_app.add_middleware(CCProtectMiddleware)
 
 # Mount Client router and token_get router
 client_app.include_router(client_router, prefix="/api", tags=["Client"])

@@ -22,15 +22,6 @@ management_app = FastAPI(
     redirect_slashes=False,
 )
 
-# CORS middleware
-management_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Account multi-tenant context middleware (verifies AccountMember membership)
 management_app.add_middleware(AccountContextMiddleware, require_membership=True)
 
@@ -38,6 +29,15 @@ management_app.add_middleware(AccountContextMiddleware, require_membership=True)
 management_app.add_middleware(AdminAuthMiddleware)
 management_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_MGMT)
 management_app.add_middleware(CCProtectMiddleware)
+
+# CORS middleware (MUST be added LAST to be the outermost middleware handling all early 401/403/429 error responses)
+management_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Mount Management router
 management_app.include_router(mgr_router)

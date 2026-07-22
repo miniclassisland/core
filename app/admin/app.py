@@ -18,7 +18,12 @@ admin_app = FastAPI(
     redirect_slashes=False,
 )
 
-# CORS middleware
+# Authentication, logging, and security middleware
+admin_app.add_middleware(AdminAuthMiddleware)
+admin_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_ADMIN)
+admin_app.add_middleware(CCProtectMiddleware)
+
+# CORS middleware (MUST be added LAST to be the outermost middleware handling all early 401/403/429 error responses)
 admin_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -26,11 +31,6 @@ admin_app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Authentication, logging, and security middleware
-admin_app.add_middleware(AdminAuthMiddleware)
-admin_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_ADMIN)
-admin_app.add_middleware(CCProtectMiddleware)
 
 # Mount Admin router
 admin_app.include_router(admin_router)
