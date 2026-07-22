@@ -15,6 +15,7 @@ from app.shared.schemas.schemas import (
 from app.shared.security.auth import require_role
 from app.shared.security.crypto import hash_password, verify_password
 from app.shared.services.user import list_users, get_user_by_id, update_user, register_user
+from app.shared.literals import MSG_USER_NOT_FOUND
 
 router = APIRouter(prefix="/user", tags=["User"])
 _sa = require_role(100)
@@ -92,7 +93,7 @@ async def get_user(
     """Get user information by ID."""
     user = await get_user_by_id(user_id, db)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     return _to_out(user)
 
 
@@ -106,7 +107,7 @@ async def update_user_info(
     """Update user information."""
     updated = await update_user(user_id, db, **body.model_dump(exclude_none=True))
     if not updated:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     return _to_out(updated)
 
 
@@ -121,7 +122,7 @@ async def delete_user(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     await db.delete(user)
     await db.commit()
     return {"status": "deleted"}
@@ -139,7 +140,7 @@ async def rename_user(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     user.username = body.name
     await db.commit()
     return {"status": "renamed"}
@@ -157,7 +158,7 @@ async def reset_password(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
     return {"status": "password_reset"}
@@ -175,7 +176,7 @@ async def change_password(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     if not verify_password(body.old_password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password")
     user.hashed_password = hash_password(body.new_password)

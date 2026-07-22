@@ -6,22 +6,24 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from app.shared.literals import (
+    ALLOWED_SETTINGS_KEYS as _ALLOWED_SETTINGS_KEYS,
+    PWD_DIGIT,
+    PWD_LOWER,
+    PWD_UPPER,
+    SCHEMA_SLUG_RE,
+    SCHEMA_USERNAME_RE,
+)
 
 # Username and password validation regex
-_USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,63}$")
-_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,62}[a-z0-9]$")
-_PWD_UPPER = re.compile(r"[A-Z]")
-_PWD_LOWER = re.compile(r"[a-z]")
-_PWD_DIGIT = re.compile(r"[0-9]")
+_USERNAME_RE = SCHEMA_USERNAME_RE
+_SLUG_RE = SCHEMA_SLUG_RE
+_PWD_UPPER = PWD_UPPER
+_PWD_LOWER = PWD_LOWER
+_PWD_DIGIT = PWD_DIGIT
 
 # System settings allowed keys whitelist
-ALLOWED_SETTINGS_KEYS = {
-    "registration_open",
-    "require_approval",
-    "max_accounts_per_user",
-    "default_role",
-    "motd",
-}
+ALLOWED_SETTINGS_KEYS = _ALLOWED_SETTINGS_KEYS
 
 
 # ---- 1. Generic Response Structures ----

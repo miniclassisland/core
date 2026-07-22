@@ -6,6 +6,7 @@ from app.shared.db.session import get_db
 from app.shared.db.models import User
 from app.shared.security.auth import require_role
 from app.shared.security.crypto import generate_totp_secret
+from app.shared.literals import MSG_USER_NOT_FOUND
 
 router = APIRouter(prefix="/user", tags=["2FA"])
 _sa = require_role(100)
@@ -22,7 +23,7 @@ async def admin_enable_2fa(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     secret = generate_totp_secret()
     user.totp_secret = secret
     user.totp_enabled = True
@@ -41,7 +42,7 @@ async def admin_disable_2fa(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
@@ -59,7 +60,7 @@ async def admin_reset_2fa(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
     user.totp_secret = generate_totp_secret()
     user.totp_enabled = False
     await db.commit()

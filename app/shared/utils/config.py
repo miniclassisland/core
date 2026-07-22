@@ -8,6 +8,25 @@ import logging
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.shared.literals import (
+    DEFAULT_ADMIN_PORT,
+    DEFAULT_ADMIN_SECRET,
+    DEFAULT_BASE_DOMAIN,
+    DEFAULT_CLIENT_PORT,
+    DEFAULT_CONFIG_DIR,
+    DEFAULT_CONFIG_FILE,
+    DEFAULT_GRPC_PORT,
+    DEFAULT_KEY_FILE,
+    DEFAULT_MGMT_PORT,
+    DEFAULT_PG_ADDR,
+    DEFAULT_PG_DB,
+    DEFAULT_PG_PWD,
+    DEFAULT_PG_USER,
+    DEFAULT_REDIS_ADDR,
+    DEFAULT_REDIS_DB,
+    PUBLIC_SCHEMA,
+)
+
 logger = logging.getLogger(__name__)
 
 # Project root directory (relative to app/shared/utils/config.py)
@@ -28,35 +47,35 @@ class MINIClassIslandSettings(BaseSettings):
     redis_url: str = ""
 
     # PostgreSQL environment variables fallback
-    pg_user: str = "postgres"
-    pg_pwd: str = "password"
-    pg_addr: str = "localhost:5432"
-    pg_db: str = "miniclassisland"
+    pg_user: str = DEFAULT_PG_USER
+    pg_pwd: str = DEFAULT_PG_PWD
+    pg_addr: str = DEFAULT_PG_ADDR
+    pg_db: str = DEFAULT_PG_DB
 
     # Redis environment variables fallback
     redis_pwd: str = ""
-    redis_addr: str = "localhost:6379"
-    redis_db: int = 0
+    redis_addr: str = DEFAULT_REDIS_ADDR
+    redis_db: int = DEFAULT_REDIS_DB
 
     # Multi-tenant base domain
-    miniclassisland_base_domain: str = "miniclassisland.com"
+    miniclassisland_base_domain: str = DEFAULT_BASE_DOMAIN
 
     # Service port allocations
-    miniclassisland_client_port: int = 27041
-    miniclassisland_management_port: int = 27042
-    miniclassisland_admin_port: int = 27043
-    miniclassisland_grpc_port: int = 27044
+    miniclassisland_client_port: int = DEFAULT_CLIENT_PORT
+    miniclassisland_management_port: int = DEFAULT_MGMT_PORT
+    miniclassisland_admin_port: int = DEFAULT_ADMIN_PORT
+    miniclassisland_grpc_port: int = DEFAULT_GRPC_PORT
 
     # GPG key file and admin secret
-    miniclassisland_key_file: str = "miniclassisland_server.key"
-    miniclassisland_admin_secret: str = "change-me"
+    miniclassisland_key_file: str = DEFAULT_KEY_FILE
+    miniclassisland_admin_secret: str = DEFAULT_ADMIN_SECRET
 
 
 _settings = MINIClassIslandSettings()
 
 # .miniclassisland directory and configuration file path
-CONFIG_DIR = _PROJECT_ROOT / ".miniclassisland"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+CONFIG_DIR = _PROJECT_ROOT / DEFAULT_CONFIG_DIR
+CONFIG_FILE = CONFIG_DIR / DEFAULT_CONFIG_FILE
 
 
 def is_initialized() -> bool:
@@ -88,7 +107,7 @@ REDIS_DB_CACHE: int = 2
 
 # Multi-tenant isolation variables
 BASE_DOMAIN: str = _settings.miniclassisland_base_domain
-DEFAULT_SCHEMA: str = "public"
+DEFAULT_SCHEMA: str = PUBLIC_SCHEMA
 
 # Four port allocation constants
 CLIENT_PORT: int = _settings.miniclassisland_client_port

@@ -13,20 +13,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.utils.config import BASE_DOMAIN, REDIS_DB_CACHE
 from app.shared.utils.redis import get_redis
 from app.shared.db.models import Account
+from app.shared.literals import PUBLIC_SCHEMA, TENANT_ID_KEY, SCHEMA_KEY, SAFE_IDENTIFIER_RE
 
 # Per-request tenant ID context
-tenant_ctx: ContextVar[str] = ContextVar("tenant_id")
+tenant_ctx: ContextVar[str] = ContextVar(TENANT_ID_KEY)
 
 # Per-request database schema namespace context
-schema_ctx: ContextVar[str] = ContextVar("schema", default="public")
+schema_ctx: ContextVar[str] = ContextVar(SCHEMA_KEY, default=PUBLIC_SCHEMA)
 
-_SAFE_ID = re.compile(r"^[a-z0-9_\-]+$")
 ACCOUNT_CACHE_TTL = 600
 
 
 def safe_identifier(name: str) -> str:
     """Validate SQL identifier for safety to prevent SQL injection."""
-    if not _SAFE_ID.match(name):
+    if not SAFE_IDENTIFIER_RE.match(name):
         raise ValueError(f"Unsafe SQL identifier: {name!r}")
     return name
 
@@ -47,8 +47,8 @@ def get_schema() -> str:
 async def set_search_path(session, schema: str | None = None) -> None:
     """Set PostgreSQL search_path on current Session."""
     s = safe_identifier(schema or get_schema())
-    if s != "public":
-        await session.execute(text(f'SET search_path TO "{s}", public'))
+    if s != PUBLIC_SCHEMA:
+        await session.execute(text(f'SET search_path TO "{s}", {PUBLIC_SCHEMA}'))
 
 
 def extract_slug_from_host(host: str) -> Optional[str]:

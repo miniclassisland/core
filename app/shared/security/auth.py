@@ -22,20 +22,29 @@ from app.shared.db.models import (
     RolePermission,
     MemberPermission,
 )
+from app.shared.literals import (
+    DEFAULT_TTL,
+    GRACE_TTL,
+    MSG_PERMISSION_DENIED,
+    MSG_UNAUTHORIZED_ACCESS,
+    MSG_USER_NOT_FOUND,
+    REDIS_AUTH_PREFIX,
+    TOKEN_BYTES,
+)
 
 logger = logging.getLogger(__name__)
 
 # Security token parameters
-_TOKEN_BYTES = 192
-_DEFAULT_TTL = 300
-_GRACE_TTL = 30
+_TOKEN_BYTES = TOKEN_BYTES
+_DEFAULT_TTL = DEFAULT_TTL
+_GRACE_TTL = GRACE_TTL
 
 
 # ---- API Token Lifecycle Management ----
 
 def _token_redis_key(tenant_id: str, token: str) -> str:
     """Construct tenant-isolated Redis token key."""
-    return f"auth:{tenant_id}:{token}" if tenant_id else f"auth::{token}"
+    return f"{REDIS_AUTH_PREFIX}{tenant_id}:{token}" if tenant_id else f"{REDIS_AUTH_PREFIX}:{token}"
 
 
 async def generate_token(

@@ -10,12 +10,13 @@ from sqlalchemy import select, delete as sa_delete
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import PairingCode
 from app.shared.utils.tenant import set_search_path
+from app.shared.literals import PAIRING_CHARSET, PAIRING_CODE_LEN
 
 logger = logging.getLogger(__name__)
 
 # Disambiguated pairing code character set
-_CHARSET = "2346789ABCEFGHJKLMNPRSTWXYZ"
-_CODE_LEN = 8
+_CHARSET = PAIRING_CHARSET
+_CODE_LEN = PAIRING_CODE_LEN
 
 
 def generate_code() -> str:

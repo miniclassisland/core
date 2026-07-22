@@ -20,27 +20,17 @@ from app.shared.db.models import (
 )
 from app.shared.security.crypto import hash_password, verify_password
 from app.shared.security.auth import create_session_token
+from app.shared.literals import DEFAULT_QUOTAS, SLUG_RE, SYSTEM_ROLES, USERNAME_RE
 
 # Regular expression validators
-_USERNAME_RE = re.compile(r"^[a-z0-9_]{3,64}$")
-_SLUG_RE = re.compile(r"^[a-z0-9\-]{3,64}$")
+_USERNAME_RE = USERNAME_RE
+_SLUG_RE = SLUG_RE
 
 # Default account quotas
-_DEFAULT_QUOTAS = [
-    ("max_clients", 50),
-    ("max_bandwidth_mb", 1024),
-    ("feature.ota", 1),
-    ("feature.audit", 1),
-]
+_DEFAULT_QUOTAS = DEFAULT_QUOTAS
 
 # System roles preset data
-_SYSTEM_ROLES = [
-    ("banned", "Banned", -1),
-    ("pending", "Pending Activation", 0),
-    ("normal", "Normal User", 10),
-    ("admin", "Administrator", 90),
-    ("superadmin", "Super Administrator", 100),
-]
+_SYSTEM_ROLES = SYSTEM_ROLES
 
 
 # ---- Format and Reserved Name Validation ----

@@ -10,17 +10,25 @@ from argon2.exceptions import VerifyMismatchError
 
 from app.shared.utils.config import REDIS_DB_AUTH
 from app.shared.utils.redis import get_redis
+from app.shared.literals import (
+    ARGON2_TIME_COST,
+    ARGON2_MEMORY_COST,
+    ARGON2_PARALLELISM,
+    RECOVERY_KEY_PREFIX,
+    RECOVERY_CODE_COUNT,
+    RECOVERY_CODE_LENGTH,
+)
 
 # Argon2id configuration (OWASP recommended parameters)
 _hasher = PasswordHasher(
-    time_cost=3,
-    memory_cost=65536,  # 64MB
-    parallelism=4,
+    time_cost=ARGON2_TIME_COST,
+    memory_cost=ARGON2_MEMORY_COST,  # 64MB
+    parallelism=ARGON2_PARALLELISM,
 )
 
-_RECOVERY_KEY_PREFIX = "recovery_codes"
-_RECOVERY_CODE_COUNT = 8
-_RECOVERY_CODE_LENGTH = 8
+_RECOVERY_KEY_PREFIX = RECOVERY_KEY_PREFIX
+_RECOVERY_CODE_COUNT = RECOVERY_CODE_COUNT
+_RECOVERY_CODE_LENGTH = RECOVERY_CODE_LENGTH
 
 
 # ---- Argon2id Password Hashing ----
