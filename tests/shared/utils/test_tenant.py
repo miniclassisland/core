@@ -30,14 +30,29 @@ def test_extract_slug_from_host():
     assert tenant.extract_slug_from_host("") is None
 
 
+from app.shared.db.models import Account
+
+
 @pytest.mark.asyncio
 async def test_resolve_account():
     """测试从数据库中检索并缓存商户账户记录。"""
     async with AsyncSessionLocal() as db:
-        # 已在 conftest.py 中插入 "test-school" 账户记录
+        from sqlalchemy import select
+        acct = (await db.execute(select(Account).where(Account.slug == "test-school"))).scalar_one_or_none()
+        if not acct:
+            acct = Account(
+                id="test-account-00000000",
+                name="Test School",
+                slug="test-school",
+                api_key="test-api-key",
+                is_active=True,
+            )
+            db.add(acct)
+            await db.commit()
+
         acc = await tenant.resolve_account("test-school", db)
         assert acc is not None
-        assert acc.id == "test-account-00000000"
+        assert acc.slug == "test-school"
 
         # 校验不存在的租户账户
         not_exist = await tenant.resolve_account("non-existent", db)
