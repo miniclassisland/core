@@ -109,7 +109,7 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
 
 # ---- 2. Admin & Management Authentication Interceptor Middleware ----
 
-_EXEMPT = {"/", "/user/auth", "/user/apply"}
+_EXEMPT = {"/", "/get", "/user/auth", "/user/apply"}
 _EXEMPT_PREFIXES = ("/user/availability/",)
 
 

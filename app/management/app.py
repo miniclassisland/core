@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.management import router as mgr_router
+from app.client import token_get_router
 from app.shared.security.middlewares import (
     AdminAuthMiddleware,
     AccountContextMiddleware,
@@ -39,8 +40,9 @@ management_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Management router
+# Mount Management router and token_get router
 management_app.include_router(mgr_router)
+management_app.include_router(token_get_router, tags=["TokenGet"])
 
 
 @management_app.get("/")
