@@ -65,36 +65,42 @@ def extract_slug_from_host(host: str) -> Optional[str]:
 
 async def get_cached_account(slug: str) -> Optional[Account]:
     """从 Redis 缓存中读取并重构轻量账户实体。"""
-    rd = get_redis(REDIS_DB_CACHE)
-    cached = await rd.get(f"account:{slug}")
-    if not cached:
+    try:
+        rd = get_redis(REDIS_DB_CACHE)
+        cached = await rd.get(f"account:{slug}")
+        if not cached:
+            return None
+        data = json.loads(cached)
+        return Account(
+            id=data["id"],
+            name=data["name"],
+            slug=data["slug"],
+            api_key=data["api_key"],
+            is_active=data["is_active"],
+        )
+    except Exception:
         return None
-    data = json.loads(cached)
-    return Account(
-        id=data["id"],
-        name=data["name"],
-        slug=data["slug"],
-        api_key=data["api_key"],
-        is_active=data["is_active"],
-    )
 
 
 async def set_cached_account(slug: str, account: Account) -> None:
     """将租户账户记录序列化并缓存入 Redis。"""
-    rd = get_redis(REDIS_DB_CACHE)
-    await rd.set(
-        f"account:{slug}",
-        json.dumps(
-            {
-                "id": account.id,
-                "name": account.name,
-                "slug": account.slug,
-                "api_key": account.api_key,
-                "is_active": account.is_active,
-            }
-        ),
-        ex=ACCOUNT_CACHE_TTL,
-    )
+    try:
+        rd = get_redis(REDIS_DB_CACHE)
+        await rd.set(
+            f"account:{slug}",
+            json.dumps(
+                {
+                    "id": account.id,
+                    "name": account.name,
+                    "slug": account.slug,
+                    "api_key": account.api_key,
+                    "is_active": account.is_active,
+                }
+            ),
+            ex=ACCOUNT_CACHE_TTL,
+        )
+    except Exception:
+        pass
 
 
 async def resolve_account(slug: str, db: AsyncSession) -> Optional[Account]:
