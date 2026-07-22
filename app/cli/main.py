@@ -7,13 +7,13 @@ from app.cli.client import client_app
 from app.cli.sys import sys_app
 from app.cli.user import user_app
 
-# 定义主 Typer 应用
+# Define main Typer application
 cli = typer.Typer(
-    help="MINIClassIsland Core CLI 命令行工具",
+    help="MINIClassIsland Core CLI Tool",
     no_args_is_help=True,
 )
 
-# 注册子命令应用
+# Register sub-command apps
 cli.add_typer(sys_app, name="sys")
 cli.add_typer(account_app, name="account")
 cli.add_typer(user_app, name="user")
@@ -24,13 +24,13 @@ cli.add_typer(cd_app, name="cd")
 
 @cli.command("about")
 def about():
-    """关于 MINIClassIsland。"""
+    """About MINIClassIsland."""
     print("MINI ClassIsland Core Management Backend System")
     print("Version: 0.1.0")
 
 
 def main():
-    """CLI 入口点。"""
+    """CLI entrypoint."""
     cli()
 
 

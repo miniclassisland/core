@@ -1,4 +1,4 @@
-"""进程 PID 文件管理器。
+"""Process PID file manager.
 """
 
 import os
@@ -7,21 +7,21 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# PID 默认路径
+# Default PID path
 _PID = Path(".miniclassisland") / "miniclassisland.pid"
 
 
 class PID:
     @staticmethod
     def write() -> None:
-        """写入当前进程的 PID 到文件。"""
+        """Write current process PID to file."""
         _PID.parent.mkdir(parents=True, exist_ok=True)
         _PID.write_text(str(os.getpid()))
-        logger.info(f"PID 已写入: {os.getpid()}")
+        logger.info(f"PID written: {os.getpid()}")
 
     @staticmethod
     def read() -> int | None:
-        """读取文件中的 PID。"""
+        """Read PID from file."""
         if not _PID.exists():
             return None
         try:
@@ -31,10 +31,10 @@ class PID:
 
     @staticmethod
     def remove() -> None:
-        """删除 PID 文件。"""
+        """Remove PID file."""
         try:
             _pid = _PID.read_text().strip()
             _PID.unlink(missing_ok=True)
-            logger.info(f"PID 已清理: {_pid}")
+            logger.info(f"PID cleaned up: {_pid}")
         except OSError:
             pass

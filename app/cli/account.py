@@ -9,18 +9,18 @@ from sqlalchemy import select
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import Account, AccountMember, User
 
-account_app = typer.Typer(help="账户与租户管理")
+account_app = typer.Typer(help="Account and tenant management")
 
 
 @account_app.command("list")
 def list_accounts():
-    """列出系统所有存在的租户账户。"""
+    """List all tenant accounts."""
     async def _run():
         async with AsyncSessionLocal() as db:
             r = await db.execute(select(Account))
             rows = r.scalars().all()
             if not rows:
-                print("没有找到账户记录")
+                print("No account records found")
                 return
             for a in rows:
                 print(f"  {a.slug} ({a.name}) [active={a.is_active}]")
@@ -29,10 +29,10 @@ def list_accounts():
 
 @account_app.command("create")
 def create_account_cmd(
-    name: str = typer.Argument(..., help="账户名称"),
-    slug: Optional[str] = typer.Argument(None, help="租户唯一 Slug"),
+    name: str = typer.Argument(..., help="Account name"),
+    slug: Optional[str] = typer.Argument(None, help="Tenant unique Slug"),
 ):
-    """创建新的租户账户。"""
+    """Create a new tenant account."""
     actual_slug = slug or name.replace("_", "-")
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -47,36 +47,36 @@ def create_account_cmd(
                 )
             )
             await db.commit()
-            print(f"✅ 账户 {actual_slug} 已创建")
+            print(f"✅ Account {actual_slug} created")
     asyncio.run(_run())
 
 
 @account_app.command("delete")
 def delete_account_cmd(
-    slug: str = typer.Argument(..., help="要删除账户的 Slug"),
+    slug: str = typer.Argument(..., help="Slug of account to delete"),
 ):
-    """删除指定的账户。"""
+    """Delete specified account."""
     async def _run():
         async with AsyncSessionLocal() as db:
             acct = (
                 await db.execute(select(Account).where(Account.slug == slug))
             ).scalar_one_or_none()
             if not acct:
-                print(f"❌ 账户 {slug} 不存在")
+                print(f"❌ Account {slug} does not exist")
                 return
             await db.delete(acct)
             await db.commit()
-            print(f"✅ 账户 {slug} 已删除")
+            print(f"✅ Account {slug} deleted")
     asyncio.run(_run())
 
 
 @account_app.command("add-member")
 def add_member_cmd(
-    slug: str = typer.Argument(..., help="账户 Slug"),
-    username: str = typer.Argument(..., help="要添加的用户名"),
-    role: str = typer.Option("owner", "--role", help="成员角色 (owner / admin / member)"),
+    slug: str = typer.Argument(..., help="Account Slug"),
+    username: str = typer.Argument(..., help="Username to add"),
+    role: str = typer.Option("owner", "--role", help="Member role (owner / admin / member)"),
 ):
-    """向指定租户账户添加成员。"""
+    """Add a member to a tenant account."""
     async def _run():
         async with AsyncSessionLocal() as db:
             acct = (
@@ -86,7 +86,7 @@ def add_member_cmd(
                 await db.execute(select(User).where(User.username == username))
             ).scalar_one_or_none()
             if not acct or not user:
-                print("❌ 账户或用户不存在")
+                print("❌ Account or user does not exist")
                 return
             db.add(
                 AccountMember(
@@ -98,16 +98,16 @@ def add_member_cmd(
                 )
             )
             await db.commit()
-            print(f"✅ {username} 已添加到 {slug}")
+            print(f"✅ {username} added to {slug}")
     asyncio.run(_run())
 
 
 @account_app.command("remove-member")
 def remove_member_cmd(
-    slug: str = typer.Argument(..., help="账户 Slug"),
-    username: str = typer.Argument(..., help="要移除的用户名"),
+    slug: str = typer.Argument(..., help="Account Slug"),
+    username: str = typer.Argument(..., help="Username to remove"),
 ):
-    """从指定租户账户中移除成员。"""
+    """Remove a member from a tenant account."""
     async def _run():
         async with AsyncSessionLocal() as db:
             from sqlalchemy import and_
@@ -118,7 +118,7 @@ def remove_member_cmd(
                 await db.execute(select(User).where(User.username == username))
             ).scalar_one_or_none()
             if not acct or not user:
-                print("❌ 账户或用户不存在")
+                print("❌ Account or user does not exist")
                 return
             m = (
                 await db.execute(
@@ -131,9 +131,9 @@ def remove_member_cmd(
                 )
             ).scalar_one_or_none()
             if not m:
-                print("❌ 成员关系不存在")
+                print("❌ Membership record does not exist")
                 return
             await db.delete(m)
             await db.commit()
-            print(f"✅ {username} 已从 {slug} 移除")
+            print(f"✅ {username} removed from {slug}")
     asyncio.run(_run())

@@ -1,6 +1,6 @@
-"""MINI ClassIsland 数据库实体模型合并定义。
+"""MINIClassIsland database entity models.
 
-本文件整合了系统中所有的 SQLAlchemy 数据模型，避免零散文件，包含全局表与多租户表。
+This file consolidates all SQLAlchemy data models in the system, including global tables and multi-tenant tables.
 """
 
 import uuid
@@ -13,12 +13,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Base(DeclarativeBase):
-    """MINIClassIsland 所有数据库模型的共有基类。"""
+    """Base class for all MINIClassIsland database models."""
     pass
 
 
 class User(Base):
-    """用户身份与凭据记录。"""
+    """User account entity."""
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(
@@ -39,7 +39,7 @@ class User(Base):
 
 
 class CustomRole(Base):
-    """角色分级记录（含系统内置与自定义）。"""
+    """Role hierarchy record (system built-in and custom)."""
     __tablename__ = "custom_roles"
 
     id: Mapped[str] = mapped_column(
@@ -52,7 +52,7 @@ class CustomRole(Base):
 
 
 class Account(Base):
-    """账户（组织/租户）身份与配置记录。"""
+    """Account (Organization/Tenant) identity and settings record."""
     __tablename__ = "accounts"
 
     id: Mapped[str] = mapped_column(
@@ -66,7 +66,7 @@ class Account(Base):
 
 
 class AccountMember(Base):
-    """用户在账户中的成员关系记录。"""
+    """User membership relation record in an Account."""
     __tablename__ = "account_members"
     __table_args__ = (
         UniqueConstraint("user_id", "account_id", name="uq_user_account"),
@@ -82,7 +82,7 @@ class AccountMember(Base):
 
 
 class PermissionDef(Base):
-    """原子权限定义记录。"""
+    """Atomic permission definition record."""
     __tablename__ = "permission_defs"
 
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -91,7 +91,7 @@ class PermissionDef(Base):
 
 
 class MemberPermission(Base):
-    """成员粒度的权限覆盖记录。"""
+    """Member-granularity permission override record."""
     __tablename__ = "member_permissions"
     __table_args__ = (
         UniqueConstraint("member_id", "permission_code", name="uq_member_perm"),
@@ -106,7 +106,7 @@ class MemberPermission(Base):
 
 
 class AccountQuota(Base):
-    """账户级资源限额记录。"""
+    """Account-level resource quota limit record."""
     __tablename__ = "account_quotas"
     __table_args__ = (
         UniqueConstraint("account_id", "quota_key", name="uq_acct_quota"),
@@ -122,7 +122,7 @@ class AccountQuota(Base):
 
 
 class SystemConfig(Base):
-    """系统级键值配置记录。"""
+    """System-level key-value configuration record."""
     __tablename__ = "system_config"
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -131,7 +131,7 @@ class SystemConfig(Base):
 
 
 class ReservedName(Base):
-    """系统保留名称记录。"""
+    """System reserved name record."""
     __tablename__ = "reserved_names"
 
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -139,7 +139,7 @@ class ReservedName(Base):
 
 
 class ResourceMixin:
-    """资源存储表的模型 Mixin。"""
+    """Resource storage table model Mixin."""
 
     name: Mapped[str] = mapped_column(String, primary_key=True)
     content: Mapped[str] = mapped_column(Text)
@@ -148,42 +148,42 @@ class ResourceMixin:
 
 
 class CPFile(Base, ResourceMixin):
-    """课程计划资源文件表。"""
+    """Class plan resource file table."""
     __tablename__ = "cp_files"
 
 
 class TLFile(Base, ResourceMixin):
-    """时间布局资源文件表。"""
+    """Time layout resource file table."""
     __tablename__ = "tl_files"
 
 
 class SubFile(Base, ResourceMixin):
-    """科目资源文件表。"""
+    """Subjects resource file table."""
     __tablename__ = "sub_files"
 
 
 class PolicyFile(Base, ResourceMixin):
-    """策略资源文件表。"""
+    """Policy resource file table."""
     __tablename__ = "policy_files"
 
 
 class SettingsFile(Base, ResourceMixin):
-    """默认设置资源文件表。"""
+    """Default settings resource file table."""
     __tablename__ = "settings_files"
 
 
 class ComponentsFile(Base, ResourceMixin):
-    """组件资源文件表。"""
+    """Components resource file table."""
     __tablename__ = "components_files"
 
 
 class CredentialsFile(Base, ResourceMixin):
-    """凭据资源文件表。"""
+    """Credentials resource file table."""
     __tablename__ = "credentials_files"
 
 
 class ClientRecord(Base):
-    """已注册物理客户端设备的数据库记录。"""
+    """Registered physical client device database record."""
     __tablename__ = "clients"
 
     uid: Mapped[str] = mapped_column(String, primary_key=True)
@@ -193,7 +193,7 @@ class ClientRecord(Base):
 
 
 class ClientProfile(Base):
-    """客户端与特定资源文件之间的关联映射。"""
+    """Mapping relation between client and specific resource files."""
     __tablename__ = "client_profiles"
 
     client_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -208,7 +208,7 @@ class ClientProfile(Base):
 
 
 class AuditLog(Base):
-    """客户端设备事件日志的持久化存储。"""
+    """Persistent storage for client device event logs."""
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -220,7 +220,7 @@ class AuditLog(Base):
 
 
 class ConfigUploadRecord(Base):
-    """已上传客户端配置数据的临时存储。"""
+    """Temporary storage for uploaded client configuration data."""
     __tablename__ = "config_uploads"
 
     request_guid: Mapped[str] = mapped_column(String, primary_key=True)
@@ -230,7 +230,7 @@ class ConfigUploadRecord(Base):
 
 
 class PairingCode(Base):
-    """设备注册配对码记录。"""
+    """Device registration pairing code record."""
     __tablename__ = "pairing_codes"
 
     id: Mapped[str] = mapped_column(
@@ -248,7 +248,7 @@ class PairingCode(Base):
 
 
 class PreRegisteredClient(Base):
-    """预注册客户端记录。"""
+    """Pre-registered client record."""
     __tablename__ = "pre_registered_clients"
 
     id: Mapped[str] = mapped_column(
@@ -261,7 +261,7 @@ class PreRegisteredClient(Base):
 
 
 class Invitation(Base):
-    """账户邀请码记录。"""
+    """Account invitation code record."""
     __tablename__ = "invitations"
 
     id: Mapped[str] = mapped_column(
@@ -286,7 +286,7 @@ class Invitation(Base):
 
 
 class RolePermission(Base):
-    """角色与原子权限的关联记录。"""
+    """Relation record between role and atomic permission."""
     __tablename__ = "role_permissions"
     __table_args__ = (
         UniqueConstraint("role_code", "permission_code", name="uq_role_perm"),
@@ -299,7 +299,7 @@ class RolePermission(Base):
     permission_code: Mapped[str] = mapped_column(String(64))
 
 
-# 资源类型到数据库模型的映射表
+# Resource type to database model mapping table
 MODEL_MAP = {
     "ClassPlan": CPFile,
     "TimeLayout": TLFile,

@@ -1,4 +1,4 @@
-"""全局应用生命周期管理 — 启动与停止。
+"""Global application lifespan management — startup and shutdown.
 """
 
 import logging
@@ -23,7 +23,7 @@ grpc_logger = get_port_logger(PORT_TAG_GRPC)
 
 @asynccontextmanager
 async def app_lifespan(app: FastAPI):
-    """FastAPI 生命周期管理。"""
+    """FastAPI application lifespan manager."""
     validate_config()
     await _startup(app)
     yield
@@ -31,25 +31,25 @@ async def app_lifespan(app: FastAPI):
 
 
 async def _startup(app: FastAPI):
-    """启动所有后端服务。"""
-    logger.info("正在初始化数据库连接...")
+    """Start up backend services."""
+    logger.info("Initializing database connection...")
     await init_db()
-    logger.info("正在初始化 Redis 连接池...")
+    logger.info("Initializing Redis connection pool...")
     await init_redis()
     
-    # 动态本地导入 serve_grpc，防止未生成 grpc 代码时编译脚本/命令行导入崩溃
+    # Dynamically import serve_grpc to prevent compilation issues when protobufs are missing
     try:
         from app.grpc.server import serve_grpc
-        grpc_logger.info("正在启动 gRPC (%d)...", GRPC_PORT)
+        grpc_logger.info("Starting gRPC service (%d)...", GRPC_PORT)
         grpc_s, cmd_s, sess_m = await serve_grpc()
         app.state.grpc_server = grpc_s
         app.state.command_servicer = cmd_s
         app.state.session_manager = sess_m
     except Exception as e:
-        grpc_logger.error("gRPC 服务启动失败或 protobuf 未编译: %s", str(e))
+        grpc_logger.error("Failed to start gRPC service or protobuf not compiled: %s", str(e))
         
     logger.info(
-        "就绪 — C:%d M:%d A:%d G:%d",
+        "Ready — C:%d M:%d A:%d G:%d",
         CLIENT_PORT,
         MANAGEMENT_PORT,
         ADMIN_PORT,
@@ -58,13 +58,13 @@ async def _startup(app: FastAPI):
 
 
 async def _shutdown(app: FastAPI):
-    """优雅停机：停止 gRPC 和 Redis。"""
-    logger.info("正在执行优雅停机...")
+    """Graceful shutdown: stop gRPC and Redis."""
+    logger.info("Performing graceful shutdown...")
     grpc_s = getattr(app.state, "grpc_server", None)
     if grpc_s:
-        grpc_logger.info("正在停止 gRPC 服务器...")
+        grpc_logger.info("Stopping gRPC server...")
         await grpc_s.stop(grace=5)
-        grpc_logger.info("gRPC 服务器已停止")
-    logger.info("正在关闭 Redis 连接池...")
+        grpc_logger.info("gRPC server stopped")
+    logger.info("Closing Redis connection pool...")
     await close_redis()
-    logger.info("系统停机完成")
+    logger.info("System shutdown complete")

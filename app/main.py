@@ -1,6 +1,6 @@
-"""MINIClassIsland 后端服务主入口。
+"""MINIClassIsland Backend Services Entry Point.
 
-负责并发启动面向终端的 Client API、面向用户的 Management API 和面向超管的 Admin API。
+Concurrently starts Client API, Management API, and Admin API services.
 """
 
 import asyncio
@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 async def start_servers():
-    """并发运行三个独立的 uvicorn 实例（前台模式）。"""
+    """Run three independent uvicorn instances concurrently in foreground mode."""
     PID.write()
 
-    # uvicorn 配置：禁用默认日志，由统一日志系统接管
+    # Uvicorn configuration: disable default loggers to let unified logging take over
     uv_log_config = {
         "version": 1,
         "disable_existing_loggers": False,
@@ -64,7 +64,7 @@ async def start_servers():
     )
 
     logger.info(
-        "启动服务 — Client:%d  Management:%d  Admin:%d  (PID: %d)",
+        "Starting services — Client:%d  Management:%d  Admin:%d  (PID: %d)",
         CLIENT_PORT,
         MANAGEMENT_PORT,
         ADMIN_PORT,
@@ -81,7 +81,7 @@ async def start_servers():
         await asyncio.gather(*(s.serve() for s in servers))
     finally:
         PID.remove()
-        logger.info("所有服务已停止，PID 文件已清理")
+        logger.info("All services stopped, PID file cleaned up")
 
 
 from app.cli.main import cli
@@ -90,7 +90,7 @@ __all__ = ["start_servers", "main", "cli"]
 
 
 def main():
-    """主程序（统一 CLI）入口。"""
+    """Main application entry point (unified CLI)."""
     from app.cli.main import main as cli_main
     cli_main()
 

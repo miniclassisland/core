@@ -1,4 +1,4 @@
-"""Redis 多逻辑 DB 连接池管理与统一访问器。
+"""Redis multi-database connection pool manager and accessor.
 """
 
 import asyncio
@@ -17,8 +17,8 @@ _max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "20"))
 
 
 def _build_url(db: int) -> str:
-    """替换连接 URL 中的逻辑库编号。"""
-    # 比如 redis://localhost:6379/0 -> redis://localhost:6379/{db}
+    """Replace logical database ID in connection URL."""
+    # e.g., redis://localhost:6379/0 -> redis://localhost:6379/{db}
     if "/" in REDIS_URL:
         base = REDIS_URL.rsplit("/", 1)[0]
         return f"{base}/{db}"
@@ -26,7 +26,7 @@ def _build_url(db: int) -> str:
 
 
 async def init_redis(*, dbs: tuple[int, ...] = (0, 1, 2)) -> None:
-    """初始化指定逻辑 DB 的独立连接池。"""
+    """Initialize independent connection pool for specified logical DBs."""
     async with _lock:
         for db in dbs:
             if db in _pools:
@@ -43,20 +43,31 @@ async def init_redis(*, dbs: tuple[int, ...] = (0, 1, 2)) -> None:
             )
             await pool.ping()
             _pools[db] = pool
-        logger.info("Redis 连通成功 DB: %s", list(_pools.keys()))
+        logger.info("Redis connected successfully DB: %s", list(_pools.keys()))
 
 
 def get_redis(db: int = 0) -> aioredis.Redis:
-    """获取指定逻辑 DB 的 Redis 实例。"""
+    """Get Redis instance for specified logical DB, recreating if event loop changed."""
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
     pool = _pools.get(db)
-    if pool is None:
-        raise RuntimeError(f"Redis DB {db} 未初始化 — 请先调用 init_redis()")
+    pool_loop = getattr(pool, "_active_loop", None) if pool else None
+
+    if pool is None or (current_loop is not None and pool_loop is not current_loop):
+        pool = aioredis.from_url(
+            _build_url(db), decode_responses=True, max_connections=_max_conn
+        )
+        setattr(pool, "_active_loop", current_loop)
+        _pools[db] = pool
     return pool
 
 
 async def close_redis() -> None:
-    """释放并关闭所有逻辑库的 Redis 连接池。"""
+    """Safely close all Redis connection pools."""
     for db in list(_pools.keys()):
         await _pools[db].aclose()
     _pools.clear()
-    logger.info("Redis 所有连接池已安全关闭")
+    logger.info("All Redis connection pools safely closed")

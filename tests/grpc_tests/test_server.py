@@ -55,7 +55,7 @@ async def test_tenant_interceptor_exemptions():
 
     with pytest.raises(grpc.aio.AbortError) as exc:
         await interceptor.intercept_service(continuation, details)
-    assert exc.value.code() == grpc.StatusCode.UNAVAILABLE
+    assert exc.value.args[0] == grpc.StatusCode.UNAVAILABLE
 
     # 恢复 CC 状态
     set_cc_state(False)
@@ -101,7 +101,7 @@ async def test_tenant_interceptor_session_auth(test_superadmin_user):
 
     with pytest.raises(grpc.aio.AbortError) as exc:
         await interceptor.intercept_service(continuation, details_invalid)
-    assert exc.value.code() == grpc.StatusCode.UNAUTHENTICATED
+    assert exc.value.args[0] == grpc.StatusCode.UNAUTHENTICATED
 
 
 @pytest.mark.asyncio
@@ -110,7 +110,7 @@ async def test_handshake_servicer():
     sm = SessionManager()
     servicer = server.HandshakeServicer(sm)
 
-    # 1. 尝试握手不存在的客户端 -> 返回 ClientNotFound
+    # 1. 尝试握手不存在的客户端 -> Return ClientNotFound
     req = HandshakeScReq_pb2.HandshakeScBeginHandShakeReq(
         ClientUid="non-existent-uid",
         ClientMac="AA-BB-CC-DD-EE-FF",
@@ -122,12 +122,16 @@ async def test_handshake_servicer():
 
     # 2. 插入一个合法物理客户端记录
     async with AsyncSessionLocal() as db:
-        db.add(
-            ClientRecord(
-                uid="valid-client-uid", client_id="c1", mac="AA-BB-CC-DD-EE-FF"
+        from datetime import datetime, timezone
+        from sqlalchemy import select
+        existing = (await db.execute(select(ClientRecord).where(ClientRecord.uid == "valid-client-uid"))).scalar_one_or_none()
+        if not existing:
+            db.add(
+                ClientRecord(
+                    uid="valid-client-uid", client_id="c1", mac="AA-BB-CC-DD-EE-FF", registered_at=datetime.now(timezone.utc)
+                )
             )
-        )
-        await db.commit()
+            await db.commit()
 
     # MAC 地址不匹配测试 -> InvalidRequest
     req_wrong_mac = HandshakeScReq_pb2.HandshakeScBeginHandShakeReq(
@@ -150,7 +154,7 @@ async def test_handshake_servicer():
     # 3. CompleteHandshake 测试
     # 未被接受的分支 -> HandshakeClientRejected
     req_complete_reject = (
-        HandshakeScRsp_pb2.HandshakeScCompleteHandshakeReq(Accepted=False)
+        HandshakeScReq_pb2.HandshakeScCompleteHandshakeReq(Accepted=False)
     )
     ctx_complete = get_mock_context(metadata=[("cuid", "valid-client-uid")])
     res_complete = await servicer.CompleteHandshake(
@@ -160,7 +164,7 @@ async def test_handshake_servicer():
 
     # 无挑战记录的分支 -> InvalidRequest
     req_complete_accept = (
-        HandshakeScRsp_pb2.HandshakeScCompleteHandshakeReq(Accepted=True)
+        HandshakeScReq_pb2.HandshakeScCompleteHandshakeReq(Accepted=True)
     )
     res_complete_accept = await servicer.CompleteHandshake(
         req_complete_accept, ctx_complete
@@ -179,8 +183,9 @@ async def test_client_register_servicer_pairing():
         # 清除已有配对配置
         from sqlalchemy import delete
 
+        from datetime import datetime, timezone
         await db.execute(delete(SystemConfig).where(SystemConfig.key == "pairing_enabled"))
-        db.add(SystemConfig(key="pairing_enabled", value="true"))
+        db.add(SystemConfig(key="pairing_enabled", value="true", updated_at=datetime.now(timezone.utc)))
         await db.commit()
 
     req = ClientRegisterCsReq_pb2.ClientRegisterCsReq(
@@ -193,7 +198,7 @@ async def test_client_register_servicer_pairing():
     # 需要配对码拦截 -> PairingRequired
     res = await servicer.Register(req, ctx)
     assert res.Retcode == Retcode_pb2.PairingRequired
-    assert "配对码" in res.Message
+    assert "Pairing Code" in res.Message
 
     # 2. 审批通过后，注册成功
     # 提取生成的配对请求验证码
@@ -209,7 +214,7 @@ async def test_client_register_servicer_pairing():
         # 审批配对
         from app.shared.services.pairing import approve_pairing
 
-        await approve_pairing(db, code, "approve")
+        await approve_pairing(code, "")
 
     # 重新注册，应该注册成功
     res_ok = await servicer.Register(req, ctx)
@@ -229,7 +234,7 @@ async def test_client_register_servicer_unregister():
     ctx = get_mock_context(metadata=[("session", "invalid-session-token")])
     await servicer.UnRegister(req, ctx)
     ctx.abort.assert_called_with(
-        grpc.StatusCode.UNAUTHENTICATED, "会话鉴权失败，无法解绑"
+        grpc.StatusCode.UNAUTHENTICATED, "Session authentication failed, unable to unregister"
     )
 
 
@@ -245,9 +250,9 @@ async def test_command_deliver_servicer():
     # 1. 测试 ListenCommand 鉴权失败分支
     ctx_fail = get_mock_context(metadata=[("session", "invalid-sid")])
     res_iterator_fail = servicer.ListenCommand(None, ctx_fail)
-    with pytest.raises(Exception):  # 应该直接被 context.abort 截断
-        async for _ in res_iterator_fail:
-            pass
+    async for _ in res_iterator_fail:
+        pass
+    ctx_fail.abort.assert_called_with(grpc.StatusCode.UNAUTHENTICATED, "Session validation failed, listening rejected")
 
     # 2. 测试 ListenCommand 双向流正常逻辑
     ctx_ok = get_mock_context(metadata=[("session", sid)])

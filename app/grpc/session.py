@@ -1,6 +1,6 @@
-"""gRPC 会话管理器。
+"""gRPC session manager.
 
-包含了密钥对管理 (PGPy)、握手挑战状态、心跳在线状态，以及会话状态。
+Contains key pair management (PGPy), handshake challenge state, heartbeat online state, and session state.
 """
 
 import os
@@ -22,16 +22,16 @@ from app.shared.utils.redis import get_redis
 
 logger = logging.getLogger(__name__)
 
-# 会话和握手过期时间配置
-SESSION_TTL = 86400  # 24 小时
-HANDSHAKE_TTL = 120  # 2 分钟
-ONLINE_TTL = 60      # 60 秒
+# Session and handshake TTL configuration
+SESSION_TTL = 86400  # 24 hours
+HANDSHAKE_TTL = 120  # 2 minutes
+ONLINE_TTL = 60      # 60 seconds
 
 
-# ---- GPG 密钥生成与解密工具 ----
+# ---- GPG Key Generation & Decryption ----
 
 class GPGKeyManager:
-    """管理 RSA 加密密钥对，负责导入、生成与挑战解密。"""
+    """Manages RSA encryption key pairs, handling import, generation, and challenge decryption."""
 
     def __init__(self, key_file: str):
         self._key_file = key_file
@@ -40,14 +40,14 @@ class GPGKeyManager:
         self._load_or_generate()
 
     def _load_or_generate(self):
-        """加载或动态创建 2048 位的 RSA 密钥对。"""
+        """Load or dynamically create 2048-bit RSA key pair."""
         if os.path.exists(self._key_file):
             try:
                 k, _ = pgpy.PGPKey.from_file(self._key_file)
                 self.private_key, self.public_key_armor = k, str(k.pubkey)
                 return
             except Exception:
-                logger.warning("密钥损坏，重新生成: %s", self._key_file)
+                logger.warning("Key file corrupted, re-generating: %s", self._key_file)
 
         k = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
         u = pgpy.PGPUID.new("MINIClassIsland Server", comment="ClassIsland")
@@ -62,20 +62,20 @@ class GPGKeyManager:
             f.write(str(k))
 
     def decrypt(self, encrypted: str) -> str:
-        """解密客户端上报的挑战 Token。"""
+        """Decrypt challenge Token uploaded by client."""
         try:
             msg = pgpy.PGPMessage.from_blob(encrypted)
             raw = self.private_key.decrypt(msg).message
             return bytes(raw) if isinstance(raw, bytearray) else raw
         except Exception as e:
-            logger.error("GPG 解密失败: %s", e)
+            logger.error("GPG decryption failed: %s", e)
             return None
 
 
-# ---- gRPC 对端 IP 解析工具 ----
+# ---- gRPC Peer IP Parser ----
 
 def parse_grpc_peer_ip(peer: str) -> str:
-    """清理并提取 peer 地址中的 IP 段。"""
+    """Clean and extract IP segment from peer address."""
     if not peer:
         return ""
 
@@ -91,10 +91,10 @@ def parse_grpc_peer_ip(peer: str) -> str:
     return peer
 
 
-# ---- 统一 Session 会话管理器类 ----
+# ---- Session Manager Class ----
 
 class SessionManager:
-    """设备连接与长连接状态生命周期管理核心实体。"""
+    """Core entity for device connection and long-connection lifecycle management."""
 
     def __init__(self, key_path: str = KEY_FILE, *, key_file: str | None = None):
         path = key_file or key_path
@@ -103,19 +103,19 @@ class SessionManager:
         self._private_key = self._km.private_key
 
     def decrypt_challenge(self, token: str) -> str:
-        """解密挑战令牌。"""
+        """Decrypt challenge token."""
         if self._private_key is None:
             return None
         return self._km.decrypt(token)
 
     async def store_pending_handshake(self, tenant_id: str, cuid: str, token: str):
-        """缓存解密后的挑战令牌，等待 Complete 握手。"""
-        rd = get_redis()  # 默认库
+        """Cache decrypted challenge token awaiting Complete handshake."""
+        rd = get_redis()  # Default DB
         key = f"handshake:{tenant_id}:{cuid}"
         await rd.set(key, token, ex=HANDSHAKE_TTL)
 
     async def pop_handshake_challenge(self, tenant_id: str, cuid: str) -> str:
-        """获取挑战令牌并立即销毁。"""
+        """Retrieve challenge token and delete immediately."""
         rd = get_redis()
         key = f"handshake:{tenant_id}:{cuid}"
         val = await rd.get(key)
@@ -124,7 +124,7 @@ class SessionManager:
         return val
 
     async def create_session(self, tenant_id: str, cuid: str) -> str:
-        """为设备生成 session 令牌并绑定身份。"""
+        """Generate session token for device and bind identity."""
         rd = get_redis(REDIS_DB_SESSION)
         sid = str(uuid.uuid4())
         key = f"session:{sid}"
@@ -133,47 +133,52 @@ class SessionManager:
         return sid
 
     async def complete_handshake(self, tenant_id: str, cuid: str, accepted: bool) -> str | None:
-        """完成握手判定。"""
+        """Complete handshake evaluation."""
         pending = await self.pop_handshake_challenge(tenant_id, cuid)
         return await self.create_session(tenant_id, cuid) if pending and accepted else None
 
     async def validate_session(self, sid: str) -> str | None:
-        """根据 session 获取对应的客户端 cuid。"""
+        """Retrieve corresponding client cuid from session ID."""
         if not sid:
             return None
         rd = get_redis(REDIS_DB_SESSION)
         return await rd.hget(f"session:{sid}", "cuid")
 
     async def get_session_tenant(self, sid: str) -> str | None:
-        """根据 session 获取对应的租户 ID。"""
+        """Retrieve corresponding tenant ID from session ID."""
         if not sid:
             return None
         rd = get_redis(REDIS_DB_SESSION)
         return await rd.hget(f"session:{sid}", "tenant_id")
 
     async def set_client_online(self, tid: str, cuid: str, ip: str = ""):
-        """记录设备在线心跳，绑定 IP。"""
+        """Record device online heartbeat and bind IP."""
         rd = get_redis(REDIS_DB_SESSION)
         key = f"online:{tid}:{cuid}"
         await rd.hset(key, mapping={"status": "online", "ip": ip})
         await rd.expire(key, ONLINE_TTL)
 
     async def set_client_offline(self, tid: str, cuid: str):
-        """显式下线设备。"""
+        """Explicitly set device offline."""
         rd = get_redis(REDIS_DB_SESSION)
         await rd.delete(f"online:{tid}:{cuid}")
 
     async def is_client_online(self, tid: str, cuid: str) -> bool:
-        """检查设备是否在线。"""
+        """Check if device is online."""
         rd = get_redis(REDIS_DB_SESSION)
         return await rd.exists(f"online:{tid}:{cuid}") > 0
 
     async def update_heartbeat(self, tid: str, cuid: str):
-        """延长设备在线有效期。"""
-        await self.set_client_online(tid, cuid, "")
+        """Extend device online expiration."""
+        rd = get_redis(REDIS_DB_SESSION)
+        key = f"online:{tid}:{cuid}"
+        if await rd.exists(key):
+            await rd.expire(key, ONLINE_TTL)
+        else:
+            await self.set_client_online(tid, cuid, "")
 
     async def get_all_clients_status(self, tid: str) -> list[dict]:
-        """获取指定商户下的所有设备在线列表。"""
+        """Get all online devices status list under tenant."""
         rd = get_redis(REDIS_DB_SESSION)
         prefix = f"online:{tid}:"
         res = []
@@ -185,7 +190,7 @@ class SessionManager:
         return res
 
     async def get_all_online_ips(self, tid: str) -> set[str]:
-        """获取所有在线设备的 IP 地址集。"""
+        """Get set of IP addresses for all online devices."""
         rd = get_redis(REDIS_DB_SESSION)
         prefix = f"online:{tid}:"
         ips = set()

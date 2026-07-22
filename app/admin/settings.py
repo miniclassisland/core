@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,18 +17,18 @@ async def get_settings(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """获取所有系统设置。"""
+    """Retrieve all system configuration settings."""
     rows = (await db.execute(select(SystemConfig))).scalars().all()
     return {r.key: r.value for r in rows}
 
 
-@router.post("")
+@router.post("", status_code=status.HTTP_200_OK)
 async def update_settings(
     body: SettingsUpdate,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """修改系统设置（仅白名单键）。"""
+    """Update system configuration settings."""
     now = datetime.now(timezone.utc)
     for key, value in body.items.items():
         stmt = select(SystemConfig).where(SystemConfig.key == key)
@@ -39,4 +39,4 @@ async def update_settings(
         else:
             db.add(SystemConfig(key=key, value=str(value), updated_at=now))
     await db.commit()
-    return {"message": "设置已更新"}
+    return {"status": "ok", "message": "Settings updated"}

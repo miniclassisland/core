@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,13 +21,13 @@ _sa = require_role(100)
 
 
 class RenameRequest(BaseModel):
-    """重命名请求体。"""
+    """Rename user request schema."""
 
     name: str = Field(..., min_length=1, max_length=64)
 
 
 def _to_out(user) -> UserOut:
-    """将 User 模型转换为响应模型。"""
+    """Convert User model to response schema."""
     return UserOut(
         id=user.id,
         username=user.username,
@@ -47,7 +47,7 @@ async def list_all_users(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """分页查询所有用户。"""
+    """Paginated query for all users."""
     users, _ = await list_users(db, offset=offset, limit=limit)
     return [_to_out(u) for u in users]
 
@@ -58,18 +58,18 @@ async def search_users(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """按关键字搜索用户。"""
+    """Search users by keyword."""
     users, _ = await list_users(db, search=q)
     return [_to_out(u) for u in users]
 
 
-@router.post("/create", response_model=UserOut)
+@router.post("/create", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserRegisterRequest = Body(...),
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """创建新用户（超管直接创建，跳过审核）。"""
+    """Create a new user (Super Admin direct creation, bypassing pending approval)."""
     try:
         user = await register_user(
             payload.email,
@@ -79,7 +79,7 @@ async def create_user(
             username=payload.username,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return _to_out(user)
 
 
@@ -89,10 +89,10 @@ async def get_user(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """获取用户信息。"""
+    """Get user information by ID."""
     user = await get_user_by_id(user_id, db)
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return _to_out(user)
 
 
@@ -103,81 +103,81 @@ async def update_user_info(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """修改用户信息。"""
+    """Update user information."""
     updated = await update_user(user_id, db, **body.model_dump(exclude_none=True))
     if not updated:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return _to_out(updated)
 
 
-@router.delete("/{user_id}")
+@router.delete("/{user_id}", status_code=status.HTTP_200_OK)
 async def delete_user(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """删除用户。"""
+    """Delete a user."""
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     await db.delete(user)
     await db.commit()
-    return {"message": "用户已删除"}
+    return {"status": "deleted"}
 
 
-@router.post("/{user_id}/rename")
+@router.post("/{user_id}/rename", status_code=status.HTTP_200_OK)
 async def rename_user(
     user_id: str,
     body: RenameRequest,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """重命名用户。"""
+    """Rename a user's username."""
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user.username = body.name
     await db.commit()
-    return {"message": "已重命名"}
+    return {"status": "renamed"}
 
 
-@router.post("/{user_id}/password/reset")
+@router.post("/{user_id}/password/reset", status_code=status.HTTP_200_OK)
 async def reset_password(
     user_id: str,
     body: PasswordReset,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """重置用户密码（无需旧密码）。"""
+    """Reset user password directly (Super Admin without old password)."""
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
-    return {"message": "密码已重置"}
+    return {"status": "password_reset"}
 
 
-@router.post("/{user_id}/password/change")
+@router.post("/{user_id}/password/change", status_code=status.HTTP_200_OK)
 async def change_password(
     user_id: str,
     body: PasswordChange,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """超管修改用户密码（需验证旧密码）。"""
+    """Change user password with old password verification."""
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not verify_password(body.old_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="旧密码错误")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password")
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
-    return {"message": "密码已修改"}
+    return {"status": "password_changed"}

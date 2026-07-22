@@ -13,5 +13,5 @@ async def bulk_operations(
     req: BatchRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """商户租户身份执行批量资源操作。"""
+    """Execute batch resource operations under tenant scope."""
     return await process_batch(req, db)

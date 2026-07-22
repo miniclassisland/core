@@ -117,14 +117,19 @@ async def test_rbac_dependencies(test_superadmin_user):
         token = tenant_ctx.set(tenant_id)
         try:
             # 建立商户成员 owner 关系
-            db.add(
-                AccountMember(
-                    user_id=test_superadmin_user,
-                    account_id=tenant_id,
-                    role_in_account="owner",
+            from datetime import datetime, timezone
+            from sqlalchemy import select
+            existing_member = (await db.execute(select(AccountMember).where(AccountMember.user_id == test_superadmin_user, AccountMember.account_id == tenant_id))).scalar_one_or_none()
+            if not existing_member:
+                db.add(
+                    AccountMember(
+                        user_id=test_superadmin_user,
+                        account_id=tenant_id,
+                        role_in_account="owner",
+                        joined_at=datetime.now(timezone.utc),
+                    )
                 )
-            )
-            await db.commit()
+                await db.commit()
 
             perm_check = auth.require_permission("any_action")
             user_id_res = await perm_check(request)

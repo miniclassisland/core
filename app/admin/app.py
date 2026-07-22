@@ -1,4 +1,4 @@
-"""超级管理员 API 应用定义。
+"""Super Admin API Application Definition.
 """
 
 import logging
@@ -13,12 +13,12 @@ from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_ADMIN
 logger = logging.getLogger(__name__)
 
 admin_app = FastAPI(
-    title="MINIClassIsland 超管 API",
+    title="MINIClassIsland Admin API",
     version="0.3.0",
     redirect_slashes=False,
 )
 
-# CORS 中间件
+# CORS middleware
 admin_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,16 +27,16 @@ admin_app.add_middleware(
     allow_headers=["*"],
 )
 
-# 统一认证与安全防护中间件
+# Authentication, logging, and security middleware
 admin_app.add_middleware(AdminAuthMiddleware)
 admin_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_ADMIN)
 admin_app.add_middleware(CCProtectMiddleware)
 
-# 挂载超管聚合路由
+# Mount Admin router
 admin_app.include_router(admin_router)
 
 
 @admin_app.get("/")
 async def root():
-    """超管 API 状态检测。"""
-    return {"message": "MINIClassIsland 超管 API 运行中"}
+    """Admin API health check status endpoint."""
+    return {"status": "ok", "message": "MINIClassIsland Admin API is running"}

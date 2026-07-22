@@ -1,2 +1,2 @@
-"""MINIClassIsland 共享服务业务逻辑包。
+"""MINIClassIsland shared services business logic package.
 """

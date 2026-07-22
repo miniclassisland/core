@@ -1,4 +1,4 @@
-"""MINIClassIsland OOBE 首次引导初始化与系统服务部署助手。
+"""MINIClassIsland OOBE first-time onboarding initialization and service deployment helper.
 """
 
 import json
@@ -16,7 +16,7 @@ from app.shared.services.user import ensure_system_roles
 
 logger = logging.getLogger(__name__)
 
-# 系统保留用户名列表
+# System reserved usernames list
 _PROTOCOL = ["admin", "api", "www", "mail", "ftp", "ssh", "dns", "smtp", "pop", "imap", "ntp", "snmp", "ldap", "tcp", "udp", "http", "https", "ssl", "tls", "vpn", "proxy"]
 _AUTH = ["login", "logout", "register", "signup", "signin", "auth", "oauth", "oauth2", "openid", "sso", "saml", "2fa", "mfa", "totp", "otp", "token", "session", "password", "passwd", "reset", "verify", "activate", "deactivate", "confirm", "callback", "redirect"]
 _ADMIN = ["dashboard", "panel", "console", "manage", "management", "billing", "settings", "config", "configuration", "control", "monitor", "analytics", "metrics", "logs", "admin", "superadmin", "moderator", "operator"]
@@ -32,38 +32,38 @@ RESERVED_NAMES = sorted(set(_PROTOCOL + _AUTH + _ADMIN + _SYSTEM + _RESOURCE + _
 
 
 def write_config_file(config: dict) -> None:
-    """将数据库连接信息写入 .miniclassisland/config.json。"""
+    """Write database connection information to .miniclassisland/config.json."""
     CONFIG_DIR.mkdir(exist_ok=True)
     file_config = {"database_url": config["db_url"]}
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(file_config, f, indent=2, ensure_ascii=False)
-    logger.info("配置已写入 %s", CONFIG_FILE)
+    logger.info("Configuration written to %s", CONFIG_FILE)
 
 
 async def init_database(config: dict) -> None:
-    """连接数据库并执行完整初始化。"""
-    # 动态注入 DATABASE_URL 到 config 模块
+    """Connect to database and execute complete initialization."""
+    # Dynamically inject DATABASE_URL into config module
     import app.shared.utils.config as cfg
     cfg.DATABASE_URL = config["db_url"]
     
-    # 刷新 engine
+    # Re-create engine
     from sqlalchemy.ext.asyncio import create_async_engine
     new_engine = create_async_engine(config["db_url"], echo=False)
 
     async with new_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("数据库表已重新创建")
+    logger.info("Database tables re-created")
 
-    # 写入系统配置到数据库
+    # Write system configuration to database
     await _init_system_config(config)
-    # 创建默认数据
+    # Populate default data
     await _init_default_data(config)
-    logger.info("数据初始化完成")
+    logger.info("Data initialization complete")
 
 
 async def _init_system_config(config: dict) -> None:
-    """将非数据库连接的配置写入 system_config 表。"""
+    """Write non-DB connection configs into system_config table."""
     now = datetime.now(timezone.utc)
     entries = [
         ("redis_url", config["redis_url"]),
@@ -77,7 +77,7 @@ async def _init_system_config(config: dict) -> None:
 
 
 async def _init_default_data(config: dict) -> None:
-    """创建超管用户、默认角色、权限定义和保留名。"""
+    """Create superadmin user, default roles, permission definitions, and reserved names."""
     async with AsyncSessionLocal() as db:
         await ensure_system_roles(db)
         await _create_superadmin(config, db)
@@ -86,14 +86,14 @@ async def _init_default_data(config: dict) -> None:
 
 
 async def _create_superadmin(config: dict, db) -> None:
-    """创建超级管理员用户和默认账户。"""
+    """Create super administrator user and default account."""
     now = datetime.now(timezone.utc)
     user = User(
         id=str(uuid.uuid4()),
         username=config["username"],
         email=config["email"],
         hashed_password=hash_password(config["password"]),
-        display_name="超级管理员",
+        display_name="Super Administrator",
         role_code="superadmin",
         is_active=True,
         created_at=now,
@@ -102,7 +102,7 @@ async def _create_superadmin(config: dict, db) -> None:
     
     account = Account(
         id=str(uuid.uuid4()),
-        name="默认管理账户",
+        name="Default Management Account",
         slug=config["username"].replace("_", "-"),
         api_key=secrets.token_urlsafe(32),
         is_active=True,
@@ -120,21 +120,21 @@ async def _create_superadmin(config: dict, db) -> None:
         )
     )
     await db.commit()
-    logger.info("超级管理员用户 %s 已创建", config["username"])
+    logger.info("Superadmin user %s created", config["username"])
 
 
 async def _init_permissions(db) -> None:
-    """初始化默认权限定义。"""
+    """Initialize default permission definitions."""
     perms = [
-        ("client.read", "读取客户端", "client"),
-        ("client.write", "修改客户端", "client"),
-        ("client.delete", "删除客户端", "client"),
-        ("command.execute", "执行远程命令", "command"),
-        ("config.read", "读取配置", "config"),
-        ("config.write", "修改配置", "config"),
-        ("audit.read", "查看审计日志", "audit"),
-        ("account.manage", "管理账户", "account"),
-        ("member.manage", "管理成员", "member"),
+        ("client.read", "Read Client", "client"),
+        ("client.write", "Modify Client", "client"),
+        ("client.delete", "Delete Client", "client"),
+        ("command.execute", "Execute Remote Command", "command"),
+        ("config.read", "Read Config", "config"),
+        ("config.write", "Modify Config", "config"),
+        ("audit.read", "View Audit Logs", "audit"),
+        ("account.manage", "Manage Account", "account"),
+        ("member.manage", "Manage Member", "member"),
     ]
     for code, label, cat in perms:
         db.add(PermissionDef(code=code, label=label, category=cat))
@@ -142,20 +142,20 @@ async def _init_permissions(db) -> None:
 
 
 async def _init_reserved_names(db) -> None:
-    """初始化保留名称注册表。"""
+    """Initialize reserved name registry."""
     for name in RESERVED_NAMES:
-        db.add(ReservedName(name=name, reason="系统保留"))
+        db.add(ReservedName(name=name, reason="System Reserved"))
     await db.commit()
 
 
 def generate_systemd_service() -> None:
-    """生成 miniclassisland-backend.service 文件并尝试安装到 systemd。"""
+    """Generate miniclassisland-backend.service file and attempt systemd installation."""
     import shutil
     import subprocess
 
     bin_path = shutil.which("miniclassisland")
     if not bin_path:
-        # 回退
+        # Fallback
         bin_path = f"{shutil.which('uv') or 'uv'} run miniclassisland"
 
     work_dir = str(Path(__file__).resolve().parents[3])
@@ -179,12 +179,12 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=miniclassisland-backend
 
-# 安全加固
+# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths={work_dir}
 
-# 环境
+# Environment
 EnvironmentFile=-{work_dir}/.env
 
 [Install]
@@ -193,7 +193,7 @@ WantedBy=multi-user.target
 
     local_path = CONFIG_DIR / "miniclassisland-backend.service"
     local_path.write_text(service_content, encoding="utf-8")
-    logger.info("服务文件已生成: %s", local_path)
+    logger.info("Service file generated: %s", local_path)
 
     systemd_path = "/etc/systemd/system/miniclassisland-backend.service"
     try:
@@ -201,7 +201,7 @@ WantedBy=multi-user.target
         result = subprocess.run(install_cmd, capture_output=True, text=True)
         if result.returncode == 0:
             subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True, text=True)
-            logger.info("服务已安装到 %s", systemd_path)
-            print("✅ 服务已安装，启动: miniclassisland start")
+            logger.info("Service installed to %s", systemd_path)
+            print("✅ Service installed. To start: miniclassisland start")
     except Exception:
-        print("⚠️ 无法自动安装服务文件，请手动复制配置。")
+        print("⚠️ Unable to automatically install service file. Please copy the configuration manually.")

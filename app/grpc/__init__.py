@@ -1,4 +1,4 @@
-"""MINIClassIsland gRPC 服务与状态管理器包。
+"""MINIClassIsland gRPC service and session manager package.
 """
 
 from .session import SessionManager

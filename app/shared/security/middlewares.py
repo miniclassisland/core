@@ -3,7 +3,7 @@ import re
 import time
 from typing import Dict, Tuple
 
-from fastapi import Request, Response
+from fastapi import Request, Response, status
 from starlette.middleware.base import (
     BaseHTTPMiddleware,
     RequestResponseEndpoint,
@@ -17,7 +17,7 @@ from app.shared.utils.logging import get_client_ip_from_request
 
 logger = logging.getLogger(__name__)
 
-# ---- 1. CC防护限流状态与检查 ----
+# ---- 1. CC Attack Protection State & Rate Limiter ----
 
 from app.shared.security.crypto import (
     get_cc_state,
@@ -81,15 +81,14 @@ def monitor_global_frequency() -> None:
         set_cc_state(False)
 
 
-
 class CCProtectMiddleware(BaseHTTPMiddleware):
-    """安全中间件：阻断封禁 IP 并全局防护 CC 并发攻击。"""
+    """Security middleware: block banned IPs and protect against global CC attacks."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         ip = get_client_ip_from_request(request) or "unknown"
         if check_ip_blocked(ip):
             return JSONResponse(
-                status_code=429, content={"code": "ERR_IP_BLOCKED", "msg": "异常封禁"}
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS, content={"code": "ERR_IP_BLOCKED", "msg": "IP address temporarily blocked"}
             )
 
         monitor_global_frequency()
@@ -98,7 +97,7 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
         if get_cc_state() and any(k in path for k in ["login", "register"]):
             if "authorization" not in request.headers:
                 return JSONResponse(
-                    status_code=503, content={"code": "ERR_CC_ACTIVE", "msg": "通道受阻"}
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"code": "ERR_CC_ACTIVE", "msg": "Channel busy, try again later"}
                 )
 
         resp = await call_next(request)
@@ -108,14 +107,14 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
         return resp
 
 
-# ---- 2. 管理端/商户端 认证拦截中间件 ----
+# ---- 2. Admin & Management Authentication Interceptor Middleware ----
 
 _EXEMPT = {"/", "/user/auth", "/user/apply"}
 _EXEMPT_PREFIXES = ("/user/availability/",)
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
-    """会话令牌及接口凭证认证中间件。"""
+    """Session token and API credential authentication middleware."""
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -129,7 +128,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
         auth = request.headers.get("authorization", "")
         if not auth.startswith("Bearer "):
             return JSONResponse(
-                status_code=401, content={"code": "ERR_AUTH_MISSING", "msg": "未受权访客"}
+                status_code=status.HTTP_401_UNAUTHORIZED, content={"code": "ERR_AUTH_MISSING", "msg": "Unauthenticated visitor"}
             )
         token = auth[7:]
 
@@ -139,16 +138,16 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
             request.state.current_user_id = user_id
             return await call_next(request)
 
-        # 兼容旧式 command 域令牌（/account/{id}/... 路径）
+        # Compatible with legacy command scope tokens (for /account/{id}/... paths)
         if path.startswith("/account/"):
             ok = await _check_legacy_token(token, path)
             if ok:
                 return await call_next(request)
 
         client_ip = get_client_ip_from_request(request)
-        logger.warning("认证失败：ip=%s path=%s", client_ip, path)
+        logger.warning("Authentication failed: ip=%s path=%s", client_ip, path)
         return JSONResponse(
-            status_code=401, content={"code": "ERR_AUTH_INVALID", "msg": "凭据作废"}
+            status_code=status.HTTP_401_UNAUTHORIZED, content={"code": "ERR_AUTH_INVALID", "msg": "Invalid credentials"}
         )
 
 
@@ -170,13 +169,13 @@ async def _check_legacy_token(token: str, path: str = "") -> bool:
     return bool(data and data.get("scope") == "command")
 
 
-# ---- 3. 多租户上下文自适应中间件 ----
+# ---- 3. Multi-Tenant Context Middleware ----
 
 _ACCOUNT_PATH_RE = re.compile(r"^/accounts?/([^/]+)(?:/|$)")
 
 
 class AccountContextMiddleware(BaseHTTPMiddleware):
-    """基于 URL 解析设置协程级别租户隔离上下文 (tenant_ctx/schema_ctx)。"""
+    """Set coroutine-level tenant isolation context (tenant_ctx/schema_ctx) based on URL parsing."""
 
     def __init__(self, app, require_membership: bool = True):
         super().__init__(app)
@@ -205,18 +204,18 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
 
         if not account or not account.is_active:
             return JSONResponse(
-                status_code=403,
-                content={"code": "ERR_RESOURCE_LOCKED", "msg": "账户异常"},
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"code": "ERR_RESOURCE_LOCKED", "msg": "Account invalid or inactive"},
             )
 
-        # 成员资格校验（跳过 /command 子路径）
+        # Member validation (skip /command subpaths)
         remaining_path = path[match.end() - 1 :]
         needs_membership = self._require_membership and "/command" not in remaining_path
         if needs_membership:
             user_id = getattr(request.state, "current_user_id", None)
             if not user_id:
                 return JSONResponse(
-                    status_code=401, content={"code": "ERR_AUTH_MISSING", "msg": "未验证"}
+                    status_code=status.HTTP_401_UNAUTHORIZED, content={"code": "ERR_AUTH_MISSING", "msg": "Unauthenticated"}
                 )
             from app.shared.db.models import AccountMember
             async with AsyncSessionLocal() as db:
@@ -229,8 +228,8 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                 member = result.scalar_one_or_none()
             if not member:
                 return JSONResponse(
-                    status_code=403,
-                    content={"code": "ERR_TENANT_NO_ACCESS", "msg": "越权访问"},
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    content={"code": "ERR_TENANT_NO_ACCESS", "msg": "Access denied for tenant"},
                 )
 
         t_tok = tenant_ctx.set(account.id)
@@ -245,7 +244,7 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
-    """基于二级域名 Host 解析并在协程上下文中挂载租户隔离环境的客户端专属中间件。"""
+    """Client middleware to extract tenant slug from subdomain Host header."""
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -260,8 +259,8 @@ class TenantMiddleware(BaseHTTPMiddleware):
         slug = extract_slug_from_host(request.headers.get("host", ""))
         if not slug:
             return JSONResponse(
-                status_code=403,
-                content={"code": "ERR_TENANT_NO_ACCESS", "msg": "未识别出租户"},
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"code": "ERR_TENANT_NO_ACCESS", "msg": "Tenant not recognized"},
             )
 
         from app.shared.db.session import AsyncSessionLocal
@@ -269,8 +268,8 @@ class TenantMiddleware(BaseHTTPMiddleware):
             account = await resolve_account(slug, db)
         if not account:
             return JSONResponse(
-                status_code=403,
-                content={"code": "ERR_RESOURCE_LOCKED", "msg": "服务不可用"},
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"code": "ERR_RESOURCE_LOCKED", "msg": "Service unavailable"},
             )
 
         t_tok = tenant_ctx.set(account.id)

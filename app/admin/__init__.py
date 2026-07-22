@@ -1,4 +1,4 @@
-"""MINIClassIsland 超级管理员 API 路由聚合模块。
+"""MINIClassIsland Super Admin API Route Aggregation Module.
 """
 
 from fastapi import APIRouter

@@ -1,7 +1,9 @@
 import sys
 import os
+import pytest
+import pytest_asyncio
 
-# 移除 sys.path 中的 tests 目录，避免其子目录（如 tests/grpc）遮蔽同名的第三方标准库（如 grpc）
+# Remove tests directory from sys.path to avoid shadowing third-party modules like grpc
 paths_to_remove = []
 for path in sys.path:
     normalized = os.path.normpath(path)
@@ -14,3 +16,47 @@ for path in paths_to_remove:
         sys.path.remove(path)
     except ValueError:
         pass
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def db_cleaner():
+    """Clean all database tables before each test to ensure test isolation."""
+    from app.shared.db.session import engine
+    from app.shared.db.models import Base
+    from sqlalchemy import text
+
+    async with engine.begin() as conn:
+        for table in reversed(Base.metadata.sorted_tables):
+            await conn.execute(text(f'TRUNCATE TABLE "{table.name}" CASCADE;'))
+
+
+@pytest_asyncio.fixture
+async def test_superadmin_user():
+    """Fixture to create and return a superadmin user ID for testing."""
+    from datetime import datetime, timezone
+    from app.shared.db.session import AsyncSessionLocal
+    from app.shared.db.models import User
+    from app.shared.security.crypto import hash_password
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as db:
+        existing = (await db.execute(select(User).where(User.username == "superadmin_test"))).scalar_one_or_none()
+        if existing:
+            return existing.id
+
+        user = User(
+            username="superadmin_test",
+            email="superadmin@school.com",
+            hashed_password=hash_password("SuperAdmin123!"),
+            display_name="Super Admin Test",
+            role_code="superadmin",
+            is_active=True,
+            can_create_account=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+        return user.id
+
+

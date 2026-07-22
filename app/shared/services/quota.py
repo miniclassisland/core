@@ -1,6 +1,4 @@
-"""MINIClassIsland 租户资源配额度量与限制管理共享服务。
-
-包含对指定账户资源的检查、递增扣减、以及管理员针对账户限额设定等全部功能。
+"""MINIClassIsland tenant resource quota metrics and limitation management service.
 """
 
 import uuid
@@ -13,7 +11,7 @@ from app.shared.db.models import AccountQuota
 async def get_quota_record(
     account_id: str, key: str, db: AsyncSession
 ) -> AccountQuota | None:
-    """查询指定账户的配额记录实体。"""
+    """Query quota record entity for specified account."""
     result = await db.execute(
         select(AccountQuota).where(
             AccountQuota.account_id == account_id,
@@ -28,12 +26,12 @@ async def check_quota(
     quota_key: str,
     db: AsyncSession,
 ) -> bool:
-    """检查账户在指定配额项上是否未达上限（允许继续消费）。"""
+    """Check if tenant account has not reached quota limit for a given quota key."""
     quota = await get_quota_record(account_id, quota_key, db)
     if not quota:
-        return True  # 未设置配额时默认为无限制
+        return True  # Unlimited if not set
     if quota.max_value == -1:
-        return True  # -1 标志无配额上限
+        return True  # -1 represents no limit
     return quota.current_value < quota.max_value
 
 
@@ -44,7 +42,7 @@ async def increment_quota(
     *,
     amount: int = 1,
 ) -> bool:
-    """递增配额使用量。超出上限则返回 False。"""
+    """Increment quota usage. Returns False if limit exceeded."""
     quota = await get_quota_record(account_id, quota_key, db)
     if not quota:
         return True
@@ -57,7 +55,7 @@ async def increment_quota(
 
 
 async def get_quotas(account_id: str, db: AsyncSession) -> list[AccountQuota]:
-    """查询指定账户的全部限额及使用量状态列表。"""
+    """Get all quota records and current usage for account."""
     result = await db.execute(
         select(AccountQuota).where(AccountQuota.account_id == account_id)
     )
@@ -70,7 +68,7 @@ async def set_quota(
     max_value: int,
     db: AsyncSession,
 ) -> AccountQuota:
-    """创建或更新账户的限额上限值。"""
+    """Create or update quota maximum value for account."""
     existing = await get_quota_record(account_id, quota_key, db)
     if existing:
         existing.max_value = max_value

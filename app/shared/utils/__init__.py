@@ -1,2 +1,2 @@
-"""MINIClassIsland 共享基础设施工具包。
+"""MINIClassIsland shared infrastructure utilities package.
 """

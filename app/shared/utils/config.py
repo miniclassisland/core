@@ -1,6 +1,6 @@
-"""全局应用配置与初始化状态检测。
+"""Global application configuration and initialization state checking.
 
-配置优先级：.miniclassisland/config.json > 环境变量 > .env 默认值。
+Configuration priority: .miniclassisland/config.json > Environment variables > .env default values.
 """
 
 import json
@@ -10,12 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
-# 项目根目录 (相对于 app/shared/utils/config.py)
+# Project root directory (relative to app/shared/utils/config.py)
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 class MINIClassIslandSettings(BaseSettings):
-    """MINIClassIsland 全局配置，自动从环境变量与 .env 文件加载。"""
+    """MINIClassIsland global settings, automatically loaded from environment variables and .env file."""
 
     model_config = SettingsConfigDict(
         env_file=str(_PROJECT_ROOT / ".env"),
@@ -23,38 +23,38 @@ class MINIClassIslandSettings(BaseSettings):
         extra="ignore",
     )
 
-    # 数据库 / Redis 连接串
+    # Database / Redis connection strings
     database_url: str = ""
     redis_url: str = ""
 
-    # 多租户托管根域名
+    # Multi-tenant base domain
     miniclassisland_base_domain: str = "miniclassisland.com"
 
-    # 服务端口分配
+    # Service port allocations
     miniclassisland_client_port: int = 27041
     miniclassisland_management_port: int = 27042
     miniclassisland_admin_port: int = 27043
     miniclassisland_grpc_port: int = 27044
 
-    # GPG 密钥文件与超管密钥
+    # GPG key file and admin secret
     miniclassisland_key_file: str = "miniclassisland_server.key"
     miniclassisland_admin_secret: str = "change-me"
 
 
 _settings = MINIClassIslandSettings()
 
-# .miniclassisland 目录与配置文件路径
+# .miniclassisland directory and configuration file path
 CONFIG_DIR = _PROJECT_ROOT / ".miniclassisland"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
 def is_initialized() -> bool:
-    """检测系统是否已完成初始化（即配置文件是否存在）。"""
+    """Check if system initialization is complete (whether config file exists)."""
     return CONFIG_FILE.exists()
 
 
 def _load_file_config() -> dict:
-    """从 .miniclassisland/config.json 加载本地配置覆盖项。"""
+    """Load local config overrides from .miniclassisland/config.json."""
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -63,37 +63,37 @@ def _load_file_config() -> dict:
 
 _file_cfg = _load_file_config()
 
-# 模块级全局常量暴露
+# Module-level global constants
 DATABASE_URL: str = _file_cfg.get("database_url") or _settings.database_url
 REDIS_URL: str = _settings.redis_url
 
-# Redis 逻辑数据库编号
+# Redis logical database IDs
 REDIS_DB_AUTH: int = 0
 REDIS_DB_SESSION: int = 1
 REDIS_DB_CACHE: int = 2
 
-# 多租户隔离全局变量
+# Multi-tenant isolation variables
 BASE_DOMAIN: str = _settings.miniclassisland_base_domain
 DEFAULT_SCHEMA: str = "public"
 
-# 四端口分配常量
+# Four port allocation constants
 CLIENT_PORT: int = _settings.miniclassisland_client_port
 MANAGEMENT_PORT: int = _settings.miniclassisland_management_port
 ADMIN_PORT: int = _settings.miniclassisland_admin_port
 GRPC_PORT: int = _settings.miniclassisland_grpc_port
 
-# GPG 密钥文件名
+# GPG key file name
 KEY_FILE: str = _settings.miniclassisland_key_file
 
 
 def validate_config() -> None:
-    """在服务启动前校验数据库与 Redis 关键配置是否提供。"""
+    """Validate Database and Redis configuration before service startup."""
     if not is_initialized():
         return
 
     if not DATABASE_URL:
         raise RuntimeError(
-            "必须通过 .miniclassisland/config.json、.env 或 DATABASE_URL 环境变量提供数据库连接"
+            "Database connection must be provided via .miniclassisland/config.json, .env, or DATABASE_URL environment variable"
         )
     if not REDIS_URL:
-        raise RuntimeError("必须通过 .env 或 REDIS_URL 环境变量提供 Redis 连接")
+        raise RuntimeError("Redis connection must be provided via .env or REDIS_URL environment variable")

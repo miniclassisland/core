@@ -5,14 +5,14 @@ from pathlib import Path
 from typing import Optional
 import typer
 
-ci_app = typer.Typer(help="CI 持续集成与工具链")
-grpc_app = typer.Typer(help="gRPC 代码生成")
+ci_app = typer.Typer(help="CI continuous integration and toolchain")
+grpc_app = typer.Typer(help="gRPC code generation")
 ci_app.add_typer(grpc_app, name="grpc")
 
 
 @ci_app.command("build")
 def build_package():
-    """使用 uv build 构建项目发布包。"""
+    """Build project distribution package using uv build."""
     import subprocess
     result = subprocess.run(["uv", "build"], capture_output=True, text=True)
     if result.returncode == 0:
@@ -25,17 +25,17 @@ def build_package():
 
 @grpc_app.command("generate")
 def generate_grpc():
-    """编译 Protobuf 目录下的所有 .proto 文件到 app/Protobuf 目录下。"""
+    """Compile all .proto files under Protobuf/ directory into app/Protobuf/."""
     import grpc_tools.protoc
 
     proto_dir = Path("Protobuf")
-    # 查找所有的 .proto 文件
+    # Find all .proto files
     proto_files = list(proto_dir.rglob("*.proto"))
     if not proto_files:
         print("No proto files found under Protobuf", file=sys.stderr)
         raise typer.Exit(code=1)
 
-    # 目标生成目录为 app/Protobuf
+    # Target output directory is app/Protobuf
     out_dir = Path("app/Protobuf")
     if out_dir.exists():
         try:
@@ -47,7 +47,7 @@ def generate_grpc():
     except Exception:
         pass
 
-    # 写入 app/Protobuf/__init__.py 修正模块导入路径，建立 sys.modules 别名避免污染 sys.path
+    # Write app/Protobuf/__init__.py to alias sys.modules['Protobuf']
     api_init = out_dir / "__init__.py"
     try:
         api_init.write_text(
@@ -58,7 +58,7 @@ def generate_grpc():
     except Exception:
         pass
 
-    # 准备 protoc 编译命令参数
+    # Prepare protoc compilation parameters
     args = [
         "grpc_tools.protoc",
         "-I.",
@@ -78,13 +78,13 @@ def generate_grpc():
             
     args.extend(proto_args)
 
-    # 运行 protoc 编译
+    # Run protoc compilation
     ret = grpc_tools.protoc.main(args)
     if ret != 0:
         print(f"Failed to compile: protoc returned {ret}", file=sys.stderr)
         raise typer.Exit(code=255)
 
-    # 编译成功后，为生成的文件夹递归生成 __init__.py 并 touch
+    # Recursively create __init__.py for generated folders
     def create_inits(directory: Path):
         try:
             if not directory.exists():

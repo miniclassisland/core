@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import EmailStr
 from sqlalchemy import select, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,50 +51,50 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-# ---- 1. 租户上下文自适应依赖注入项 (Tenant context dependency) ----
+# ---- 1. Tenant Context Adaptive Dependency ----
 
 async def setup_tenant_context(
     account_id: str,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    """设置协程上下文中的租户 ID 和数据库 search_path，并验证成员权限。"""
+    """Set tenant ID and database search_path in coroutine context, and verify member permissions."""
     from app.shared.utils.tenant import tenant_ctx, schema_ctx, set_search_path
 
     stmt = select(Account).where(Account.id == account_id)
     account = (await db.execute(stmt)).scalar_one_or_none()
     if not account or not account.is_active:
-        raise HTTPException(status_code=403, detail="账户异常或不存在")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account invalid or non-existent")
 
-    # 验证当前用户是否是该账户的成员
+    # Verify if current user is a member of this account
     member_stmt = select(AccountMember).where(
         AccountMember.account_id == account_id,
         AccountMember.user_id == user_id,
     )
     member = (await db.execute(member_stmt)).scalar_one_or_none()
     if not member:
-        raise HTTPException(status_code=403, detail="越权访问：您不是该账户的成员")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Unauthorized access: You are not a member of this account")
 
     tenant_ctx.set(account.id)
     schema_ctx.set(f"tenant_{account.slug}")
     await set_search_path(db)
 
 
-# ---- 2. 租户账户管理 (Tenant Account Management) ----
+# ---- 2. Tenant Account Management ----
 
 @router.get("/account/availability/slug", tags=["Availability"])
 async def check_slug_availability(
-    value: str = Query(..., min_length=3, max_length=64, description="待检查的 Slug"),
+    value: str = Query(..., min_length=3, max_length=64, description="Slug to check"),
     db: AsyncSession = Depends(get_db),
 ):
-    """检查账户 Slug 是否可用。"""
+    """Check if account slug is available."""
     if not validate_slug_format(value):
-        return {"available": False, "reason": "Slug 格式不合法"}
+        return {"available": False, "reason": "Slug format invalid"}
     if await is_name_reserved(value, db):
-        return {"available": False, "reason": "该名称为系统保留名"}
+        return {"available": False, "reason": "Name is reserved by system"}
     result = await db.execute(select(Account.id).where(Account.slug == value))
     if result.scalar_one_or_none() is not None:
-        return {"available": False, "reason": "该 Slug 已被占用"}
+        return {"available": False, "reason": "Slug is already taken"}
     return {"available": True}
 
 
@@ -103,7 +103,7 @@ async def list_accounts(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    """列出当前用户有权限访问的所有账户。"""
+    """List all accounts that the current user has access to."""
     stmt = (
         select(Account)
         .join(AccountMember, Account.id == AccountMember.account_id)
@@ -130,7 +130,7 @@ async def search_accounts(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    """按名称搜索当前用户可见的账户。"""
+    """Search accessible accounts by name."""
     stmt = (
         select(Account)
         .join(AccountMember, Account.id == AccountMember.account_id)
@@ -151,21 +151,21 @@ async def search_accounts(
     ]
 
 
-@router.post("/account/apply", response_model=AccountOut, status_code=201, tags=["Account"])
+@router.post("/account/apply", response_model=AccountOut, status_code=status.HTTP_201_CREATED, tags=["Account"])
 async def apply_account(
     body: AccountCreate,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    """申请创建新账户。"""
+    """Apply to create a new account."""
     from app.shared.db.models import User
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user or not user.can_create_account:
-        raise HTTPException(status_code=403, detail="无权创建账户")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied to create account")
     try:
         account = await create_account(body.name, user_id, db, slug=body.slug)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return AccountOut(
         id=account.id,
         name=account.name,
@@ -182,7 +182,7 @@ async def delete_account(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """停用账户（需 owner 权限，级联清理关联数据）。"""
+    """Deactivate account (Owner permission required, cleans up associated data)."""
     member = (
         await db.execute(
             select(AccountMember).where(
@@ -192,16 +192,16 @@ async def delete_account(
         )
     ).scalar_one_or_none()
     if not member or member.role_in_account != "owner":
-        raise HTTPException(status_code=403, detail="仅账户所有者可执行此操作")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only account owner can perform this operation")
     acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
     if not acct:
-        raise HTTPException(status_code=404, detail="账户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     
     acct.is_active = False
     await db.execute(delete(AccountMember).where(AccountMember.account_id == account_id))
     await db.execute(delete(PreRegisteredClient).where(PreRegisteredClient.account_id == account_id))
     await db.commit()
-    return {"message": "账户已停用，关联数据已清理"}
+    return {"status": "ok", "message": "Account deactivated and associated data cleaned up"}
 
 
 @router.get("/account/{account_id}/info", response_model=AccountOut, tags=["Account"])
@@ -210,10 +210,10 @@ async def get_account_info(
     db: AsyncSession = Depends(get_db),
     _uid: str = Depends(get_current_user_id),
 ):
-    """获取账户信息。"""
+    """Get account information."""
     acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
     if not acct:
-        raise HTTPException(status_code=404, detail="账户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     return AccountOut(
         id=acct.id,
         name=acct.name,
@@ -231,15 +231,15 @@ async def change_slug(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """修改账户 slug。"""
+    """Update account slug."""
     try:
         acct = await update_account_slug(account_id, body.slug, uid, db)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if not acct:
-        raise HTTPException(status_code=404, detail="账户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     return AccountOut(
         id=acct.id,
         name=acct.name,
@@ -250,7 +250,7 @@ async def change_slug(
     )
 
 
-# ---- 3. 成员访问控制管理 (Tenant Access Control) ----
+# ---- 3. Tenant Access Control ----
 
 def _member_out(m: AccountMember) -> AccessMemberOut:
     return AccessMemberOut(
@@ -267,15 +267,15 @@ async def list_access(
     account_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """列出账户下的具权用户。"""
+    """List members under the account."""
     rows = (await db.execute(select(AccountMember).where(AccountMember.account_id == account_id))).scalars().all()
     return [_member_out(m) for m in rows]
 
 
 @router.post("/account/{account_id}/access/{user_id}/rename", tags=["Access"], dependencies=[Depends(setup_tenant_context)])
 async def rename_access(account_id: str, user_id: str):
-    """重命名具权用户。"""
-    return {"message": "暂未实现"}
+    """Rename member user."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.get("/account/{account_id}/access/search", response_model=list[AccessMemberOut], tags=["Access"], dependencies=[Depends(setup_tenant_context)])
@@ -284,7 +284,7 @@ async def search_access(
     q: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    """按 user_id 搜索账户成员。"""
+    """Search account members by user_id."""
     stmt = select(AccountMember).where(
         AccountMember.account_id == account_id,
         AccountMember.user_id.ilike(f"%{q}%"),
@@ -299,7 +299,7 @@ async def get_access_detail(
     user_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """获取具权用户信息。"""
+    """Get member details by user_id."""
     m = (
         await db.execute(
             select(AccountMember).where(
@@ -309,17 +309,17 @@ async def get_access_detail(
         )
     ).scalar_one_or_none()
     if not m:
-        raise HTTPException(status_code=404, detail="成员不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found")
     return _member_out(m)
 
 
-@router.delete("/account/{account_id}/access/{user_id}", status_code=204, tags=["Access"], dependencies=[Depends(setup_tenant_context)])
+@router.delete("/account/{account_id}/access/{user_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Access"], dependencies=[Depends(setup_tenant_context)])
 async def delete_access(
     account_id: str,
     user_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """移除账户成员。"""
+    """Remove member from account."""
     m = (
         await db.execute(
             select(AccountMember).where(
@@ -329,7 +329,7 @@ async def delete_access(
         )
     ).scalar_one_or_none()
     if not m:
-        raise HTTPException(status_code=404, detail="成员记录不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member record not found")
     await db.delete(m)
     await db.commit()
 
@@ -341,7 +341,7 @@ async def update_access(
     body: AccessRoleUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """修改成员的账户内角色。"""
+    """Update member's role within account."""
     m = (
         await db.execute(
             select(AccountMember).where(
@@ -351,14 +351,14 @@ async def update_access(
         )
     ).scalar_one_or_none()
     if not m:
-        raise HTTPException(status_code=404, detail="成员记录不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member record not found")
     m.role_in_account = body.role_in_account
     await db.commit()
     await db.refresh(m)
     return _member_out(m)
 
 
-# ---- 4. 邀请管理 (Tenant Invitation Management) ----
+# ---- 4. Tenant Invitation Management ----
 
 def _inv_out(inv: Invitation) -> InvitationOut:
     return InvitationOut(
@@ -380,7 +380,7 @@ async def list_invitations(
     account_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """列出账户下的邀请。"""
+    """List all invitations under account."""
     rows = (await db.execute(select(Invitation).where(Invitation.account_id == account_id))).scalars().all()
     return [_inv_out(inv) for inv in rows]
 
@@ -391,7 +391,7 @@ async def search_invitations(
     q: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    """搜索邀请。"""
+    """Search invitations by code."""
     rows = (await db.execute(select(Invitation).where(Invitation.account_id == account_id))).scalars().all()
     if not q:
         return [_inv_out(inv) for inv in rows]
@@ -400,8 +400,8 @@ async def search_invitations(
 
 @router.post("/account/{account_id}/invitation/{invitation_id}/rename", tags=["Invite"], dependencies=[Depends(setup_tenant_context)])
 async def rename_invitation(account_id: str, invitation_id: str):
-    """重命名邀请码。"""
-    return {"message": "暂未实现"}
+    """Rename invitation code."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.get("/account/{account_id}/invitation/{invitation_id}", response_model=InvitationOut, tags=["Invite"], dependencies=[Depends(setup_tenant_context)])
@@ -410,7 +410,7 @@ async def get_invitation(
     invitation_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """获取邀请信息。"""
+    """Get invitation details."""
     inv = (
         await db.execute(
             select(Invitation).where(
@@ -420,18 +420,18 @@ async def get_invitation(
         )
     ).scalar_one_or_none()
     if not inv:
-        raise HTTPException(status_code=404, detail="邀请不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
     return _inv_out(inv)
 
 
-@router.post("/account/{account_id}/invitation/create", response_model=InvitationOut, status_code=201, tags=["Invite"], dependencies=[Depends(setup_tenant_context)])
+@router.post("/account/{account_id}/invitation/create", response_model=InvitationOut, status_code=status.HTTP_201_CREATED, tags=["Invite"], dependencies=[Depends(setup_tenant_context)])
 async def create_invitation(
     account_id: str,
     body: InvitationCreate,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """创建新邀请码。"""
+    """Create a new invitation code."""
     inv = Invitation(
         account_id=account_id,
         inviter_user_id=uid,
@@ -452,7 +452,7 @@ async def revoke_invitation(
     invitation_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """撤销指定邀请码。"""
+    """Revoke specified invitation code."""
     inv = (
         await db.execute(
             select(Invitation).where(
@@ -462,19 +462,19 @@ async def revoke_invitation(
         )
     ).scalar_one_or_none()
     if not inv:
-        raise HTTPException(status_code=404, detail="邀请不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
     inv.is_active = False
     await db.commit()
-    return {"message": f"邀请 {invitation_id} 已撤销"}
+    return {"status": "ok", "message": f"Invitation {invitation_id} revoked"}
 
 
-# ---- 5. 设备配对码管理 (Client Pairing Code Management) ----
+# ---- 5. Client Pairing Code Management ----
 
 @router.get("/account/{account_id}/pairing/list", response_model=list[PairingCodeOut], tags=["Pairing"], dependencies=[Depends(setup_tenant_context)])
 async def list_pairing_codes(
     db: AsyncSession = Depends(get_db),
 ):
-    """列出当前账户的配对码。"""
+    """List pairing codes for current account."""
     from app.shared.utils.tenant import get_tenant_id
     tid = get_tenant_id()
     rows = (await db.execute(select(PairingCode).where(PairingCode.tenant_id == tid))).scalars().all()
@@ -496,7 +496,7 @@ async def search_pairing_codes(
     q: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    """搜索配对码。"""
+    """Search pairing codes."""
     from app.shared.utils.tenant import get_tenant_id
     tid = get_tenant_id()
     rows = (await db.execute(select(PairingCode).where(PairingCode.tenant_id == tid))).scalars().all()
@@ -516,14 +516,14 @@ async def search_pairing_codes(
 
 @router.post("/account/{account_id}/pairing/enable", tags=["Pairing"], dependencies=[Depends(setup_tenant_context)])
 async def enable_pairing():
-    """启用配对码功能。"""
-    return {"message": "暂未实现"}
+    """Enable pairing code functionality."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.post("/account/{account_id}/pairing/disable", tags=["Pairing"], dependencies=[Depends(setup_tenant_context)])
 async def disable_pairing():
-    """禁用配对码功能。"""
-    return {"message": "暂未实现"}
+    """Disable pairing code functionality."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.post("/account/{account_id}/pairing/{pairing_id}/reject", tags=["Pairing"], dependencies=[Depends(setup_tenant_context)])
@@ -531,7 +531,7 @@ async def reject_pairing(
     pairing_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """拒绝（撤销）配对码。"""
+    """Reject (revoke) pairing code."""
     from app.shared.utils.tenant import get_tenant_id
     tid = get_tenant_id()
     row = (
@@ -543,10 +543,10 @@ async def reject_pairing(
         )
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="配对码不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pairing code not found")
     await db.delete(row)
     await db.commit()
-    return {"message": f"配对码 {pairing_id} 已拒绝"}
+    return {"status": "ok", "message": f"Pairing code {pairing_id} rejected"}
 
 
 @router.post("/account/{account_id}/pairing/{pairing_id}/approve", tags=["Pairing"], dependencies=[Depends(setup_tenant_context)])
@@ -554,7 +554,7 @@ async def approve_pairing_code(
     pairing_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """批准配对码。"""
+    """Approve pairing code."""
     from app.shared.utils.tenant import get_tenant_id
     tid = get_tenant_id()
     row = (
@@ -566,13 +566,13 @@ async def approve_pairing_code(
         )
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="配对码不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pairing code not found")
     row.approved = True
     await db.commit()
-    return {"message": f"配对码 {pairing_id} 已批准"}
+    return {"status": "ok", "message": f"Pairing code {pairing_id} approved"}
 
 
-# ---- 6. 预注册物理客户端管理 (Pre-Registered Client Management) ----
+# ---- 6. Pre-Registered Client Management ----
 
 def _prereg_out(p: PreRegisteredClient) -> PreRegOut:
     return PreRegOut(
@@ -584,13 +584,13 @@ def _prereg_out(p: PreRegisteredClient) -> PreRegOut:
     )
 
 
-@router.post("/account/{account_id}/pre-registration/create", response_model=PreRegOut, status_code=201, tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
+@router.post("/account/{account_id}/pre-registration/create", response_model=PreRegOut, status_code=status.HTTP_201_CREATED, tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
 async def create_pre_reg(
     account_id: str,
     body: PreRegCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """创建预注册客户端设备标识，校验 class_identity 唯一性。"""
+    """Create pre-registered client device, validating class_identity uniqueness."""
     dup = await db.execute(
         select(PreRegisteredClient).where(
             PreRegisteredClient.account_id == account_id,
@@ -598,7 +598,7 @@ async def create_pre_reg(
         )
     )
     if dup.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="该 class_identity 已存在")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="class_identity already exists")
     p = PreRegisteredClient(
         id=str(uuid.uuid4()),
         account_id=account_id,
@@ -617,7 +617,7 @@ async def list_pre_regs(
     account_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """列出当前账户所有的预注册客户端记录。"""
+    """List all pre-registered client device records for current account."""
     rows = (await db.execute(select(PreRegisteredClient).where(PreRegisteredClient.account_id == account_id))).scalars().all()
     return [_prereg_out(r) for r in rows]
 
@@ -628,7 +628,7 @@ async def search_pre_regs(
     q: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    """按标识模糊搜索预注册客户端设备。"""
+    """Search pre-registered clients by class_identity."""
     rows = (await db.execute(select(PreRegisteredClient).where(PreRegisteredClient.account_id == account_id))).scalars().all()
     if not q:
         return [_prereg_out(r) for r in rows]
@@ -641,7 +641,7 @@ async def get_pre_reg(
     pre_reg_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """查询指定预注册设备的具体详情信息。"""
+    """Get pre-registered client device details."""
     row = (
         await db.execute(
             select(PreRegisteredClient).where(
@@ -651,17 +651,17 @@ async def get_pre_reg(
         )
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="预注册客户端不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pre-registered client not found")
     return _prereg_out(row)
 
 
-@router.delete("/account/{account_id}/pre-registration/{pre_reg_id}", status_code=204, tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
+@router.delete("/account/{account_id}/pre-registration/{pre_reg_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
 async def delete_pre_reg(
     account_id: str,
     pre_reg_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """删除指定的客户端预注册记录。"""
+    """Delete pre-registered client device record."""
     row = (
         await db.execute(
             select(PreRegisteredClient).where(
@@ -671,33 +671,33 @@ async def delete_pre_reg(
         )
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(status_code=404, detail="预注册客户端不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pre-registered client not found")
     await db.delete(row)
     await db.commit()
 
 
 @router.post("/account/{account_id}/pre-registration/{pre_reg_id}/rename", tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
 async def rename_pre_reg(account_id: str, pre_reg_id: str):
-    """重命名预注册设备。"""
-    return {"message": "暂未实现"}
+    """Rename pre-registered device."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.post("/account/{account_id}/pre-registration/{pre_reg_id}/enable", tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
 async def enable_pre_reg(account_id: str, pre_reg_id: str):
-    """启用预注册设备。"""
-    return {"message": "暂未实现"}
+    """Enable pre-registered device."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.post("/account/{account_id}/pre-registration/{pre_reg_id}/disable", tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
 async def disable_pre_reg(account_id: str, pre_reg_id: str):
-    """禁用预注册设备。"""
-    return {"message": "暂未实现"}
+    """Disable pre-registered device."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.post("/account/{account_id}/pre-registration/{pre_reg_id}/config", tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
 async def config_pre_reg(account_id: str, pre_reg_id: str):
-    """修改预注册客户端的档案组配置。"""
-    return {"message": "暂未实现"}
+    """Update profile configuration for pre-registered client."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
 @router.get("/account/{account_id}/pre-registration/{pre_reg_id}/ManagementPreset.json", tags=["PreReg"], dependencies=[Depends(setup_tenant_context)])
@@ -706,10 +706,10 @@ async def download_preset(
     pre_reg_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """下载特定预注册客户端设备的开箱引导管理配置 JSON 档案。"""
+    """Download OOBE ManagementPreset.json configuration archive for a specific pre-registered client device."""
     acct = (await db.execute(select(Account).where(Account.id == account_id))).scalar_one_or_none()
     if not acct or not acct.is_active:
-        raise HTTPException(status_code=404, detail="账户不存在或已停用")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found or deactivated")
     pre_reg = (
         await db.execute(
             select(PreRegisteredClient).where(
@@ -719,7 +719,7 @@ async def download_preset(
         )
     ).scalar_one_or_none()
     if not pre_reg:
-        raise HTTPException(status_code=404, detail="预注册客户端不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pre-registered client not found")
     return {
         "IsManagementEnabled": True,
         "ManagementServerKind": 1,
@@ -730,13 +730,13 @@ async def download_preset(
     }
 
 
-# ---- 7. 物理客户端与指令监控管理 (Client Machine & Commands) ----
+# ---- 7. Client Machine & Command Monitoring ----
 
 @router.get("/account/{account_id}/client/list", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
 async def list_clients(
     db: AsyncSession = Depends(get_db),
 ):
-    """获取当前租户下所有已注册物理客户端设备的 UID 标识列表。"""
+    """Get list of registered client UIDs for current tenant."""
     return (await db.execute(select(ClientRecord.uid))).scalars().all()
 
 
@@ -745,7 +745,7 @@ async def search_clients(
     q: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    """按 UID 标识模糊搜索物理客户端列表。"""
+    """Search registered physical client devices by UID."""
     rows = (await db.execute(select(ClientRecord))).scalars().all()
     if not q:
         return [r.uid for r in rows]
@@ -759,10 +759,10 @@ async def get_client_detail(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """查询特定客户端硬件的连接注册详情与长连接在线状态。"""
+    """Query registration details and online status for a specific client device."""
     record = (await db.execute(select(ClientRecord).where(ClientRecord.uid == client_id))).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="未找到设备")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     sm = getattr(request.app.state, "session_manager", None)
     online = await sm.is_client_online(account_id, client_id) if sm else False
     return {
@@ -779,19 +779,19 @@ async def delete_client(
     client_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """注销并强制踢出物理客户端设备记录。"""
+    """Unregister and remove physical client device record."""
     record = (await db.execute(select(ClientRecord).where(ClientRecord.uid == client_id))).scalar_one_or_none()
     if not record:
-        raise HTTPException(status_code=404, detail="未找到设备")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     await db.delete(record)
     await db.commit()
-    return {"message": "已删除"}
+    return {"status": "ok", "message": "Deleted"}
 
 
 @router.post("/account/{account_id}/client/{client_id}/rename", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
 async def rename_client(client_id: str):
-    """重命名指定的物理客户端机器。"""
-    return {"message": "暂未实现", "client_id": client_id}
+    """Rename specified physical client machine."""
+    return {"status": "ok", "message": "Not implemented yet", "client_id": client_id}
 
 
 @router.get("/account/{account_id}/client/{client_id}/status", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
@@ -800,7 +800,7 @@ async def get_client_status(
     client_id: str,
     request: Request,
 ):
-    """快速查询指定客户端的心跳在线活跃状态。"""
+    """Query heartbeat active online status for specified client."""
     sm = getattr(request.app.state, "session_manager", None)
     online = await sm.is_client_online(account_id, client_id) if sm else False
     return {"client_id": client_id, "online": online}
@@ -808,35 +808,35 @@ async def get_client_status(
 
 @router.post("/account/{account_id}/client/{client_id}/disconnect", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
 async def disconnect_client(client_id: str):
-    """断开物理客户端。"""
-    return {"message": "暂未实现", "client_id": client_id}
+    """Disconnect physical client device."""
+    return {"status": "ok", "message": "Not implemented yet", "client_id": client_id}
 
 
 @router.post("/account/{account_id}/client/{client_id}/disable", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
 async def disable_client(client_id: str):
-    """禁用指定物理客户端设备。"""
-    return {"message": "暂未实现", "client_id": client_id}
+    """Disable specified physical client device."""
+    return {"status": "ok", "message": "Not implemented yet", "client_id": client_id}
 
 
 @router.post("/account/{account_id}/client/{client_id}/enable", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
 async def enable_client(client_id: str):
-    """启用指定物理客户端设备。"""
-    return {"message": "暂未实现", "client_id": client_id}
+    """Enable specified physical client device."""
+    return {"status": "ok", "message": "Not implemented yet", "client_id": client_id}
 
 
 @router.post("/account/{account_id}/client/{client_id}/config", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
 async def set_client_config(client_id: str):
-    """修改物理客户端机器使用的资源配置组。"""
-    return {"message": "暂未实现", "client_id": client_id}
+    """Update resource configuration set for physical client device."""
+    return {"status": "ok", "message": "Not implemented yet", "client_id": client_id}
 
 
-# ---- 8. 远程实时控制命令推送 (Remote Control Instructions Push) ----
+# ---- 8. Remote Control Command Push ----
 
 async def _push_cmd(request: Request, account_id: str, uid: str, cmd_type: int) -> StatusResponse:
-    """下发简单的无负载 gRPC 指令辅助块。"""
+    """Helper function to deliver simple payload-less gRPC command."""
     servicer = getattr(request.app.state, "command_servicer", None)
     if not servicer:
-        return StatusResponse(status="error", message="gRPC 服务不可用")
+        return StatusResponse(status="error", message="gRPC service unavailable")
 
     from app.grpc.api.Protobuf.Server import ClientCommandDeliverScRsp_pb2
     from app.grpc.api.Protobuf.Enum import Retcode_pb2
@@ -845,7 +845,7 @@ async def _push_cmd(request: Request, account_id: str, uid: str, cmd_type: int) 
         RetCode=Retcode_pb2.Success, Type=cmd_type
     )
     await servicer.send_command(account_id, uid, cmd)
-    return StatusResponse(status="success", message="指令已下发")
+    return StatusResponse(status="success", message="Command delivered")
 
 
 @router.get("/account/{account_id}/client/{client_id}/command/get-config", tags=["Client"], dependencies=[Depends(setup_tenant_context)])
@@ -855,10 +855,10 @@ async def fetch_runtime_config(
     config_type: int,
     request: Request,
 ):
-    """主动请求终端向服务端同步汇报其当前运行状态的完整快照配置。"""
+    """Request client to report full runtime snapshot configuration."""
     servicer = getattr(request.app.state, "command_servicer", None)
     if not servicer:
-        return {"status": "error", "message": "通讯通道关闭"}
+        return {"status": "error", "message": "Communication channel closed"}
 
     from app.grpc.api.Protobuf.Server import ClientCommandDeliverScRsp_pb2
     from app.grpc.api.Protobuf.Command import GetClientConfig_pb2
@@ -878,7 +878,7 @@ async def fetch_runtime_config(
     await servicer.send_command(account_id, client_id, cmd)
     return {
         "status": "success",
-        "message": f"请求已下发，ID: {req_id}",
+        "message": f"Request delivered, GUID: {req_id}",
         "request_guid": req_id,
     }
 
@@ -889,7 +889,7 @@ async def restart_app(
     client_id: str,
     request: Request,
 ):
-    """控制指令：要求指定物理客户端机重新启动 ClassIsland 主渲染应用。"""
+    """Control instruction: request physical client machine to restart main ClassIsland application."""
     from app.grpc.api.Protobuf.Enum import CommandTypes_pb2
     return await _push_cmd(request, account_id, client_id, CommandTypes_pb2.RestartApp)
 
@@ -900,7 +900,7 @@ async def force_sync(
     client_id: str,
     request: Request,
 ):
-    """控制指令：强制指定物理机器立刻拉取并覆盖最新的资源配置包。"""
+    """Control instruction: force physical machine to fetch and reload latest resource configuration."""
     from app.grpc.api.Protobuf.Enum import CommandTypes_pb2
     return await _push_cmd(request, account_id, client_id, CommandTypes_pb2.DataUpdated)
 
@@ -912,10 +912,10 @@ async def push_notify(
     request: Request,
     payload: NotificationPayload = Body(...),
 ):
-    """控制指令：向指定的物理终端下发并置顶桌面浮窗通知。"""
+    """Control instruction: send and display desktop notification on target client device."""
     servicer = getattr(request.app.state, "command_servicer", None)
     if not servicer:
-        return StatusResponse(status="error", message="gRPC 通道未开启")
+        return StatusResponse(status="error", message="gRPC channel not open")
 
     from app.grpc.api.Protobuf.Server import ClientCommandDeliverScRsp_pb2
     from app.grpc.api.Protobuf.Command import SendNotification_pb2
@@ -930,20 +930,20 @@ async def push_notify(
     )
 
     await servicer.send_command(account_id, client_id, cmd)
-    return StatusResponse(status="success", message="通知已递送")
+    return StatusResponse(status="success", message="Notification delivered")
 
 
-# ---- 9. 资源包数据管理 CRUD (Tenant Config Resources DDL) ----
+# ---- 9. Config Resource CRUD (Tenant Config Resources DDL) ----
 
-# 安全限制常量
+# Safety limits
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KB
 MAX_NESTING_DEPTH = 10
 
 
 def _check_depth(obj, current: int = 0) -> int:
-    """递归检查嵌套深度，超限时抛出异常。"""
+    """Recursively check nesting depth and raise exception if limit exceeded."""
     if current > MAX_NESTING_DEPTH:
-        raise HTTPException(status_code=400, detail="嵌套载荷深度超限")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload nesting depth exceeded limit")
     if isinstance(obj, dict):
         for v in obj.values():
             _check_depth(v, current + 1)
@@ -954,21 +954,21 @@ def _check_depth(obj, current: int = 0) -> int:
 
 
 def validate_payload(payload: dict) -> None:
-    """校验 payload 大小和嵌套深度。"""
+    """Validate payload size and nesting depth."""
     raw = json.dumps(payload, ensure_ascii=False)
     if len(raw.encode("utf-8")) > MAX_PAYLOAD_BYTES:
-        raise HTTPException(status_code=400, detail="载荷体积超过 512KB 限制")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Payload size exceeds 512KB limit")
     _check_depth(payload)
 
 
 def check_version(record, client_version: Optional[int]) -> None:
-    """乐观锁校验版本。"""
+    """Optimistic locking version validation."""
     if client_version is None:
         return
     if record.version != client_version:
         raise HTTPException(
-            status_code=409,
-            detail=f"版本冲突：服务端={record.version}, 客户端={client_version}",
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Version conflict: server={record.version}, client={client_version}",
         )
 
 
@@ -978,18 +978,18 @@ async def create_data(
     name: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """新建一个空的租户隔离配置文件。"""
+    """Create a new empty tenant configuration file."""
     model = MODEL_MAP.get(resource_type)
     if not model:
-        return StatusResponse(status="error", message="无效资源类型")
+        return StatusResponse(status="error", message="Invalid resource type")
     existing = await db.execute(select(model).where(model.name == name))
     if existing.scalar_one_or_none():
-        return StatusResponse(status="error", message=f"{name} 已存在")
+        return StatusResponse(status="error", message=f"{name} already exists")
     db.add(
         model(name=name, content="{}", version=0, updated_at=datetime.now(timezone.utc))
     )
     await db.commit()
-    return StatusResponse(status="success", message=f"已创建 {name}")
+    return StatusResponse(status="success", message=f"Created {name}")
 
 
 @router.get("/account/{account_id}/{resource_type}/list", tags=["Resource"], dependencies=[Depends(setup_tenant_context)])
@@ -997,10 +997,10 @@ async def list_data(
     resource_type: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """获取指定资源分类下所有的配置文件。"""
+    """Get all configuration file names under resource category."""
     model = MODEL_MAP.get(resource_type)
     if not model:
-        raise HTTPException(status_code=400, detail="无效资源类型")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type")
     result = await db.execute(select(model.name))
     return result.scalars().all()
 
@@ -1012,16 +1012,16 @@ async def delete_data(
     name: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """物理删除指定的租户隔离配置文件。"""
+    """Physically delete specified tenant configuration file."""
     model = MODEL_MAP.get(resource_type)
     if not model:
-        return StatusResponse(status="error", message="无效资源类型")
+        return StatusResponse(status="error", message="Invalid resource type")
     existing = await db.execute(select(model).where(model.name == name))
     if not existing.scalar_one_or_none():
-        return StatusResponse(status="error", message=f"未找到 {name}")
+        return StatusResponse(status="error", message=f"{name} not found")
     await db.execute(delete(model).where(model.name == name))
     await db.commit()
-    return StatusResponse(status="success", message=f"已删除 {name}")
+    return StatusResponse(status="success", message=f"Deleted {name}")
 
 
 @router.patch("/account/{account_id}/{resource_type}/update", response_model=StatusResponse, tags=["Resource"], dependencies=[Depends(setup_tenant_context)])
@@ -1033,14 +1033,14 @@ async def patch_data(
     version: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """递归合并增量更新指定的配置文件（含并发乐观锁）。"""
+    """Recursively merge incremental update to configuration file (with optimistic lock)."""
     validate_payload(payload)
     model = MODEL_MAP.get(resource_type)
     if not model:
-        return StatusResponse(status="error", message="无效模型")
+        return StatusResponse(status="error", message="Invalid model")
     record = (await db.execute(select(model).where(model.name == name))).scalar_one_or_none()
     if not record:
-        return StatusResponse(status="error", message="文件未找到")
+        return StatusResponse(status="error", message="File not found")
     check_version(record, version)
     try:
         current = json.loads(record.content) if record.content else {}
@@ -1059,7 +1059,7 @@ async def patch_data(
     record.version = (record.version or 0) + 1
     record.updated_at = datetime.now(timezone.utc)
     await db.commit()
-    return StatusResponse(status="success", message="合并成功")
+    return StatusResponse(status="success", message="Merged successfully")
 
 
 @router.get("/account/{account_id}/{resource_type}/token", tags=["Resource"], dependencies=[Depends(setup_tenant_context)])
@@ -1069,14 +1069,14 @@ async def get_resource_token(
     name: str,
     db: AsyncSession = Depends(get_db),
 ):
-    """校验配置文件存在性并生成一个防盗链的短期下载授权 Token。"""
+    """Verify configuration file existence and issue short-term download token."""
     model = MODEL_MAP.get(resource_type)
     if not model:
-        return {"status": "error", "message": "无效类型"}
+        return {"status": "error", "message": "Invalid resource type"}
 
     record = (await db.execute(select(model).where(model.name == name))).scalar_one_or_none()
     if not record:
-        return {"status": "error", "message": f"{name} 不存在"}
+        return {"status": "error", "message": f"{name} not found"}
 
     token = await create_token(account_id, resource_type, name)
     return {"token": token, "url": f"/get?token={token}"}
@@ -1091,11 +1091,11 @@ async def write_data_endpoint(
     version: Optional[int] = None,
     db: AsyncSession = Depends(get_db),
 ):
-    """覆盖式数据替换写入配置文件（覆盖原 JSON，包含版本冲突校验）。"""
+    """Overwriting data write endpoint for configuration file (with version conflict check)."""
     validate_payload(payload)
     model = MODEL_MAP.get(resource_type)
     if not model:
-        return StatusResponse(status="error", message="无效类型")
+        return StatusResponse(status="error", message="Invalid resource type")
 
     record = (await db.execute(select(model).where(model.name == name))).scalar_one_or_none()
     if record:
@@ -1107,4 +1107,4 @@ async def write_data_endpoint(
     record.updated_at = datetime.now(timezone.utc)
     db.add(record)
     await db.commit()
-    return StatusResponse(status="success", message=f"{name} 已写入")
+    return StatusResponse(status="success", message=f"{name} written successfully")

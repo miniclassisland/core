@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,14 +45,14 @@ from app.shared.services.user import (
 router = APIRouter(prefix="/user")
 
 
-# ---- 1. 用户自助申请与可用性验证 ----
+# ---- 1. User Self-Registration & Availability Verification ----
 
 @router.post("/apply", response_model=MessageResponse, tags=["User"])
 async def apply_user(
     payload: UserRegisterRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """用户提交申请注册新账号（进入 Pending 待审核状态）。"""
+    """User submits registration application (enters Pending status awaiting approval)."""
     try:
         await register_user(
             payload.email,
@@ -62,16 +62,16 @@ async def apply_user(
             username=payload.username,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return MessageResponse(message="注册成功，等待管理员审核")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return MessageResponse(message="Registration successful, awaiting administrator approval")
 
 
 @router.get("/availability/mail", tags=["Availability"])
 async def check_mail_availability(
-    value: EmailStr = Query(..., description="待检查的邮箱地址"),
+    value: EmailStr = Query(..., description="Email address to check"),
     db: AsyncSession = Depends(get_db),
 ):
-    """供前端实时校验邮箱是否可用（未注册过）。"""
+    """Real-time email availability check."""
     result = await db.execute(select(User.id).where(User.email == value))
     exists = result.scalar_one_or_none() is not None
     return {"available": not exists}
@@ -79,49 +79,49 @@ async def check_mail_availability(
 
 @router.get("/availability/username", tags=["Availability"])
 async def check_username_availability(
-    value: str = Query(..., min_length=3, max_length=64, description="待检查的用户名"),
+    value: str = Query(..., min_length=3, max_length=64, description="Username to check"),
     db: AsyncSession = Depends(get_db),
 ):
-    """前端校验用户名是否可用（格式、黑名单保留名及唯一性校验）。"""
+    """Check username availability (format, reserved list, and uniqueness)."""
     if not validate_username_format(value):
-        return {"available": False, "reason": "用户名格式不合法"}
+        return {"available": False, "reason": "Username format invalid"}
     if await is_name_reserved(value, db):
-        return {"available": False, "reason": "该名称为系统保留名"}
+        return {"available": False, "reason": "Name is reserved by system"}
     result = await db.execute(select(User.id).where(User.username == value))
     if result.scalar_one_or_none() is not None:
-        return {"available": False, "reason": "该用户名已被占用"}
+        return {"available": False, "reason": "Username is already taken"}
     return {"available": True}
 
 
-# ---- 2. 登录认证 ----
+# ---- 2. Login Authentication ----
 
 @router.post("/auth", tags=["User"])
 async def user_login(
     payload: UserLoginRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """用户登录获取 Session 令牌，如启用 2FA 则下发临时令牌进入二次验证阶段。"""
+    """User login to acquire Session token; issues temporary token for 2FA if enabled."""
     try:
         token, user, needs_2fa = await login_user(payload.email, payload.password, db)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
     if needs_2fa:
         temp = await create_2fa_temp_token(user.id)
         return {"requires_2fa": True, "temp_token": temp}
     return {"token": token}
 
 
-# ---- 3. 用户个人基础资料管理 ----
+# ---- 3. User Profile Management ----
 
 @router.get("/info", response_model=UserOut, tags=["User"])
 async def get_user_info(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
-    """查询并获取当前登录用户的基本信息。"""
+    """Get current logged-in user profile."""
     user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     return UserOut(
         id=user.id,
         username=user.username,
@@ -140,13 +140,13 @@ async def change_email(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """修改当前已登录用户的绑定邮箱。"""
+    """Update current user's email address."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user.email = body.email
     await db.commit()
-    return {"message": "邮箱已更新"}
+    return {"status": "ok", "message": "Email updated"}
 
 
 @router.post("/info/username", tags=["UserInfo"])
@@ -155,21 +155,20 @@ async def change_username(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """修改当前已登录用户的绑定用户名。"""
+    """Update current user's username."""
     if not validate_username_format(body.username):
-        raise HTTPException(status_code=400, detail="用户名格式不合法")
-    # 唯一性校验
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid")
     dup = await db.execute(
         select(User).where(User.username == body.username, User.id != uid)
     )
     if dup.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="该用户名已被占用")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is already taken")
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     user.username = body.username
     await db.commit()
-    return {"message": "用户名已更新"}
+    return {"status": "ok", "message": "Username updated"}
 
 
 @router.post("/info/password/change", tags=["UserInfo"])
@@ -178,15 +177,15 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """当前已登录用户修改个人密码（需旧密码验证）。"""
+    """Change user password with old password verification."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
     if not verify_password(body.old_password, user.hashed_password):
-        raise HTTPException(status_code=400, detail="旧密码错误")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password")
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
-    return {"message": "密码已修改"}
+    return {"status": "ok", "message": "Password updated"}
 
 
 @router.post("/info/password/reset", tags=["UserInfo"])
@@ -194,21 +193,21 @@ async def reset_password(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """当前用户重置密码。"""
-    return {"message": "暂未实现"}
+    """Reset user password."""
+    return {"status": "ok", "message": "Not implemented yet"}
 
 
-# ---- 4. 用户个人两步验证 (User 2FA TOTP Settings) ----
+# ---- 4. User 2FA TOTP Settings ----
 
 @router.post("/2fa/totp/enable", response_model=TotpEnableResponse, tags=["2FA"])
 async def enable_2fa(
     uid: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """生成并分配当前用户的 TOTP 二维码绑定密钥与安全恢复码。"""
+    """Generate TOTP secret key and recovery codes for current user."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if user.totp_enabled:
-        raise HTTPException(status_code=400, detail="2FA 已启用")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="2FA is already enabled")
     secret = generate_totp_secret()
     user.totp_secret = secret
     await db.commit()
@@ -227,12 +226,12 @@ async def confirm_2fa(
     uid: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """提交一次性验证码，确认启用并激活双重认证。"""
+    """Confirm and activate 2FA with one-time verification code."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if not user.totp_secret:
-        raise HTTPException(status_code=400, detail="请先调用 /enable")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please call /enable first")
     if not verify_totp(user.totp_secret, body.code):
-        raise HTTPException(status_code=400, detail="TOTP 码无效")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid TOTP code")
     user.totp_enabled = True
     await db.commit()
     return {"status": "2fa_enabled"}
@@ -244,10 +243,10 @@ async def disable_2fa(
     uid: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """当前登录用户自行关闭 TOTP 2FA（必须验证个人密码）。"""
+    """Disable TOTP 2FA for current user (requires password verification)."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if not verify_password(body.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="密码错误")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password")
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
@@ -256,22 +255,22 @@ async def disable_2fa(
 
 @router.post("/2fa/totp/verify", tags=["2FA"])
 async def verify_2fa_login(body: TotpVerifyRequest):
-    """输入一次性 TOTP 动态码以完成登录（无需 Bearer Session，使用 temp_token 进行提权）。"""
+    """Complete 2FA login with one-time TOTP code using temp token."""
     uid = await pop_2fa_temp_token(body.temp_token)
     async with AsyncSessionLocal() as db:
         user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if not verify_totp(user.totp_secret, body.code):
-        raise HTTPException(status_code=401, detail="TOTP 码无效")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code")
     token = await create_session_token(uid)
     return {"token": token, "user_id": uid}
 
 
 @router.post("/2fa/totp/recover", tags=["2FA"])
 async def recover_2fa(body: TotpRecoverRequest):
-    """使用 2FA 安全恢复码完成紧急备用登录（无需 Bearer Session）。"""
+    """Complete emergency login using 2FA recovery code."""
     uid = await pop_2fa_temp_token(body.temp_token)
     ok = await use_recovery_code(uid, body.recovery_code)
     if not ok:
-        raise HTTPException(status_code=401, detail="恢复码无效或已使用")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or used recovery code")
     token = await create_session_token(uid)
     return {"token": token, "user_id": uid}

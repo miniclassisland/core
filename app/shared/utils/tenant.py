@@ -1,6 +1,6 @@
-"""多租户执行上下文与主机名/Redis 解析器。
+"""Multi-tenant execution context and hostname/Redis resolver.
 
-使用 ContextVar 管理异步调用链中的多租户状态，并提供基于 Redis 及 DB 的租户解析与缓存逻辑。
+Manages multi-tenant state across asynchronous call chains via ContextVar, providing tenant resolution and caching based on Redis and DB.
 """
 
 import re
@@ -14,10 +14,10 @@ from app.shared.utils.config import BASE_DOMAIN, REDIS_DB_CACHE
 from app.shared.utils.redis import get_redis
 from app.shared.db.models import Account
 
-# 每个请求范围内的租户 ID 上下文
+# Per-request tenant ID context
 tenant_ctx: ContextVar[str] = ContextVar("tenant_id")
 
-# 每个请求的数据库 Schema 命名空间上下文
+# Per-request database schema namespace context
 schema_ctx: ContextVar[str] = ContextVar("schema", default="public")
 
 _SAFE_ID = re.compile(r"^[a-z0-9_\-]+$")
@@ -25,14 +25,14 @@ ACCOUNT_CACHE_TTL = 600
 
 
 def safe_identifier(name: str) -> str:
-    """安全性校验 SQL 标识符，防止 SQL 注入风险。"""
+    """Validate SQL identifier for safety to prevent SQL injection."""
     if not _SAFE_ID.match(name):
         raise ValueError(f"Unsafe SQL identifier: {name!r}")
     return name
 
 
 def get_tenant_id() -> str:
-    """获取当前协程请求链路下的租户 ID。"""
+    """Get tenant ID under current coroutine request context."""
     try:
         return tenant_ctx.get()
     except LookupError:
@@ -40,19 +40,19 @@ def get_tenant_id() -> str:
 
 
 def get_schema() -> str:
-    """获取当前协程请求对应的数据库 Schema。"""
+    """Get database schema corresponding to current request."""
     return schema_ctx.get()
 
 
 async def set_search_path(session, schema: str | None = None) -> None:
-    """在当前 PostgreSQL 数据库 Session 会话上设置 search_path。"""
+    """Set PostgreSQL search_path on current Session."""
     s = safe_identifier(schema or get_schema())
     if s != "public":
         await session.execute(text(f'SET search_path TO "{s}", public'))
 
 
 def extract_slug_from_host(host: str) -> Optional[str]:
-    """从 HTTP Host 请求头中解析租户标识 slug（子域名部分）。"""
+    """Parse tenant slug (subdomain portion) from HTTP Host header."""
     hostname = host.split(":")[0].lower()
     base = BASE_DOMAIN.lower()
 
@@ -64,7 +64,7 @@ def extract_slug_from_host(host: str) -> Optional[str]:
 
 
 async def get_cached_account(slug: str) -> Optional[Account]:
-    """从 Redis 缓存中读取并重构轻量账户实体。"""
+    """Retrieve and reconstruct lightweight Account entity from Redis cache."""
     try:
         rd = get_redis(REDIS_DB_CACHE)
         cached = await rd.get(f"account:{slug}")
@@ -83,7 +83,7 @@ async def get_cached_account(slug: str) -> Optional[Account]:
 
 
 async def set_cached_account(slug: str, account: Account) -> None:
-    """将租户账户记录序列化并缓存入 Redis。"""
+    """Serialize and cache tenant account record into Redis."""
     try:
         rd = get_redis(REDIS_DB_CACHE)
         await rd.set(
@@ -104,7 +104,7 @@ async def set_cached_account(slug: str, account: Account) -> None:
 
 
 async def resolve_account(slug: str, db: AsyncSession) -> Optional[Account]:
-    """通过缓存或数据库解析活跃的租户实体。"""
+    """Resolve active tenant entity via cache or database."""
     account = await get_cached_account(slug)
     if account is not None:
         return account if account.is_active else None

@@ -1,4 +1,4 @@
-"""MINIClassIsland 客户端/终端 API 路由模块。
+"""MINIClassIsland Client API Route Module.
 """
 
 from .api import router

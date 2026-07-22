@@ -1,6 +1,6 @@
-"""MINIClassIsland 统一日志与客户端 IP 提取系统。
+"""MINIClassIsland unified logging and client IP extraction system.
 
-接管 FastAPI / uvicorn / gRPC 日志流，提供统一格式化和反代场景下的客户端 IP 解析。
+Takes over FastAPI / uvicorn / gRPC log streams, providing unified formatting and reverse-proxy client IP parsing.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from starlette.responses import Response
 if TYPE_CHECKING:
     import grpc
 
-# ---- 日志配置常量 ----
+# ---- Log Configuration Constants ----
 _LOG_DIR = Path(".miniclassisland") / "logs"
 _LOG_FORMAT = "%(asctime)s.%(msecs)03d | %(levelname)-5s | %(port_tag)s | %(name)-30s | %(message)s"
 _LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -31,17 +31,17 @@ PORT_TAG_GRPC = "GRPC"
 PORT_TAG_SYSTEM = "SYSTEM"
 
 
-# ---- 真实 IP 解析辅助函数 ----
+# ---- Real IP Parsing Utilities ----
 
 def _parse_forwarded_for(value: str) -> str:
-    """解析 X-Forwarded-For 获取首个客户端真实 IP。"""
+    """Parse X-Forwarded-For header to retrieve first client real IP."""
     if not value:
         return ""
     return value.split(",")[0].strip()
 
 
 def get_client_ip_from_request(request: Request) -> str:
-    """提取 HTTP 请求中的客户端真实 IP。"""
+    """Extract real client IP from HTTP request."""
     forwarded = request.headers.get("x-forwarded-for", "")
     ip = _parse_forwarded_for(forwarded)
     if ip:
@@ -55,7 +55,7 @@ def get_client_ip_from_request(request: Request) -> str:
 
 
 def get_client_ip_from_grpc(context: grpc.aio.ServicerContext) -> str:
-    """从 gRPC 调用上下文元数据中解析客户端真实 IP。"""
+    """Parse real client IP from gRPC call invocation metadata."""
     metadata = dict(context.invocation_metadata())
 
     forwarded = metadata.get("x-forwarded-for", "")
@@ -75,10 +75,10 @@ def get_client_ip_from_grpc(context: grpc.aio.ServicerContext) -> str:
     return ""
 
 
-# ---- 日志格式化与过滤器 ----
+# ---- Log Formatter & Filters ----
 
 class _PortTagFilter(logging.Filter):
-    """注入 port_tag 属性的日志过滤器。"""
+    """Log filter to inject port_tag attribute."""
 
     def __init__(self, tag: str = PORT_TAG_SYSTEM):
         super().__init__()
@@ -91,14 +91,14 @@ class _PortTagFilter(logging.Filter):
 
 
 class _ColorFormatter(logging.Formatter):
-    """终端彩色日志格式化器。"""
+    """Terminal ANSI color formatter."""
 
     _COLORS = {
-        PORT_TAG_CLIENT: "\033[36m",  # 青色
-        PORT_TAG_MGMT: "\033[33m",    # 黄色
-        PORT_TAG_ADMIN: "\033[35m",   # 品红色
-        PORT_TAG_GRPC: "\033[32m",    # 绿色
-        PORT_TAG_SYSTEM: "\033[37m",  # 白色
+        PORT_TAG_CLIENT: "\033[36m",  # Cyan
+        PORT_TAG_MGMT: "\033[33m",    # Yellow
+        PORT_TAG_ADMIN: "\033[35m",   # Magenta
+        PORT_TAG_GRPC: "\033[32m",    # Green
+        PORT_TAG_SYSTEM: "\033[37m",  # White
     }
     _LEVEL_COLORS = {
         "DEBUG": "\033[90m",
@@ -132,17 +132,17 @@ class _ColorFormatter(logging.Formatter):
         return result
 
 
-# ---- 日志系统启动与实例获取 ----
+# ---- Logging Initialization ----
 
 def setup_logging(*, level: int = logging.INFO) -> None:
-    """全局初始化日志格式及文件滚动处理器。"""
+    """Globally initialize logging format and file rotating handler."""
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger()
     root.setLevel(level)
     root.handlers.clear()
 
-    # 终端输出 (彩色)
+    # Terminal output (Colorized)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(level)
     console_fmt = _ColorFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FMT)
@@ -150,7 +150,7 @@ def setup_logging(*, level: int = logging.INFO) -> None:
     console_handler.addFilter(_PortTagFilter(PORT_TAG_SYSTEM))
     root.addHandler(console_handler)
 
-    # 文件输出
+    # File output
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     log_file = _LOG_DIR / f"miniclassisland-{today}.log"
     file_handler = TimedRotatingFileHandler(
@@ -167,25 +167,25 @@ def setup_logging(*, level: int = logging.INFO) -> None:
     file_handler.addFilter(_PortTagFilter(PORT_TAG_SYSTEM))
     root.addHandler(file_handler)
 
-    # 抑制及重定向 uvicorn
+    # Suppress and redirect uvicorn loggers
     for uv_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         uv_logger = logging.getLogger(uv_name)
         uv_logger.handlers.clear()
         uv_logger.propagate = True
 
-    # 降低第三方日志干扰
+    # Suppress noisy third-party loggers
     for noisy in ("asyncio", "aiohttp", "sqlalchemy.engine", "grpc"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     root.info(
-        "日志系统已初始化 — 级别: %s  输出: 终端 + %s",
+        "Logging system initialized — Level: %s  Output: Console + %s",
         logging.getLevelName(level),
         log_file,
     )
 
 
 def get_port_logger(tag: str) -> logging.Logger:
-    """获取打有特定端口标签的 Logger。"""
+    """Get Logger with specific port tag filter."""
     name = f"miniclassisland.{tag.lower()}"
     logger = logging.getLogger(name)
     if not any(isinstance(f, _PortTagFilter) for f in logger.filters):
@@ -193,10 +193,10 @@ def get_port_logger(tag: str) -> logging.Logger:
     return logger
 
 
-# ---- Starlette/FastAPI 日志中间件 ----
+# ---- Starlette/FastAPI Request Logging Middleware ----
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """统一的 HTTP 请求日志记录中间件。"""
+    """Unified HTTP request logging middleware."""
 
     def __init__(self, app, port_tag: str = PORT_TAG_SYSTEM):
         super().__init__(app)
@@ -223,7 +223,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         except Exception as exc:
             elapsed = (time.perf_counter() - start) * 1000
             self.logger.error(
-                "[%s] ✗ %s %s  耗时 %.1fms  异常: %s",
+                "[%s] ✗ %s %s  elapsed %.1fms  exception: %s",
                 client_ip,
                 method,
                 path,
@@ -243,7 +243,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             log_fn = self.logger.info
 
         log_fn(
-            "[%s] %s %s %s  耗时 %.1fms",
+            "[%s] %s %s %s  elapsed %.1fms",
             client_ip,
             status,
             method,

@@ -70,12 +70,12 @@ async def test_user_and_account_services():
         assert new_user.is_active is False  # 待审核
 
         # 3. 登录测试
-        # 尝试登录未审批通过的账户，应当报错（例如由于角色待审核）
-        with pytest.raises(ValueError, match="该账户尚未通过审核"):
+        # 尝试登录未审批通过的账户，应当报错
+        with pytest.raises(ValueError, match="Account is not active yet"):
             await user_service.login_user("beta@school.com", "BetaPassword123!", db)
 
         # 登录一个完全不存在的用户
-        with pytest.raises(ValueError, match="邮箱或密码错误"):
+        with pytest.raises(ValueError, match="Incorrect email or password"):
             await user_service.login_user("non_existent@school.com", "password", db)
 
         # 4. 管理端审批流测试

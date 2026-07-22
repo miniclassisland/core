@@ -1,4 +1,4 @@
-"""客户端 API 应用定义。
+"""Client API Application Definition.
 """
 
 import logging
@@ -14,14 +14,14 @@ from app.shared.lifespan import app_lifespan
 
 logger = logging.getLogger(__name__)
 
-# 客户端 App 实例（绑定生命周期钩子）
+# Client App instance with bound lifespan hooks
 client_app = FastAPI(
-    title="MINIClassIsland 客户端 API",
+    title="MINIClassIsland Client API",
     version="0.2.0",
     lifespan=app_lifespan,
 )
 
-# CORS 中间件（允许前端跨域获取资源）
+# CORS middleware
 client_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,17 +30,17 @@ client_app.add_middleware(
     allow_headers=["*"],
 )
 
-# 多租户子域名解析与请求日志安全中间件
+# Multi-tenant subdomain resolution, logging, and security middleware
 client_app.add_middleware(TenantMiddleware)
 client_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_CLIENT)
 client_app.add_middleware(CCProtectMiddleware)
 
-# 挂载客户端业务及引导向导路由
+# Mount Client router and token_get router
 client_app.include_router(client_router, prefix="/api", tags=["Client"])
 client_app.include_router(token_get_router, tags=["TokenGet"])
 
 
 @client_app.get("/")
 async def root():
-    """终端 API 状态检测。"""
-    return {"message": "MINIClassIsland Backend is running"}
+    """Client API health check status endpoint."""
+    return {"status": "ok", "message": "MINIClassIsland Client API is running"}

@@ -1,2 +1,2 @@
-"""MINIClassIsland 共享 Schema 包。
+"""MINIClassIsland shared schemas package.
 """

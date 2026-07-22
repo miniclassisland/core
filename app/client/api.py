@@ -1,6 +1,6 @@
 import logging
 import time
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,7 @@ from app.shared.security.auth import create_token
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# 已注册的合法资源类型
+# Registered valid resource types
 VALID_RESOURCES = [
     "ClassPlan",
     "TimeLayout",
@@ -32,21 +32,21 @@ VALID_RESOURCES = [
 async def get_client_manifest(
     request: Request, client_uid: str, db: AsyncSession = Depends(get_db)
 ):
-    """为请求的 UID 构建完整的 Manifest JSON 数据。"""
+    """Build complete Manifest JSON payload for requested client UID."""
     slug = getattr(request.state, "tenant_slug", "Unknown")
     client_ip = get_client_ip_from_request(request)
     short_uid = (
         f"{client_uid[:8]}...{client_uid[-5:]}" if len(client_uid) > 13 else client_uid
     )
     logger.info(
-        "[%s][%s][%s] Client API 详细信息: 请求 Manifest", client_ip, slug, short_uid
+        "[%s][%s][%s] Client API Details: Requested Manifest", client_ip, slug, short_uid
     )
 
     stmt = select(ClientProfile).where(ClientProfile.client_id == client_uid)
     result = await db.execute(stmt)
     p = result.scalar_one_or_none() or ClientProfile()
 
-    # 若配置档案不完整则使用默认值
+    # Use defaults if profile is incomplete
     cp = p.class_plan or "default_classplan"
     tl = p.time_layout or "default_timelayout"
     sub = getattr(p, "subjects", None) or "default"
@@ -60,10 +60,10 @@ async def get_client_manifest(
 
 
 def _build_manifest(request: Request, cp, tl, sub, ds, pol, comp, cred, ver):
-    """组装各资源源的 Manifest 结构体。"""
+    """Assemble Manifest structure for each resource source."""
 
     def _src(rt, n):
-        # 使用 request.url_for 生成完整的绝对 URL，并附带 name 参数
+        # Generate full absolute URL using request.url_for with name query param
         url = request.url_for("get_client_resource", resource_type=rt)
         full_url = str(url.include_query_params(name=n))
         return {"Value": full_url, "Version": ver}
@@ -84,15 +84,15 @@ def _build_manifest(request: Request, cp, tl, sub, ds, pol, comp, cred, ver):
 
 @router.get("/v1/client/{resource_type}", tags=["Client"])
 async def get_client_resource(resource_type: str, name: str, request: Request):
-    """根据协议规则重定向到令牌保护的下载端点。"""
+    """Redirect to token-protected download endpoint per protocol rules."""
     if resource_type not in VALID_RESOURCES:
-        raise HTTPException(status_code=400, detail="Invalid resource")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type")
 
     tenant_id = get_tenant_id()
     client_ip = get_client_ip_from_request(request)
 
     token = await create_token(tenant_id, resource_type, name, client_ip=client_ip)
-    return RedirectResponse(url=f"/get?token={token}", status_code=302)
+    return RedirectResponse(url=f"/get?token={token}", status_code=status.HTTP_302_FOUND)
 
 
 @router.get("/v1/management-config", tags=["Guide"])
@@ -100,17 +100,17 @@ async def get_config(
     class_identity: str = "",
     db: AsyncSession = Depends(get_db),
 ):
-    """根据子域名返回 ManagementPreset.json。
+    """Return ManagementPreset.json according to subdomain.
 
-    若传入 class_identity 且匹配到预注册客户端，
-    额外返回 PreRegisteredLabel 字段。
+    If class_identity is provided and matches a pre-registered client,
+    returns additional PreRegisteredLabel field.
     """
     tenant_id = get_tenant_id()
     stmt = select(Account).where(Account.id == tenant_id)
     account = (await db.execute(stmt)).scalar_one_or_none()
     slug = account.slug if account else "unknown"
 
-    # 尝试匹配预注册客户端
+    # Attempt matching pre-registered client
     label = ""
     if class_identity and account:
         pre_reg = (

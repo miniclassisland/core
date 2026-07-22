@@ -32,9 +32,9 @@ def test_pydantic_schemas_instantiation():
 
     # CustomRole schemas
     cr_create = schemas.RoleCreateRequest(
-        role_code="editor", role_name="Editor", permissions=["edit", "view"]
+        code="editor", label="Editor", priority=10
     )
-    assert cr_create.role_code == "editor"
+    assert cr_create.code == "editor"
 
     # Account schemas
     acc_create = schemas.AccountCreate(

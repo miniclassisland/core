@@ -1,4 +1,4 @@
-"""多租户独立数据库 Schema 初始化工具。
+"""Multi-tenant isolated database Schema initialization utility.
 """
 
 from sqlalchemy import text
@@ -6,7 +6,7 @@ from app.shared.db.session import engine
 from app.shared.db.models import Base
 from app.shared.utils.tenant import safe_identifier
 
-# 属于 public Schema 的全局数据表列表（不在租户私有 Schema 内创建）
+# Tables belonging exclusively to public Schema (not created in tenant private Schema)
 _PUBLIC_ONLY = {
     "accounts",
     "users",
@@ -23,7 +23,7 @@ _PUBLIC_ONLY = {
 
 
 async def ensure_tenant_schema(slug: str) -> str:
-    """确保多租户隔离 Schema 存在，不存在则为该租户创建专用 Schema 与表空间。"""
+    """Ensure multi-tenant isolation schema exists, creating dedicated schema and tables if needed."""
     schema_name = safe_identifier(f"tenant_{slug}")
     tenant_tables = [
         t for t in Base.metadata.sorted_tables if t.name not in _PUBLIC_ONLY

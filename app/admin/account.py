@@ -1,7 +1,7 @@
 import os
 import sys
 import threading
-from fastapi import APIRouter, Depends, Form, HTTPException
+from fastapi import APIRouter, Depends, Form, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +22,7 @@ _sa = require_role(100)
 
 
 def _to_out(user) -> UserOut:
-    """将 User 模型转换为响应模型。"""
+    """Convert User model to response schema."""
     return UserOut(
         id=user.id,
         username=user.username,
@@ -35,14 +35,14 @@ def _to_out(user) -> UserOut:
     )
 
 
-# ---- 1. 账户（租户）管理 (Account/Tenant Admin) ----
+# ---- 1. Account / Tenant Administration ----
 
 @router.get("/account", response_model=list[AccountOut], tags=["Account"])
 async def list_all_accounts(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """列出所有租户账户（仅超管）。"""
+    """List all tenant accounts (Super Admin only)."""
     rows = (await db.execute(select(Account))).scalars().all()
     return [
         AccountOut(
@@ -57,7 +57,7 @@ async def list_all_accounts(
     ]
 
 
-# ---- 2. 用户注册申请审核 (User Registration Approvals) ----
+# ---- 2. User Registration Approvals ----
 
 @router.get("/user/pending/list", response_model=list[UserOut], tags=["Pending"])
 async def get_pending_users(
@@ -66,7 +66,7 @@ async def get_pending_users(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """列出所有待审核的注册申请用户。"""
+    """List all pending registration user applications."""
     users = await list_pending_users(db, offset=offset, limit=limit)
     return [_to_out(u) for u in users]
 
@@ -77,33 +77,33 @@ async def approve_pending(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """审核批准指定的用户注册申请。"""
+    """Approve a pending user registration application."""
     user = await approve_user(user_id, db)
     if not user:
-        raise HTTPException(status_code=404, detail="用户不存在或非待审核状态")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found or not in pending state")
     return _to_out(user)
 
 
-@router.post("/user/pending/reject/{user_id}", tags=["Pending"])
+@router.post("/user/pending/reject/{user_id}", status_code=status.HTTP_200_OK, tags=["Pending"])
 async def reject_pending(
     user_id: str,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """驳回/拒绝指定的用户注册申请。"""
+    """Reject a pending user registration application."""
     ok = await reject_user(user_id, db)
     if not ok:
-        raise HTTPException(status_code=404, detail="用户不存在或非待审核状态")
-    return {"message": "已拒绝"}
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found or not in pending state")
+    return {"status": "rejected"}
 
 
-# ---- 3. OOBE 首次安装配置向导 (OOBE Configuration Guide) ----
+# ---- 3. OOBE First-Time Setup Wizard ----
 
 @router.post("/oobe/verify", tags=["OOBE"])
 async def verify_passcode(passcode: str = Form(...)):
-    """校验引导界面的配对输入，并分发提权执行许可 Token。"""
+    """Verify pairing passcode and issue elevated execution token."""
     if not verify_oobe_passcode(passcode):
-        raise HTTPException(status_code=403, detail="配对码错误或已失效")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid passcode or expired")
     return {"token": OOBE_TOKEN}
 
 
@@ -117,9 +117,9 @@ async def configure_system(
     email: str = Form(...),
     password: str = Form(...),
 ):
-    """验证配置阶段 Token 后执行数据库 DDL 与默认种子数据填充，完成后触发系统自重启。"""
+    """Verify token, write configuration, initialize database schema, and trigger restart."""
     if not verify_oobe_token(token):
-        raise HTTPException(status_code=403, detail="非法令牌或已过期")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token or expired")
 
     config = {
         "db_url": db_url,
@@ -134,10 +134,10 @@ async def configure_system(
         write_config_file(config)
         await init_database(config)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"初始化失败: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Initialization failed: {str(e)}")
 
-    # 在一秒后触发程序重启以加载新配置文件
+    # Trigger system restart in 1 second
     threading.Timer(
         1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)
     ).start()
-    return {"msg": "初始化完毕，系统重启中"}
+    return {"status": "ok", "message": "Initialization complete, system restarting"}

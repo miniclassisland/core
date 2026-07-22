@@ -6,23 +6,23 @@ from app.shared.security import crypto
 
 
 def test_password_hashing():
-    """测试密码 Argon2id 散列及校验。"""
+    """Test Argon2id password hashing and verification."""
     pwd = "MySecretPassword123!"
     h = crypto.hash_password(pwd)
     assert h != pwd
-    assert crypto.verify_password(h, pwd) is True
-    assert crypto.verify_password(h, "WrongPassword") is False
+    assert crypto.verify_password(pwd, h) is True
+    assert crypto.verify_password("WrongPassword", h) is False
 
 
 def test_totp_lifecycle():
-    """测试 TOTP 双因子令牌生成与检验。"""
+    """Test TOTP generation and verification."""
     secret = "BASE32SECRET3232"
-    uri = crypto.generate_totp_uri(secret, "user@school.com", "MySchool")
-    assert "MySchool" in uri
-    assert "user@school.com" in uri
+    uri = crypto.get_totp_uri(secret, "user@school.com")
+    assert "MINIClassIsland" in uri
+    assert "user" in uri
 
-    # 验证无效的 token
-    assert crypto.verify_totp_token(secret, "000000") is False
+    # Verify invalid token
+    assert crypto.verify_totp(secret, "000000") is False
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/bulk", tags=["Bulk"])
 
 
 def dict_deep_merge(base: dict, merge: dict) -> dict:
-    """递归合并两个字典，冲突时以 merge 为准。"""
+    """Recursively merge two dictionaries, taking values from merge on conflict."""
     for k, v in merge.items():
         if isinstance(v, dict) and isinstance(base.get(k), dict):
             base[k] = dict_deep_merge(base[k], v)
@@ -25,7 +25,7 @@ def dict_deep_merge(base: dict, merge: dict) -> dict:
 
 
 async def process_batch(req: BatchRequest, db: AsyncSession):
-    """顺序执行一组资源操作并返回结果。"""
+    """Execute a batch of resource operations sequentially and return results."""
     res = []
     try:
         for op in req.operations:
@@ -56,8 +56,11 @@ async def process_batch(req: BatchRequest, db: AsyncSession):
         return {"status": "success", "results": res}
     except Exception as exc:
         await db.rollback()
-        logger.exception("批量操作异常: %s", exc)
-        return {"status": "error", "message": "内部错误，请联系管理员"}
+        logger.exception("Batch operation exception: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error during batch execution",
+        )
 
 
 @router.post("")
@@ -65,5 +68,5 @@ async def admin_bulk(
     req: BatchRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """以超管身份执行批量操作。"""
+    """Execute batch operations as Super Admin."""
     return await process_batch(req, db)
