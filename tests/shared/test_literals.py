@@ -17,7 +17,7 @@ def test_literals_security_constants():
 def test_literals_sys_metadata():
     """Verify system metadata and default configurations exist."""
     assert literals.SYS_NAME == "MINI ClassIsland Core Management Backend System"
-    assert literals.DEFAULT_BASE_DOMAIN == "miniclassisland.com"
+    assert literals.DEFAULT_BASE_DOMAIN == "localminiclassisland.miniopensource.com"
     assert literals.PUBLIC_SCHEMA == "public"
     assert literals.DEFAULT_CLIENT_PORT == 27041
     assert literals.DEFAULT_MGMT_PORT == 27042
