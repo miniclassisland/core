@@ -30,23 +30,24 @@ def list_accounts():
 @account_app.command("create")
 def create_account_cmd(
     name: str = typer.Argument(..., help="账户名称"),
-    slug: str = typer.Argument(..., help="租户唯一 Slug"),
+    slug: Optional[str] = typer.Argument(None, help="租户唯一 Slug"),
 ):
     """创建新的租户账户。"""
+    actual_slug = slug or name.replace("_", "-")
     async def _run():
         async with AsyncSessionLocal() as db:
             db.add(
                 Account(
                     id=str(uuid.uuid4()),
                     name=name,
-                    slug=slug,
+                    slug=actual_slug,
                     api_key=secrets.token_urlsafe(32),
                     is_active=True,
                     created_at=datetime.now(timezone.utc),
                 )
             )
             await db.commit()
-            print(f"✅ 账户 {slug} 已创建")
+            print(f"✅ 账户 {actual_slug} 已创建")
     asyncio.run(_run())
 
 
