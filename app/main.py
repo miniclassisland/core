@@ -29,14 +29,14 @@ async def start_servers():
     }
 
     if CONFIG_FILE.exists():
-        from app.apps.client_app import client_app
-        from app.apps.management_app import management_app
-        from app.apps.admin_app import admin_app
+        from app.client import client_app
+        from app.management import management_app
+        from app.admin import admin_app
 
         c_app, m_app, a_app = client_app, management_app, admin_app
     else:
         from app.shared.security.auth import generate_oobe_codes
-        from app.apps.oobe_apps import oobe_stub_app, oobe_admin_app
+        from app.shared.oobe_app import oobe_stub_app, oobe_admin_app
 
         generate_oobe_codes()
         c_app, m_app, a_app = oobe_stub_app, oobe_stub_app, oobe_admin_app
