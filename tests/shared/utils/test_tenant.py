@@ -30,6 +30,7 @@ def test_extract_slug_from_host():
     assert tenant.extract_slug_from_host("") is None
 
 
+from datetime import datetime, timezone
 from app.shared.db.models import Account
 
 
@@ -46,6 +47,7 @@ async def test_resolve_account():
                 slug="test-school",
                 api_key="test-api-key",
                 is_active=True,
+                created_at=datetime.now(timezone.utc),
             )
             db.add(acct)
             await db.commit()
