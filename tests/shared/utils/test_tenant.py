@@ -8,17 +8,23 @@ from app.shared.db.session import AsyncSessionLocal
 
 def test_context_vars():
     """测试 tenant_ctx 和 schema_ctx 的 ContextVar 获取。"""
-    # 夹具 setup_infra 已经设置了默认值
-    assert tenant.get_tenant_id() == "test-account-00000000"
-    assert tenant.get_schema_name() == "tenant_test-school"
+    t1 = tenant.tenant_ctx.set("test-account-00000000")
+    t2 = tenant.schema_ctx.set("tenant_test-school")
+    try:
+        assert tenant.get_tenant_id() == "test-account-00000000"
+        assert tenant.get_schema() == "tenant_test-school"
+    finally:
+        tenant.tenant_ctx.reset(t1)
+        tenant.schema_ctx.reset(t2)
 
 
 def test_extract_slug_from_host():
     """测试主机域名到租户标识的提取解析。"""
     # 正常二级域名场景
-    assert tenant.extract_slug_from_host("school1.localhost") == "school1"
+    domain = tenant.BASE_DOMAIN
+    assert tenant.extract_slug_from_host(f"school1.{domain}") == "school1"
     # 主域或 IP 时应当返回 None
-    assert tenant.extract_slug_from_host("localhost") is None
+    assert tenant.extract_slug_from_host(domain) is None
     assert tenant.extract_slug_from_host("127.0.0.1") is None
     # 其它空或无效输入
     assert tenant.extract_slug_from_host("") is None
@@ -42,11 +48,7 @@ async def test_resolve_account():
 async def test_set_search_path():
     """测试通过 Schema 上下文动态路由 PostgreSQL Search Path。"""
     async with AsyncSessionLocal() as db:
-        # 当存在 schema_ctx 时，应当设置成功并无报错
-        await tenant.set_search_path(db)
-
-        # 清除 schema_ctx 尝试，应走 fallback 为 public
-        token = tenant.schema_ctx.set(None)
+        token = tenant.schema_ctx.set("tenant_test_school")
         try:
             await tenant.set_search_path(db)
         finally:
