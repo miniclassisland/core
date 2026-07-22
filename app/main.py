@@ -84,6 +84,11 @@ async def start_servers():
         logger.info("所有服务已停止，PID 文件已清理")
 
 
+from app.cli.main import cli
+
+__all__ = ["start_servers", "main", "cli"]
+
+
 def main():
     """主程序（统一 CLI）入口。"""
     from app.cli.main import main as cli_main
