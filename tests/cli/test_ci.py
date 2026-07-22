@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 from typer.testing import CliRunner
 from app.cli.main import cli
 
-runner = CliRunner()
+runner = CliRunner(mix_stderr=False)
 
 
 def test_build_success():
