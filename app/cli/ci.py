@@ -47,13 +47,12 @@ def generate_grpc():
     except Exception:
         pass
 
-    # 写入 app/Protobuf/__init__.py 修正模块导入路径
+    # 写入 app/Protobuf/__init__.py 修正模块导入路径，建立 sys.modules 别名避免污染 sys.path
     api_init = out_dir / "__init__.py"
     try:
         api_init.write_text(
             "import sys\n"
-            "from pathlib import Path\n"
-            "sys.path.append(str(Path(__file__).parent.parent.resolve()))\n",
+            "sys.modules['Protobuf'] = sys.modules[__name__]\n",
             encoding="utf-8"
         )
     except Exception:
