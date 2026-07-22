@@ -14,3 +14,6 @@ router.include_router(account_router)
 router.include_router(bulk_router)
 router.include_router(token_router)
 router.include_router(user_router)
+
+from .app import management_app
+
