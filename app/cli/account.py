@@ -74,7 +74,7 @@ def delete_account_cmd(
 def add_member_cmd(
     slug: str = typer.Argument(..., help="账户 Slug"),
     username: str = typer.Argument(..., help="要添加的用户名"),
-    role: str = typer.Option("owner", help="成员角色 (owner / admin / member)"),
+    role: str = typer.Option("owner", "--role", help="成员角色 (owner / admin / member)"),
 ):
     """向指定租户账户添加成员。"""
     async def _run():
