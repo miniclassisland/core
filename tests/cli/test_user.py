@@ -8,6 +8,5 @@ runner = CliRunner()
 
 
 def test_user_cli_commands():
-    """测试 user 命令行占位入口。"""
-    assert runner.invoke(cli, ["user", "a"]).exit_code == 0
-    assert runner.invoke(cli, ["user", "b"]).exit_code == 0
+    """测试 user 命令行入口。"""
+    assert runner.invoke(cli, ["user", "list"]).exit_code == 0
