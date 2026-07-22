@@ -106,7 +106,7 @@ async def _create_superadmin(config: dict, db) -> None:
     account = Account(
         id=str(uuid.uuid4()),
         name="Default Management Account",
-        slug=config["username"].replace("_", "-"),
+        slug="default" if config["username"] in ("admin", "root", "api", "dash", "dashboard") else config["username"].replace("_", "-"),
         api_key=secrets.token_urlsafe(32),
         is_active=True,
         created_at=now,
