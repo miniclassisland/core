@@ -6,15 +6,25 @@ Concurrently starts Client API, Management API, and Admin API services.
 import asyncio
 import logging
 import os
-import uvicorn
+import sys
+from pathlib import Path
 
-from app.shared.utils.config import (
+_APP_DIR = str(Path(__file__).resolve().parent)
+_ROOT_DIR = str(Path(__file__).resolve().parents[1])
+if _APP_DIR in sys.path:
+    sys.path.remove(_APP_DIR)
+if _ROOT_DIR not in sys.path:
+    sys.path.insert(0, _ROOT_DIR)
+
+import uvicorn  # noqa: E402
+
+from app.shared.utils.config import (  # noqa: E402
     CLIENT_PORT,
     MANAGEMENT_PORT,
     ADMIN_PORT,
     CONFIG_FILE,
 )
-from app.shared.utils.pid import PID
+from app.shared.utils.pid import PID  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

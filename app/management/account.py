@@ -318,6 +318,12 @@ async def change_account_name(
     tags=["Account"],
     dependencies=[Depends(setup_tenant_context)],
 )
+@router.post(
+    "/account/{account_id}/info/regenerate-api-key",
+    response_model=AccountOut,
+    tags=["Account"],
+    dependencies=[Depends(setup_tenant_context)],
+)
 async def regenerate_account_api_key(
     account_id: str,
     db: AsyncSession = Depends(get_db),
@@ -355,14 +361,15 @@ async def download_account_preset(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Account not found or deactivated",
         )
-    return {
+    res: dict[str, Any] = {
         "IsManagementEnabled": True,
         "ManagementServerKind": 1,
         "ManagementServer": f"https://{acct.slug}.{BASE_DOMAIN}",
         "ManagementServerGrpc": f"https://{acct.slug}.{BASE_DOMAIN}",
-        "ClassIdentity": class_identity,
-        "ManifestUrlTemplate": "",
     }
+    if class_identity:
+        res["ClassIdentity"] = class_identity
+    return res
 
 
 # ---- 3. Tenant Access Control ----
@@ -773,6 +780,7 @@ async def revoke_invitation(
 
 
 @router.post("/invitation/accept", tags=["Invite"])
+@router.post("/account/invitation/accept", tags=["Invite"])
 async def accept_invitation(
     body: InvitationAcceptRequest,
     db: AsyncSession = Depends(get_db),
@@ -1077,6 +1085,27 @@ async def approve_pairing_code(
 
 # ---- 6. Pre-Registered Client Management ----
 
+_PROFILE_KEY_PAIRS = (
+    ("class_plan", "ClassPlan"),
+    ("time_layout", "TimeLayout"),
+    ("subjects", "Subjects"),
+    ("default_settings", "DefaultSettings"),
+    ("policy", "Policy"),
+    ("components", "Components"),
+    ("credentials", "Credentials"),
+)
+
+
+def _normalize_profile_dict(raw: dict) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for snake_k, pascal_k in _PROFILE_KEY_PAIRS:
+        val = raw.get(pascal_k) if pascal_k in raw else raw.get(snake_k)
+        if val is not None:
+            s = str(val)
+            out[snake_k] = s
+            out[pascal_k] = s
+    return out
+
 
 def _prereg_out(p: PreRegisteredClient) -> PreRegOut:
     preset: dict[str, str] = {}
@@ -1084,7 +1113,7 @@ def _prereg_out(p: PreRegisteredClient) -> PreRegOut:
         try:
             parsed = json.loads(p.preset_profile_json)
             if isinstance(parsed, dict):
-                preset = {str(k): str(v) for k, v in parsed.items() if v is not None}
+                preset = _normalize_profile_dict(parsed)
         except Exception:
             pass
     return PreRegOut(
@@ -1117,25 +1146,30 @@ async def create_pre_reg(
     db: AsyncSession = Depends(get_db),
 ):
     """Create pre-registered client device, validating class_identity uniqueness."""
-    dup = await db.execute(
-        select(PreRegisteredClient).where(
-            PreRegisteredClient.account_id == account_id,
-            PreRegisteredClient.class_identity == body.class_identity,
+    ci = (body.class_identity or "").strip()
+    mac = (body.mac_address or "").strip()
+    if ci:
+        dup = await db.execute(
+            select(PreRegisteredClient).where(
+                PreRegisteredClient.account_id == account_id,
+                PreRegisteredClient.class_identity == ci,
+            )
         )
-    )
-    if dup.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="class_identity already exists",
-        )
+        if dup.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="class_identity already exists",
+            )
     p = PreRegisteredClient(
         id=str(uuid.uuid4()),
         account_id=account_id,
         label=body.label,
-        class_identity=body.class_identity,
-        mac_address=body.mac_address or "",
+        class_identity=ci,
+        mac_address=mac,
         is_enabled=True,
-        preset_profile_json=json.dumps(body.preset_profile or {}, ensure_ascii=False),
+        preset_profile_json=json.dumps(
+            _normalize_profile_dict(body.preset_profile or {}), ensure_ascii=False
+        ),
         created_at=datetime.now(timezone.utc),
     )
     db.add(p)
@@ -1151,6 +1185,13 @@ async def create_pre_reg(
     tags=["PreReg"],
     dependencies=[Depends(setup_tenant_context)],
 )
+@router.post(
+    "/account/{account_id}/pre-registration/batch-create",
+    response_model=list[PreRegOut],
+    status_code=status.HTTP_201_CREATED,
+    tags=["PreReg"],
+    dependencies=[Depends(setup_tenant_context)],
+)
 async def batch_create_pre_reg(
     account_id: str,
     body: PreRegBatchCreate,
@@ -1160,27 +1201,30 @@ async def batch_create_pre_reg(
     created: list[PreRegisteredClient] = []
     now = datetime.now(timezone.utc)
     for item in body.items:
-        if not item.class_identity.strip():
+        ci = (item.class_identity or "").strip()
+        mac = (item.mac_address or "").strip()
+        if not ci and not mac:
             continue
-        dup = (
-            await db.execute(
-                select(PreRegisteredClient).where(
-                    PreRegisteredClient.account_id == account_id,
-                    PreRegisteredClient.class_identity == item.class_identity.strip(),
+        if ci:
+            dup = (
+                await db.execute(
+                    select(PreRegisteredClient).where(
+                        PreRegisteredClient.account_id == account_id,
+                        PreRegisteredClient.class_identity == ci,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if dup:
-            continue
+            ).scalar_one_or_none()
+            if dup:
+                continue
         p = PreRegisteredClient(
             id=str(uuid.uuid4()),
             account_id=account_id,
-            label=item.label.strip() or item.class_identity.strip(),
-            class_identity=item.class_identity.strip(),
-            mac_address=(item.mac_address or "").strip(),
+            label=item.label.strip() or ci or mac,
+            class_identity=ci,
+            mac_address=mac,
             is_enabled=True,
             preset_profile_json=json.dumps(
-                item.preset_profile or {}, ensure_ascii=False
+                _normalize_profile_dict(item.preset_profile or {}), ensure_ascii=False
             ),
             created_at=now,
         )
@@ -1439,19 +1483,7 @@ async def config_pre_reg(
         if isinstance(body.get("preset_profile"), dict)
         else body
     )
-    clean_preset = {
-        k: str(preset[k])
-        for k in (
-            "class_plan",
-            "time_layout",
-            "subjects",
-            "default_settings",
-            "policy",
-            "components",
-            "credentials",
-        )
-        if k in preset and preset[k] is not None
-    }
+    clean_preset = _normalize_profile_dict(preset)
     row.preset_profile_json = json.dumps(clean_preset, ensure_ascii=False)
     await db.commit()
     await db.refresh(row)
@@ -1490,41 +1522,49 @@ async def download_preset(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Pre-registered client not found",
         )
-    return {
+    res: dict[str, Any] = {
         "IsManagementEnabled": True,
         "ManagementServerKind": 1,
         "ManagementServer": f"https://{acct.slug}.{BASE_DOMAIN}",
         "ManagementServerGrpc": f"https://{acct.slug}.{BASE_DOMAIN}",
-        "ClassIdentity": pre_reg.class_identity,
-        "PreRegisteredLabel": pre_reg.label,
-        "ManifestUrlTemplate": "",
     }
+    if pre_reg.class_identity:
+        res["ClassIdentity"] = pre_reg.class_identity
+    return res
 
 
 # ---- 7. Client Machine & Command Monitoring ----
 
 
 def _profile_to_dict(p: Optional[ClientProfile]) -> dict[str, str]:
-    if not p:
-        return {
-            "class_plan": "default",
-            "time_layout": "default",
-            "subjects": "default",
-            "default_settings": "default",
-            "policy": "default",
-            "components": "default",
-            "credentials": "default",
-        }
+    cp = (p.class_plan if p.class_plan is not None else "default") if p else "default"
+    tl = (p.time_layout if p.time_layout is not None else "default") if p else "default"
+    sub = (p.subjects if p.subjects is not None else "default") if p else "default"
+    ds = (
+        (p.default_settings if p.default_settings is not None else "default")
+        if p
+        else "default"
+    )
+    pol = (p.policy if p.policy is not None else "default") if p else "default"
+    comp = (p.components if p.components is not None else "default") if p else "default"
+    cred = (
+        (p.credentials if p.credentials is not None else "default") if p else "default"
+    )
     return {
-        "class_plan": p.class_plan if p.class_plan is not None else "default",
-        "time_layout": p.time_layout if p.time_layout is not None else "default",
-        "subjects": p.subjects if p.subjects is not None else "default",
-        "default_settings": (
-            p.default_settings if p.default_settings is not None else "default"
-        ),
-        "policy": p.policy if p.policy is not None else "default",
-        "components": p.components if p.components is not None else "default",
-        "credentials": p.credentials if p.credentials is not None else "default",
+        "class_plan": cp,
+        "time_layout": tl,
+        "subjects": sub,
+        "default_settings": ds,
+        "policy": pol,
+        "components": comp,
+        "credentials": cred,
+        "ClassPlan": cp,
+        "TimeLayout": tl,
+        "Subjects": sub,
+        "DefaultSettings": ds,
+        "Policy": pol,
+        "Components": comp,
+        "Credentials": cred,
     }
 
 
@@ -1589,6 +1629,7 @@ async def _serialize_clients(
                 ),
                 "has_custom_profile": client_prof is not None,
                 "profile": _profile_to_dict(client_prof or default_prof),
+                "profile_config": _profile_to_dict(client_prof or default_prof),
             }
         )
     return out
@@ -1700,6 +1741,7 @@ async def get_client_config(
         "client_id": client_id,
         "has_custom_profile": prof is not None,
         "profile": _profile_to_dict(prof or default_prof),
+        "profile_config": _profile_to_dict(prof or default_prof),
         "default_profile": _profile_to_dict(default_prof),
     }
 
@@ -1741,17 +1783,10 @@ async def set_client_config(
                 client_id=client_id,
                 updated_at=now,
             )
-        for k in (
-            "class_plan",
-            "time_layout",
-            "subjects",
-            "default_settings",
-            "policy",
-            "components",
-            "credentials",
-        ):
-            if k in body and body[k] is not None:
-                setattr(prof, k, str(body[k]))
+        for snake_k, pascal_k in _PROFILE_KEY_PAIRS:
+            val = body.get(pascal_k) if pascal_k in body else body.get(snake_k)
+            if val is not None:
+                setattr(prof, snake_k, str(val))
         prof.updated_at = now
         db.add(prof)
         await db.commit()
@@ -2014,7 +2049,7 @@ async def batch_client_action(
 ):
     """Execute batch action ('sync', 'restart', 'disconnect', 'enable', 'disable', 'delete', 'assign_profile') on multiple clients."""
     action = str(body.get("action") or "").strip()
-    uids = body.get("uids") or []
+    uids = body.get("uids") or body.get("client_uids") or []
     if not isinstance(uids, list) or not uids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="uids list is required"
@@ -2025,7 +2060,7 @@ async def batch_client_action(
     count = 0
     for uid in uids:
         uid_str = str(uid)
-        if action == "sync":
+        if action in ("sync", "force_sync"):
             await _push_cmd(request, account_id, uid_str, CommandTypes_pb2.DataUpdated)
             count += 1
         elif action == "restart":
@@ -2058,7 +2093,7 @@ async def batch_client_action(
                 await db.delete(rec)
             count += 1
         elif action == "assign_profile":
-            profile_data = body.get("profile") or {}
+            profile_data = body.get("profile") or body.get("profile_config") or {}
             if isinstance(profile_data, dict):
                 await set_client_config(account_id, uid_str, request, profile_data, db)
                 count += 1
@@ -2307,6 +2342,11 @@ async def push_notify(
     tags=["Client"],
     dependencies=[Depends(setup_tenant_context)],
 )
+@router.post(
+    "/account/{account_id}/client/broadcast/send-notification",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
 async def broadcast_notify(
     account_id: str,
     request: Request,
@@ -2326,7 +2366,7 @@ async def broadcast_notify(
     from app.Protobuf.Command import SendNotification_pb2
     from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
 
-    notify_data = payload.model_dump(exclude={"target_uids"})
+    notify_data = payload.model_dump(exclude={"target_uids", "client_uids"})
     notify = SendNotification_pb2.SendNotification(**notify_data)
     cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
         RetCode=Retcode_pb2.Success,
@@ -2334,7 +2374,7 @@ async def broadcast_notify(
         Payload=notify.SerializeToString(),
     )
 
-    targets = payload.target_uids
+    targets = payload.target_uids or payload.client_uids
     if not targets:
         online_list = await sm.get_all_clients_status(account_id)
         if not online_list:
@@ -2362,6 +2402,7 @@ async def list_audit_logs(
     account_id: str,
     client_uid: str = "",
     event: Optional[int] = None,
+    event_type: Optional[int] = None,
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -2372,8 +2413,9 @@ async def list_audit_logs(
     )
     if client_uid:
         stmt = stmt.where(AuditLog.client_uid == client_uid)
-    if event is not None:
-        stmt = stmt.where(AuditLog.event == event)
+    ev_filter = event if event is not None else event_type
+    if ev_filter is not None:
+        stmt = stmt.where(AuditLog.event == ev_filter)
     rows = (
         (
             await db.execute(
@@ -2408,16 +2450,19 @@ async def list_audit_logs(
                 decoded = json.loads(r.decoded_json)
             except Exception:
                 decoded = {}
+        ts_iso = r.received_at.isoformat() if r.received_at else None
         out.append(
             {
                 "id": r.id,
                 "client_uid": r.client_uid,
                 "client_name": client_map.get(r.client_uid, r.client_uid),
                 "event": r.event,
+                "event_type": r.event,
                 "event_name": AUDIT_EVENT_NAMES.get(r.event, f"Event_{r.event}"),
                 "decoded": decoded.get("data", decoded),
                 "timestamp_utc": r.timestamp_utc,
-                "received_at": r.received_at.isoformat() if r.received_at else None,
+                "received_at": ts_iso,
+                "logged_at": ts_iso,
             }
         )
     return out

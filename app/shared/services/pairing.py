@@ -108,17 +108,22 @@ async def check_approved(client_uid: str, tenant_id: str) -> bool:
                                 client_id=client_uid,
                                 updated_at=datetime.now(timezone.utc),
                             )
-                        for k in (
-                            "class_plan",
-                            "time_layout",
-                            "subjects",
-                            "default_settings",
-                            "policy",
-                            "components",
-                            "credentials",
+                        for snake_k, pascal_k in (
+                            ("class_plan", "ClassPlan"),
+                            ("time_layout", "TimeLayout"),
+                            ("subjects", "Subjects"),
+                            ("default_settings", "DefaultSettings"),
+                            ("policy", "Policy"),
+                            ("components", "Components"),
+                            ("credentials", "Credentials"),
                         ):
-                            if k in preset and preset[k]:
-                                setattr(prof, k, preset[k])
+                            val = (
+                                preset.get(pascal_k)
+                                if pascal_k in preset
+                                else preset.get(snake_k)
+                            )
+                            if val is not None:
+                                setattr(prof, snake_k, str(val))
                         prof.updated_at = datetime.now(timezone.utc)
                         db.add(prof)
                 except Exception:

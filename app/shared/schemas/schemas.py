@@ -295,8 +295,8 @@ class PreRegCreate(BaseModel):
     """Create pre-registered client device request schema."""
 
     label: str = Field(..., max_length=128)
-    class_identity: str = Field(..., max_length=128)
-    mac_address: str = Field("", max_length=64)
+    class_identity: str = Field("", max_length=128)
+    mac_address: Optional[str] = Field("", max_length=64)
     preset_profile: Optional[Dict[str, str]] = None
 
 
@@ -343,6 +343,7 @@ class BroadcastNotificationPayload(NotificationPayload):
     """Broadcast or multi-target desktop notification payload."""
 
     target_uids: Optional[List[str]] = None
+    client_uids: Optional[List[str]] = None
 
 
 class PairingCodeOut(BaseModel):

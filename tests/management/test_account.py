@@ -205,6 +205,15 @@ async def test_management_account_full_suite(test_superadmin_user):
         )
         assert r_preset.status_code == 200
         assert r_preset.json()["IsManagementEnabled"] is True
+        assert "ClassIdentity" not in r_preset.json()
+
+        r_preset_ci = await client.get(
+            f"/account/{acct_id}/ManagementPreset.json",
+            params={"class_identity": "Room-101"},
+            headers=sa_headers,
+        )
+        assert r_preset_ci.status_code == 200
+        assert r_preset_ci.json()["ClassIdentity"] == "Room-101"
 
         # 3. Invitations & Access Members
         r_inv_create = await client.post(

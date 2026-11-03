@@ -310,7 +310,11 @@ RESERVED_NAMES = sorted(
 def write_config_file(config: dict) -> None:
     """Write database connection information to .miniclassisland/config.json."""
     CONFIG_DIR.mkdir(exist_ok=True)
-    file_config = {"database_url": config["db_url"]}
+    file_config = {
+        "database_url": config["db_url"],
+        "redis_url": config.get("redis_url", ""),
+        "base_domain": config.get("domain", ""),
+    }
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(file_config, f, indent=2, ensure_ascii=False)
     logger.info("Configuration written to %s", CONFIG_FILE)

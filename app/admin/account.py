@@ -426,6 +426,9 @@ async def configure_system(
 
     # Trigger system restart in 1 second
     threading.Timer(
-        1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv)
+        1.0,
+        lambda: os.execv(
+            sys.executable, [sys.executable, "-m", "app.main", "sys", "daemon"]
+        ),
     ).start()
     return {"status": "ok", "message": "Initialization complete, system restarting"}

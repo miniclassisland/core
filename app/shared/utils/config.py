@@ -108,7 +108,11 @@ REDIS_DB_SESSION: int = 1
 REDIS_DB_CACHE: int = 2
 
 # Multi-tenant isolation variables
-BASE_DOMAIN: str = _settings.miniclassisland_base_domain
+BASE_DOMAIN: str = (
+    _file_cfg.get("base_domain")
+    or _file_cfg.get("domain")
+    or _settings.miniclassisland_base_domain
+)
 DEFAULT_SCHEMA: str = PUBLIC_SCHEMA
 
 # Four port allocation constants
