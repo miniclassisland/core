@@ -3,17 +3,21 @@
 Manages multi-tenant state across asynchronous call chains via ContextVar, providing tenant resolution and caching based on Redis and DB.
 """
 
-import re
 import json
 from contextvars import ContextVar
 from typing import Optional
-from sqlalchemy import text, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.utils.config import BASE_DOMAIN, REDIS_DB_CACHE
 from app.shared.utils.redis import get_redis
 from app.shared.db.models import Account
-from app.shared.literals import PUBLIC_SCHEMA, TENANT_ID_KEY, SCHEMA_KEY, SAFE_IDENTIFIER_RE
+from app.shared.literals import (
+    PUBLIC_SCHEMA,
+    TENANT_ID_KEY,
+    SCHEMA_KEY,
+    SAFE_IDENTIFIER_RE,
+)
 
 # Per-request tenant ID context
 tenant_ctx: ContextVar[str] = ContextVar(TENANT_ID_KEY)
@@ -39,16 +43,24 @@ def get_tenant_id() -> str:
         raise RuntimeError("No tenant context set for this request")
 
 
+def get_tenant_id_or_default(default: str = "default") -> str:
+    """Get tenant ID under current coroutine request context, or fallback to default."""
+    try:
+        val = tenant_ctx.get()
+        return val if val else default
+    except LookupError:
+        return default
+
+
 def get_schema() -> str:
     """Get database schema corresponding to current request."""
     return schema_ctx.get()
 
 
 async def set_search_path(session, schema: str | None = None) -> None:
-    """Set PostgreSQL search_path on current Session."""
-    s = safe_identifier(schema or get_schema())
-    if s != PUBLIC_SCHEMA:
-        await session.execute(text(f'SET search_path TO "{s}", {PUBLIC_SCHEMA}'))
+    """Validate identifier and keep PostgreSQL search_path in unified public schema."""
+    _ = safe_identifier(schema or get_schema())
+    return None
 
 
 def extract_slug_from_host(host: str) -> Optional[str]:
@@ -77,6 +89,7 @@ async def get_cached_account(slug: str) -> Optional[Account]:
             slug=data["slug"],
             api_key=data["api_key"],
             is_active=data["is_active"],
+            registration_mode=data.get("registration_mode", "open"),
         )
     except Exception:
         return None
@@ -95,10 +108,21 @@ async def set_cached_account(slug: str, account: Account) -> None:
                     "slug": account.slug,
                     "api_key": account.api_key,
                     "is_active": account.is_active,
+                    "registration_mode": getattr(account, "registration_mode", "open")
+                    or "open",
                 }
             ),
             ex=ACCOUNT_CACHE_TTL,
         )
+    except Exception:
+        pass
+
+
+async def invalidate_cached_account(slug: str) -> None:
+    """Invalidate cached tenant account record in Redis."""
+    try:
+        rd = get_redis(REDIS_DB_CACHE)
+        await rd.delete(f"account:{slug}")
     except Exception:
         pass
 

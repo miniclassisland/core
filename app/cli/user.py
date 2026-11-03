@@ -1,5 +1,4 @@
 import asyncio
-from typing import Optional
 import typer
 from sqlalchemy import select
 
@@ -14,12 +13,14 @@ user_app = typer.Typer(help="User account management")
 @user_app.command("list")
 def list_users_cmd():
     """List all registered user accounts in system."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             users, total = await list_users(db, limit=100)
             print(f"Total {total} users:")
             for u in users:
                 print(f"  {u.username} ({u.email}) [{u.role_code}]")
+
     asyncio.run(_run())
 
 
@@ -31,6 +32,7 @@ def create_user_cmd(
     role: str = typer.Option("normal", "--role", help="Initial user role"),
 ):
     """Create a new user account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             try:
@@ -47,6 +49,7 @@ def create_user_cmd(
                 print(f"✅ User {user.username} created")
             except ValueError as exc:
                 print(f"❌ {exc}")
+
     asyncio.run(_run())
 
 
@@ -55,6 +58,7 @@ def delete_user_cmd(
     username: str = typer.Argument(..., help="Username to delete"),
 ):
     """Delete specified user account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             user = (
@@ -66,6 +70,7 @@ def delete_user_cmd(
             await db.delete(user)
             await db.commit()
             print(f"✅ User {username} deleted")
+
     asyncio.run(_run())
 
 
@@ -74,6 +79,7 @@ def ban_user_cmd(
     username: str = typer.Argument(..., help="Username to ban"),
 ):
     """Ban specified user account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             user = (
@@ -85,6 +91,7 @@ def ban_user_cmd(
             user.role_code = "banned"
             await db.commit()
             print(f"✅ User {username} banned")
+
     asyncio.run(_run())
 
 
@@ -93,6 +100,7 @@ def activate_user_cmd(
     username: str = typer.Argument(..., help="Username to activate"),
 ):
     """Activate/unban specified user account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             user = (
@@ -105,6 +113,7 @@ def activate_user_cmd(
             user.is_active = True
             await db.commit()
             print(f"✅ User {username} activated")
+
     asyncio.run(_run())
 
 
@@ -114,6 +123,7 @@ def reset_password_cmd(
     password: str = typer.Argument(..., help="New password"),
 ):
     """Reset password for specified user account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             user = (
@@ -125,6 +135,7 @@ def reset_password_cmd(
             user.hashed_password = hash_password(password)
             await db.commit()
             print(f"✅ User {username} password reset")
+
     asyncio.run(_run())
 
 
@@ -134,6 +145,7 @@ def set_role_cmd(
     role: str = typer.Argument(..., help="Role code (superadmin / admin / normal)"),
 ):
     """Set system role for specified user account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             user = (
@@ -145,4 +157,5 @@ def set_role_cmd(
             user.role_code = role
             await db.commit()
             print(f"✅ User {username} role set to {role}")
+
     asyncio.run(_run())

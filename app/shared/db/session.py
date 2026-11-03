@@ -1,5 +1,4 @@
-"""Database engine and async Session manager.
-"""
+"""Database engine and async Session manager."""
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,

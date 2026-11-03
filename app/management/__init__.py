@@ -1,5 +1,4 @@
-"""MINIClassIsland Management API Route Aggregation Module.
-"""
+"""MINI ClassIsland Management API Route Aggregation Module."""
 
 from fastapi import APIRouter
 
@@ -15,5 +14,4 @@ router.include_router(bulk_router)
 router.include_router(token_router)
 router.include_router(user_router)
 
-from .app import management_app
-
+from .app import management_app as management_app  # noqa: E402

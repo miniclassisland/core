@@ -1,6 +1,6 @@
-# MINIClassIsland Backend Core
+# MINI ClassIsland Backend Core
 
-> ClassIsland Management Server (MINIClassIsland 集控服务端) — Python 实现  
+> MINI ClassIsland 集控服务端 — Python 实现  
 > 基于 [Cyrene_MSP 协议 v2.0.0.0](https://github.com/ClassIsland/ClassIsland/tree/master/doc/Design/Cyrene_MSP)
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
@@ -10,7 +10,7 @@
 
 ## 概述
 
-MINIClassIsland Backend Core 是 [ClassIsland](https://github.com/ClassIsland/ClassIsland) 的集中管理后端，为教育场景提供多租户校园终端设备管理能力。它通过 HTTP API 与 gRPC 双通道同时服务终端和管理后台，实现课表分发、远程指令下发、配置同步、审计日志等核心功能。
+MINI ClassIsland Backend Core 是 [ClassIsland](https://github.com/ClassIsland/ClassIsland) 的集中管理后端，为教育场景提供多租户校园终端设备管理能力。它通过 HTTP API 与 gRPC 双通道同时服务终端和管理后台，实现课表分发、远程指令下发、配置同步、审计日志等核心功能。
 
 ## 技术栈
 
@@ -28,8 +28,8 @@ MINIClassIsland Backend Core 是 [ClassIsland](https://github.com/ClassIsland/Cl
 
 ### 多租户架构
 
-- 基于子域名的行级租户隔离（如 `school-a.miniclassisland.com`）
-- 每个租户拥有独立数据空间，通过 `tenant_id` 关联所有业务数据
+- 基于子域名与 `account_id` 复合索引的高性能行级租户隔离（如 `school-a.miniclassisland.com`）
+- 每个租户拥有独立数据空间，通过 `account_id` 关联所有业务数据
 - 支持租户级 API Key 分发与轮换
 - Redis 缓存租户解析结果，降低数据库压力
 
@@ -46,11 +46,11 @@ MINIClassIsland Backend Core 是 [ClassIsland](https://github.com/ClassIsland/Cl
 
 | 服务 | 状态 | 说明 |
 |------|------|------|
-| `ClientRegister` | ✅ 已实现 | 客户端注册 + PGP 密钥交换 |
+| `ClientRegister` | ✅ 已实现 | 客户端注册（开放/配对码审批/预注册白名单）+ PGP 密钥交换 |
 | `Handshake` | ✅ 已实现 | 双向握手认证 + 会话建立 |
-| `ClientCommandDeliver` | ✅ 已实现 | 双向流式命令推送（Ping/Pong 心跳） |
-| `ConfigUpload` | ✅ 已实现 | 客户端配置上传到服务端 |
-| `Audit` | ✅ 已实现 | 审计事件上报与持久化 |
+| `ClientCommandDeliver` | ✅ 已实现 | 双向流式命令推送（Ping/Pong 心跳、通知、重启、同步、配置抓取） |
+| `ConfigUpload` | ✅ 已实现 | 客户端配置上传到服务端（支持无会话 Metadata 关联 `RequestGuidId`） |
+| `Audit` | ✅ 已实现 | 审计事件上报、Protobuf 自动解码与持久化 |
 
 ## 快速开始
 
@@ -74,4 +74,4 @@ uv run miniclassisland ci grpc generate
 uv run miniclassisland sys daemon
 ```
 
-> 💡 系统提供 `miniclassisland` 命令行工具，同时保留 `cims` 作为别名使用。
+> 💡 系统提供 `miniclassisland` 命令行工具用于管理服务端全生命周期。

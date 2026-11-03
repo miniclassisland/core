@@ -11,7 +11,7 @@ from app.cli.user import user_app
 
 # Define main Typer application
 cli = typer.Typer(
-    help="MINIClassIsland Core CLI Tool",
+    help="MINI ClassIsland Core CLI Tool",
     no_args_is_help=True,
 )
 
@@ -26,7 +26,7 @@ cli.add_typer(cd_app, name="cd")
 
 @cli.command("about")
 def about():
-    """About MINIClassIsland."""
+    """About MINI ClassIsland."""
     print(SYS_NAME)
     print(f"Version: {__version__}")
 

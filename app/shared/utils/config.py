@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
-class MINIClassIslandSettings(BaseSettings):
-    """MINIClassIsland global settings, automatically loaded from environment variables and .env file."""
+class AppSettings(BaseSettings):
+    """MINI ClassIsland global settings, automatically loaded from environment variables and .env file."""
 
     model_config = SettingsConfigDict(
         env_file=str(_PROJECT_ROOT / ".env"),
@@ -71,7 +71,7 @@ class MINIClassIslandSettings(BaseSettings):
     miniclassisland_admin_secret: str = DEFAULT_ADMIN_SECRET
 
 
-_settings = MINIClassIslandSettings()
+_settings = AppSettings()
 
 # .miniclassisland directory and configuration file path
 CONFIG_DIR = _PROJECT_ROOT / DEFAULT_CONFIG_DIR
@@ -97,7 +97,9 @@ _file_cfg = _load_file_config()
 _default_db_url = f"postgresql+psycopg://{_settings.pg_user}:{_settings.pg_pwd}@{_settings.pg_addr}/{_settings.pg_db}"
 _default_redis_url = f"redis://{f':{_settings.redis_pwd}@' if _settings.redis_pwd else ''}{_settings.redis_addr}/{_settings.redis_db}"
 
-DATABASE_URL: str = _file_cfg.get("database_url") or _settings.database_url or _default_db_url
+DATABASE_URL: str = (
+    _file_cfg.get("database_url") or _settings.database_url or _default_db_url
+)
 REDIS_URL: str = _file_cfg.get("redis_url") or _settings.redis_url or _default_redis_url
 
 # Redis logical database IDs
@@ -129,4 +131,6 @@ def validate_config() -> None:
             "Database connection must be provided via .miniclassisland/config.json, .env, or DATABASE_URL environment variable"
         )
     if not REDIS_URL:
-        raise RuntimeError("Redis connection must be provided via .env or REDIS_URL environment variable")
+        raise RuntimeError(
+            "Redis connection must be provided via .env or REDIS_URL environment variable"
+        )

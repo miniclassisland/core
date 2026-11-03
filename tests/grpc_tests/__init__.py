@@ -1,2 +1,1 @@
-"""tests subpackage
-"""
+"""tests subpackage"""

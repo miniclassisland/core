@@ -14,7 +14,12 @@ from app.shared.schemas.schemas import (
 )
 from app.shared.security.auth import require_role
 from app.shared.security.crypto import hash_password, verify_password
-from app.shared.services.user import list_users, get_user_by_id, update_user, register_user
+from app.shared.services.user import (
+    list_users,
+    get_user_by_id,
+    update_user,
+    register_user,
+)
 from app.shared.literals import MSG_USER_NOT_FOUND
 
 router = APIRouter(prefix="/user", tags=["User"])
@@ -27,7 +32,7 @@ class RenameRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
 
 
-def _to_out(user) -> UserOut:
+def _to_out(user: User) -> UserOut:
     """Convert User model to response schema."""
     return UserOut(
         id=user.id,
@@ -36,15 +41,20 @@ def _to_out(user) -> UserOut:
         display_name=user.display_name,
         role_code=user.role_code,
         is_active=user.is_active,
+        totp_enabled=bool(user.totp_enabled),
         can_create_account=user.can_create_account,
-        created_at=str(user.created_at),
+        created_at=(
+            user.created_at.isoformat()
+            if hasattr(user.created_at, "isoformat")
+            else str(user.created_at)
+        ),
     )
 
 
 @router.get("/list", response_model=list[UserOut])
 async def list_all_users(
     offset: int = 0,
-    limit: int = 20,
+    limit: int = 100,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
@@ -60,7 +70,7 @@ async def search_users(
     _user=Depends(_sa),
 ):
     """Search users by keyword."""
-    users, _ = await list_users(db, search=q)
+    users, _ = await list_users(db, search=q, limit=100)
     return [_to_out(u) for u in users]
 
 
@@ -70,14 +80,24 @@ async def create_user(
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """Create a new user (Super Admin direct creation, bypassing pending approval)."""
+    """Create a new user (Super Admin direct creation, active immediately with default account)."""
     try:
+        role_code = payload.role_code or "normal"
+        can_create = (
+            bool(payload.can_create_account)
+            if payload.can_create_account is not None
+            else (role_code in ("admin", "superadmin"))
+        )
         user = await register_user(
             payload.email,
             payload.password,
             payload.display_name,
             db,
             username=payload.username,
+            role_code=role_code,
+            is_active=role_code not in ("pending", "banned"),
+            can_create_account=can_create,
+            create_default_account=True,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
@@ -93,7 +113,9 @@ async def get_user(
     """Get user information by ID."""
     user = await get_user_by_id(user_id, db)
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     return _to_out(user)
 
 
@@ -107,7 +129,9 @@ async def update_user_info(
     """Update user information."""
     updated = await update_user(user_id, db, **body.model_dump(exclude_none=True))
     if not updated:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     return _to_out(updated)
 
 
@@ -122,7 +146,9 @@ async def delete_user(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     await db.delete(user)
     await db.commit()
     return {"status": "deleted"}
@@ -140,7 +166,9 @@ async def rename_user(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     user.username = body.name
     await db.commit()
     return {"status": "renamed"}
@@ -158,7 +186,9 @@ async def reset_password(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
     return {"status": "password_reset"}
@@ -176,9 +206,13 @@ async def change_password(
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     if not verify_password(body.old_password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password"
+        )
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
     return {"status": "password_changed"}

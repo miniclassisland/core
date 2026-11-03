@@ -1,2 +1,1 @@
-"""MINIClassIsland shared infrastructure utilities package.
-"""
+"""MINI ClassIsland shared infrastructure utilities package."""

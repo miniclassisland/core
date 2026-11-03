@@ -1,38 +1,71 @@
-"""Multi-tenant isolated database Schema initialization utility.
-"""
+"""Multi-tenant database table and default resource initialization utility."""
 
-from sqlalchemy import text
+import json
+from datetime import datetime, timezone
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.shared.db.session import engine
-from app.shared.db.models import Base
+from app.shared.db.models import Base, ClientProfile, MODEL_MAP
+from app.shared.literals import DEFAULT_RESOURCES, PUBLIC_SCHEMA
 from app.shared.utils.tenant import safe_identifier
-
-# Tables belonging exclusively to public Schema (not created in tenant private Schema)
-_PUBLIC_ONLY = {
-    "accounts",
-    "users",
-    "custom_roles",
-    "account_members",
-    "permission_defs",
-    "member_permissions",
-    "role_permissions",
-    "account_quotas",
-    "system_config",
-    "reserved_names",
-    "invitations",
-}
 
 
 async def ensure_tenant_schema(slug: str) -> str:
-    """Ensure multi-tenant isolation schema exists, creating dedicated schema and tables if needed."""
-    schema_name = safe_identifier(f"tenant_{slug}")
-    tenant_tables = [
-        t for t in Base.metadata.sorted_tables if t.name not in _PUBLIC_ONLY
-    ]
+    """Ensure multi-tenant tables exist in the unified public schema."""
+    _ = safe_identifier(f"tenant_{slug}")
     async with engine.begin() as conn:
-        await conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
-        await conn.execute(text(f'SET search_path TO "{schema_name}"'))
-        await conn.run_sync(
-            lambda sync_conn: Base.metadata.create_all(sync_conn, tables=tenant_tables)
+        await conn.run_sync(Base.metadata.create_all)
+    return PUBLIC_SCHEMA
+
+
+async def seed_account_defaults(account_id: str, db: AsyncSession) -> None:
+    """Seed default 7 profile resources and '__default__' ClientProfile for a tenant account."""
+    now = datetime.now(timezone.utc)
+    for resource_type, templates in DEFAULT_RESOURCES.items():
+        model = MODEL_MAP.get(resource_type)
+        if not model:
+            continue
+        for name, content_dict in templates.items():
+            existing = (
+                await db.execute(
+                    select(model).where(
+                        model.account_id == account_id,
+                        model.name == name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not existing:
+                db.add(
+                    model(
+                        account_id=account_id,
+                        name=name,
+                        content=json.dumps(content_dict, ensure_ascii=False),
+                        version=1,
+                        updated_at=now,
+                    )
+                )
+
+    default_profile = (
+        await db.execute(
+            select(ClientProfile).where(
+                ClientProfile.account_id == account_id,
+                ClientProfile.client_id == "__default__",
+            )
         )
-        await conn.execute(text("SET search_path TO public"))
-    return schema_name
+    ).scalar_one_or_none()
+    if not default_profile:
+        db.add(
+            ClientProfile(
+                account_id=account_id,
+                client_id="__default__",
+                class_plan="default",
+                time_layout="default",
+                subjects="default",
+                default_settings="default",
+                policy="default",
+                components="default",
+                credentials="default",
+                updated_at=now,
+            )
+        )

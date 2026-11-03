@@ -1,5 +1,4 @@
-"""test_schema_init.py
-"""
+"""test_schema_init.py"""
 
 import pytest
 from app.shared.db.schema_init import ensure_tenant_schema

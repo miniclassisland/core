@@ -1,4 +1,4 @@
-﻿# Byte-compiled / optimized / DLL files
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *$py.class
 
@@ -59,7 +59,7 @@ cover/
 *.sqlite
 *.sqlite3
 *-journal
-cims.db
+miniclassisland.db
 
 # Django stuff:
 *.log
@@ -189,8 +189,8 @@ settings.json
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#.idea/
-cims_server.key
+.idea/
+miniclassisland_server.key
 
-# CIMS 本地配置
-.cims/
+# miniclassisland 本地配置
+.miniclassisland/

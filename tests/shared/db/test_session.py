@@ -1,5 +1,4 @@
-"""test_session.py
-"""
+"""test_session.py"""
 
 import pytest
 from app.shared.db import session

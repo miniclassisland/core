@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Optional
 import typer
 
-from app.shared.utils.config import CONFIG_FILE, CLIENT_PORT, MANAGEMENT_PORT, ADMIN_PORT
+from app.shared.utils.config import CONFIG_FILE
 from app.shared.utils.oobe import write_config_file, init_database
 
 sys_app = typer.Typer(help="System control and daemon process management")
@@ -61,21 +61,26 @@ def validate_username(name: str) -> Optional[str]:
 
 # ---- 1. Daemon runner ----
 
+
 @sys_app.command("daemon")
 def run_daemon():
     """Run all servers (Client / Management / Admin / gRPC) in blocking daemon mode."""
     from app.shared.utils.config import validate_config
+
     validate_config()
 
     from app.shared.utils.logging import setup_logging
+
     setup_logging()
 
     # Dynamically import start_servers to avoid eager module load errors
     from app.main import start_servers
+
     asyncio.run(start_servers())
 
 
 # ---- 2. systemd integration ----
+
 
 def _run_systemctl(action: str) -> None:
     """Run systemctl against miniclassisland-backend.service internally."""
@@ -100,6 +105,14 @@ def _run_systemctl(action: str) -> None:
     else:
         print(f"❌ Operation failed: {result.stderr.strip()}")
         raise typer.Exit(code=1)
+
+
+@sys_app.command("install-service")
+def install_service():
+    """Generate and install miniclassisland-backend systemd service."""
+    from app.shared.utils.oobe import generate_systemd_service
+
+    generate_systemd_service()
 
 
 @sys_app.command("start")
@@ -135,15 +148,17 @@ def toggle_startup():
 
 # ---- 3. Status and Monitoring ----
 
+
 @sys_app.command("pid")
 def show_pid():
     """View PID of running background daemon."""
     from app.shared.utils.pid import PID
+
     pid = PID.read()
     if pid is None:
         print("not running", file=sys.stderr)
     else:
-        print(f"MINIClassIsland Daemon is running with PID: {pid}")
+        print(f"MINI ClassIsland Daemon is running with PID: {pid}")
 
 
 @sys_app.command("status")
@@ -168,7 +183,17 @@ def monit_logs():
             print("   Press Ctrl+C to exit\n")
             try:
                 subprocess.run(
-                    ["journalctl", "-u", "miniclassisland-backend", "-f", "--no-pager", "-n", "100", "-o", "cat"],
+                    [
+                        "journalctl",
+                        "-u",
+                        "miniclassisland-backend",
+                        "-f",
+                        "--no-pager",
+                        "-n",
+                        "100",
+                        "-o",
+                        "cat",
+                    ],
                     check=False,
                 )
             except KeyboardInterrupt:
@@ -178,12 +203,16 @@ def monit_logs():
     # Fallback to tail -f
     log_dir = Path(".miniclassisland") / "logs"
     if not log_dir.exists():
-        print("❌ Log directory does not exist. Please start service first: miniclassisland start")
+        print(
+            "❌ Log directory does not exist. Please start service first: miniclassisland start"
+        )
         raise typer.Exit(code=1)
 
     log_files = sorted(log_dir.glob("miniclassisland-*.log"))
     if not log_files:
-        print("❌ No log files found. Please start service first: miniclassisland start")
+        print(
+            "❌ No log files found. Please start service first: miniclassisland start"
+        )
         raise typer.Exit(code=1)
 
     latest = log_files[-1]
@@ -197,18 +226,32 @@ def monit_logs():
 
 # ---- 4. Interactive Installer ----
 
+
 @sys_app.command("init")
 def init_system(
-    db_url: Optional[str] = typer.Option(None, "--db-url", help="PostgreSQL connection string"),
-    redis_url: Optional[str] = typer.Option(None, "--redis-url", help="Redis connection string"),
+    db_url: Optional[str] = typer.Option(
+        None, "--db-url", help="PostgreSQL connection string"
+    ),
+    redis_url: Optional[str] = typer.Option(
+        None, "--redis-url", help="Redis connection string"
+    ),
     domain: Optional[str] = typer.Option(None, "--domain", help="System main domain"),
     username: Optional[str] = typer.Option(None, "--username", help="Admin username"),
     email: Optional[str] = typer.Option(None, "--email", help="Admin email"),
     password: Optional[str] = typer.Option(None, "--password", help="Admin password"),
-    interactive: bool = typer.Option(True, "--interactive", help="Run wizard in interactive mode"),
+    interactive: bool = typer.Option(
+        True, "--interactive/--no-interactive", help="Run wizard in interactive mode"
+    ),
 ):
     """System first-time installation and onboarding wizard."""
-    if not interactive and (not db_url or not redis_url or not username or not email or not password or not domain):
+    if not interactive and (
+        not db_url
+        or not redis_url
+        or not username
+        or not email
+        or not password
+        or not domain
+    ):
         print("❌ All parameters must be specified in non-interactive mode.")
         raise typer.Exit(code=1)
 
@@ -221,11 +264,14 @@ def init_system(
                 print("Operation aborted")
                 raise typer.Exit()
 
-        print("\n🚀 MINIClassIsland Initialization Wizard\n")
+        print("\n🚀 MINI ClassIsland Initialization Wizard\n")
         print("=" * 50)
         config["db_url"] = _ask(
             "PostgreSQL Connection URL",
-            os.environ.get("DATABASE_URL", "postgresql+psycopg://postgres:password@localhost:5432/miniclassisland"),
+            os.environ.get(
+                "DATABASE_URL",
+                "postgresql+psycopg://postgres:password@localhost:5432/miniclassisland",
+            ),
             validate_db_url,
         )
         config["redis_url"] = _ask(
@@ -237,7 +283,10 @@ def init_system(
         config["email"] = _ask("Email", "", validate_email)
         config["password"] = _ask("Password (≥12 chars)", "", validate_password)
         print("\n--- Service Settings ---")
-        config["domain"] = _ask("Base domain", os.environ.get("MINICLASSISLAND_BASE_DOMAIN", "miniclassisland.com"))
+        config["domain"] = _ask(
+            "Base domain",
+            os.environ.get("MINICLASSISLAND_BASE_DOMAIN", "miniclassisland.com"),
+        )
     else:
         config = {
             "db_url": db_url,
@@ -252,6 +301,7 @@ def init_system(
         write_config_file(config)
         asyncio.run(init_database(config))
         from app.shared.utils.oobe import generate_systemd_service
+
         generate_systemd_service()
         print("✅ Initialization completed successfully!")
     except Exception as e:

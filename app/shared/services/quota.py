@@ -1,5 +1,4 @@
-"""MINIClassIsland tenant resource quota metrics and limitation management service.
-"""
+"""MINI ClassIsland tenant resource quota metrics and limitation management service."""
 
 import uuid
 from sqlalchemy import select

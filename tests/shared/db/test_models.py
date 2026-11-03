@@ -1,5 +1,4 @@
-"""test_models.py
-"""
+"""test_models.py"""
 
 from app.shared.db import models
 

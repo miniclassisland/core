@@ -1,5 +1,4 @@
-"""Client API Application Definition.
-"""
+"""Client API Application Definition."""
 
 import logging
 
@@ -8,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.client import router as client_router
 from app.client import token_get_router
+from app.shared.fonts import router as fonts_router
 from app.shared.security.middlewares import TenantMiddleware, CCProtectMiddleware
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_CLIENT
 from app.shared.lifespan import app_lifespan
@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 # Client App instance with bound lifespan hooks
 client_app = FastAPI(
-    title="MINIClassIsland Client API",
-    version="0.2.0",
+    title="MINI ClassIsland Client API",
+    version="0.3.0",
     lifespan=app_lifespan,
 )
 
@@ -35,12 +35,13 @@ client_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Client router and token_get router
+# Mount Client router, token_get router, and fonts router
 client_app.include_router(client_router, prefix="/api", tags=["Client"])
 client_app.include_router(token_get_router, tags=["TokenGet"])
+client_app.include_router(fonts_router)
 
 
 @client_app.get("/")
 async def root():
     """Client API health check status endpoint."""
-    return {"status": "ok", "message": "MINIClassIsland Client API is running"}
+    return {"status": "ok", "message": "MINI ClassIsland Client API is running"}

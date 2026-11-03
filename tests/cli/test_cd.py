@@ -1,5 +1,4 @@
-"""test_cd.py
-"""
+"""test_cd.py"""
 
 from typer.testing import CliRunner
 from app.cli.main import cli

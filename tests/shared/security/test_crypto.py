@@ -1,5 +1,4 @@
-"""test_crypto.py
-"""
+"""test_crypto.py"""
 
 import pytest
 from app.shared.security import crypto
@@ -14,46 +13,51 @@ def test_password_hashing():
     assert crypto.verify_password("WrongPassword", h) is False
 
 
-def test_totp_lifecycle():
-    """Test TOTP generation and verification."""
-    secret = "BASE32SECRET3232"
-    uri = crypto.get_totp_uri(secret, "user@school.com")
-    assert "MINIClassIsland" in uri
-    assert "user" in uri
+def test_classisland_credential_encoding():
+    """Test upstream ClassIsland Base64 Credential JSON encoding and edge branches."""
+    assert crypto.is_encoded_classisland_credential("") is False
+    assert crypto.encode_classisland_credential("") == ""
+    assert crypto.normalize_credentials_payload("not-a-dict") == "not-a-dict"
 
-    # Verify invalid token
+    encoded = crypto.encode_classisland_credential("Class123456")
+    assert encoded != ""
+    assert crypto.is_encoded_classisland_credential(encoded) is True
+    assert crypto.encode_classisland_credential(encoded) == encoded
+
+
+def test_totp_lifecycle():
+    """Test TOTP secret generation, URI, and verification."""
+    secret = crypto.generate_totp_secret()
+    assert len(secret) >= 16
+    uri = crypto.get_totp_uri(secret, "user@school.com")
+    assert (
+        "MINI%20ClassIsland" in uri
+        or "MINI+ClassIsland" in uri
+        or "MINI ClassIsland" in uri
+    )
+    assert "user" in uri
     assert crypto.verify_totp(secret, "000000") is False
 
 
 @pytest.mark.asyncio
 async def test_recovery_codes():
-    """测试一次性 2FA 恢复码机制。"""
+    """Test one-time 2FA recovery code generation, storage, and consumption."""
     user_id = "test-user-uuid"
+    gen_codes = crypto.generate_recovery_codes()
+    assert len(gen_codes) == 8
+
     codes = ["CODE1", "CODE2", "CODE3"]
-
     await crypto.store_recovery_codes(user_id, codes)
+    assert await crypto.get_remaining_recovery_count(user_id) == 3
 
-    count = await crypto.get_remaining_recovery_count(user_id)
-    assert count == 3
-
-    # 使用正确的恢复码
-    res = await crypto.use_recovery_code(user_id, "code1")
-    assert res is True
-
-    count = await crypto.get_remaining_recovery_count(user_id)
-    assert count == 2
-
-    # 使用已失效的恢复码
-    res = await crypto.use_recovery_code(user_id, "code1")
-    assert res is False
-
-    # 使用不正确的恢复码
-    res = await crypto.use_recovery_code(user_id, "INVALID")
-    assert res is False
+    assert await crypto.use_recovery_code(user_id, "code1") is True
+    assert await crypto.get_remaining_recovery_count(user_id) == 2
+    assert await crypto.use_recovery_code(user_id, "code1") is False
+    assert await crypto.use_recovery_code(user_id, "INVALID") is False
 
 
 def test_cc_protection_state():
-    """测试 CC 攻击防护相关状态方法。"""
+    """Test CC attack protection global state helpers."""
     assert crypto.get_cc_state() is False
     crypto.set_cc_state(True)
     assert crypto.get_cc_state() is True

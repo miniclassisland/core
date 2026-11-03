@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.db.session import get_db
 from app.shared.db.models import MODEL_MAP
 from app.shared.schemas.schemas import BatchRequest, BatchOpType
+from app.shared.security.crypto import normalize_credentials_payload
+from app.shared.utils.tenant import get_tenant_id_or_default
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +27,14 @@ def dict_deep_merge(base: dict, merge: dict) -> dict:
     return base
 
 
-async def process_batch(req: BatchRequest, db: AsyncSession):
+async def process_batch(
+    req: BatchRequest,
+    db: AsyncSession,
+    *,
+    account_id: Optional[str] = None,
+):
     """Execute a batch of resource operations sequentially and return results."""
+    acct_id = account_id or get_tenant_id_or_default()
     res = []
     try:
         for op in req.operations:
@@ -34,20 +43,28 @@ async def process_batch(req: BatchRequest, db: AsyncSession):
                 res.append({"action": op.action, "name": op.name, "status": "skipped"})
                 continue
             record = (
-                await db.execute(select(model).where(model.name == op.name))
+                await db.execute(
+                    select(model).where(
+                        model.account_id == acct_id,
+                        model.name == op.name,
+                    )
+                )
             ).scalar_one_or_none()
+            payload = op.payload or {}
+            if op.resource_type == "Credentials" and isinstance(payload, dict):
+                payload = normalize_credentials_payload(payload)
             if op.action == BatchOpType.delete and record:
                 await db.delete(record)
             elif op.action in [BatchOpType.write, BatchOpType.create]:
-                rc = record or model(name=op.name)
-                rc.content = json.dumps(op.payload or {})
+                rc = record or model(account_id=acct_id, name=op.name)
+                rc.content = json.dumps(payload, ensure_ascii=False)
                 rc.version = (getattr(rc, "version", None) or 0) + 1
                 rc.updated_at = datetime.now(timezone.utc)
                 db.add(rc)
             elif op.action == BatchOpType.update and record:
                 cur = json.loads(record.content) if record.content else {}
                 record.content = json.dumps(
-                    dict_deep_merge(cur, op.payload or {})
+                    dict_deep_merge(cur, payload), ensure_ascii=False
                 )
                 record.version = (record.version or 0) + 1
                 record.updated_at = datetime.now(timezone.utc)

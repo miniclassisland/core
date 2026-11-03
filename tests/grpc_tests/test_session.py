@@ -1,9 +1,9 @@
-"""test_session.py
-"""
+"""test_session.py"""
 
 import os
+from unittest.mock import patch, MagicMock
 import pytest
-from unittest.mock import MagicMock
+import pgpy
 from app.grpc.session import (
     parse_grpc_peer_ip,
     GPGKeyManager,
@@ -21,22 +21,35 @@ def test_parse_grpc_peer_ip():
 
 
 def test_gpg_key_manager_lifecycle():
-    """测试 GPGKeyManager 在密钥文件不存在、损坏及正常解析时的逻辑。"""
+    """测试 GPGKeyManager 在密钥文件不存在、损坏、正常加密解密时的逻辑。"""
     temp_key_file = "/tmp/temp_test_key.key"
     if os.path.exists(temp_key_file):
         os.remove(temp_key_file)
 
     try:
-        # 1. 首次创建（文件不存在，应当能自动生成）
         km = GPGKeyManager(temp_key_file)
         assert km.public_key_armor != ""
         assert km.private_key is not None
 
-        # 2. 二次加载（文件存在，正常读取）
+        # 测试正常加密与解密
+        pubkey, _ = pgpy.PGPKey.from_blob(km.public_key_armor)
+        msg = pgpy.PGPMessage.new("challenge-secret-123")
+        enc = str(pubkey.encrypt(msg))
+        dec = km.decrypt(enc)
+        assert dec == "challenge-secret-123" or dec == b"challenge-secret-123"
+
+        # 模拟 decrypt 返回 bytearray 分支
+        mock_dec_msg = MagicMock()
+        mock_dec_msg.message = bytearray(b"bytearray-secret")
+        with (
+            patch("pgpy.PGPMessage.from_blob", return_value=MagicMock()),
+            patch.object(km.private_key, "decrypt", return_value=mock_dec_msg),
+        ):
+            assert km.decrypt("dummy") == b"bytearray-secret"
+
         km2 = GPGKeyManager(temp_key_file)
         assert km2.public_key_armor == km.public_key_armor
 
-        # 3. 损坏重新生成（文件存在但内容非法）
         with open(temp_key_file, "w") as f:
             f.write("INVALID GPG ARMOR DATA")
 
@@ -44,7 +57,6 @@ def test_gpg_key_manager_lifecycle():
         assert km3.public_key_armor != ""
         assert km3.private_key is not None
 
-        # 4. 解密非法数据校验（应当记录错误并返回 None）
         res = km3.decrypt("INVALID ENCRYPTED DATA BLOB")
         assert res is None
     finally:
@@ -64,65 +76,67 @@ async def test_session_manager_flows():
         tenant_id = "test-account-00000000"
         cuid = "client-uid-test-123"
 
-        # 1. 暂存/取用握手挑战令牌
+        # decrypt_challenge 分支（正常与 _private_key=None）
+        assert sm.decrypt_challenge("bad-blob") is None
+        orig_pk = sm._private_key
+        sm._private_key = None
+        assert sm.decrypt_challenge("any") is None
+        sm._private_key = orig_pk
+
         challenge = "challenge-plain-text-12345"
         await sm.store_pending_handshake(tenant_id, cuid, challenge)
 
-        # 验证提取挑战令牌（取后即删）
         retrieved = await sm.pop_handshake_challenge(tenant_id, cuid)
         assert retrieved == challenge
 
         retrieved_again = await sm.pop_handshake_challenge(tenant_id, cuid)
         assert retrieved_again is None
 
-        # 2. 会话（Session）生命周期测试
-        # 创建会话
         sid = await sm.create_session(tenant_id, cuid)
         assert sid is not None
 
-        # 检验会话可信身份
         assert await sm.validate_session(sid) == cuid
         assert await sm.get_session_tenant(sid) == tenant_id
 
-        # 校验不存在的会话
         assert await sm.validate_session("non-existent-sid") is None
         assert await sm.get_session_tenant("non-existent-sid") is None
         assert await sm.validate_session("") is None
         assert await sm.get_session_tenant("") is None
 
-        # 3. 在线状态心跳机制
+        # update_heartbeat 当设备尚不在线时的分支 (line 186)
+        await sm.set_client_offline(tenant_id, cuid)
         assert await sm.is_client_online(tenant_id, cuid) is False
-        await sm.set_client_online(tenant_id, cuid, ip="ipv4:127.0.0.1:8888")
+        await sm.update_heartbeat(tenant_id, cuid)
         assert await sm.is_client_online(tenant_id, cuid) is True
 
-        # 更新心跳
+        # 测试 tid fallback 检查 online::{cuid} 分支 (line 176)
+        await sm.set_client_offline(tenant_id, cuid)
+        await sm.set_client_online("", cuid, ip="ipv4:127.0.0.1:8888")
+        assert await sm.is_client_online(tenant_id, cuid) is True
+        await sm.set_client_offline("", cuid)
+
+        await sm.set_client_online(tenant_id, cuid, ip="ipv4:127.0.0.1:8888")
+        assert await sm.is_client_online(tenant_id, cuid) is True
         await sm.update_heartbeat(tenant_id, cuid)
 
-        # 获取当前所有在线设备
         status_list = await sm.get_all_clients_status(tenant_id)
         assert any(s["uid"] == cuid for s in status_list)
 
-        # 获取在线 IP 集合
         ips = await sm.get_all_online_ips(tenant_id)
         assert "127.0.0.1" in ips
 
-        # 下线设备
         await sm.set_client_offline(tenant_id, cuid)
         assert await sm.is_client_online(tenant_id, cuid) is False
 
-        # 4. complete_handshake 分支覆盖
-        # 4.1 握手不被接受
         await sm.store_pending_handshake(tenant_id, cuid, challenge)
         res_fail = await sm.complete_handshake(tenant_id, cuid, accepted=False)
         assert res_fail is None
 
-        # 4.2 握手接受且挑战令牌正常
         await sm.store_pending_handshake(tenant_id, cuid, challenge)
         res_ok = await sm.complete_handshake(tenant_id, cuid, accepted=True)
         assert res_ok is not None
         assert await sm.validate_session(res_ok) == cuid
 
-        # 4.3 挑战令牌已过期/不存在，即使接受也应当返回 None
         res_expired = await sm.complete_handshake(tenant_id, cuid, accepted=True)
         assert res_expired is None
     finally:

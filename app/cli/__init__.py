@@ -1,2 +1,1 @@
-"""Typer-based Command Line Interface module.
-"""
+"""Typer-based Command Line Interface module."""

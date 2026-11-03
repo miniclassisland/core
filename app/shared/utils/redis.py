@@ -1,11 +1,8 @@
-"""Redis multi-database connection pool manager and accessor.
-"""
+"""Redis multi-database connection pool manager and accessor."""
 
 import asyncio
 import os
-import sys
 import logging
-from typing import Optional
 import redis.asyncio as aioredis
 from app.shared.utils.config import REDIS_URL
 

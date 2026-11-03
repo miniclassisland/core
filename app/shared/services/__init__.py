@@ -1,2 +1,1 @@
-"""MINIClassIsland shared services business logic package.
-"""
+"""MINI ClassIsland shared services business logic package."""

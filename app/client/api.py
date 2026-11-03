@@ -1,15 +1,15 @@
 import logging
-import time
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
-from app.shared.db.models import ClientProfile, Account, PreRegisteredClient
+from app.shared.db.models import ClientProfile, Account, PreRegisteredClient, MODEL_MAP
+from app.shared.db.schema_init import seed_account_defaults
 from app.shared.schemas.schemas import ClientManifest
 from app.shared.utils.logging import get_client_ip_from_request
-from app.shared.utils.tenant import get_tenant_id
+from app.shared.utils.tenant import get_tenant_id, get_tenant_id_or_default
 from app.shared.utils.config import BASE_DOMAIN
 from app.shared.security.auth import create_token
 
@@ -28,42 +28,115 @@ VALID_RESOURCES = [
 ]
 
 
-@router.get("/v1/client/{client_uid}/manifest", response_model=ClientManifest, tags=["Client"])
+@router.get(
+    "/v1/client/{client_uid}/manifest", response_model=ClientManifest, tags=["Client"]
+)
 async def get_client_manifest(
     request: Request, client_uid: str, db: AsyncSession = Depends(get_db)
 ):
     """Build complete Manifest JSON payload for requested client UID."""
     slug = getattr(request.state, "tenant_slug", "Unknown")
+    tenant_id = get_tenant_id_or_default()
     client_ip = get_client_ip_from_request(request)
     short_uid = (
         f"{client_uid[:8]}...{client_uid[-5:]}" if len(client_uid) > 13 else client_uid
     )
     logger.info(
-        "[%s][%s][%s] Client API Details: Requested Manifest", client_ip, slug, short_uid
+        "[%s][%s][%s] Client API Details: Requested Manifest",
+        client_ip,
+        slug,
+        short_uid,
     )
 
-    stmt = select(ClientProfile).where(ClientProfile.client_id == client_uid)
-    result = await db.execute(stmt)
-    p = result.scalar_one_or_none() or ClientProfile()
+    account = None
+    if tenant_id and tenant_id != "default":
+        account = (
+            await db.execute(select(Account).where(Account.id == tenant_id))
+        ).scalar_one_or_none()
+    org_name = account.name if account and account.name else "MINI ClassIsland Server"
 
-    # Use defaults if profile is incomplete
-    cp = p.class_plan or "default_classplan"
-    tl = p.time_layout or "default_timelayout"
-    sub = getattr(p, "subjects", None) or "default"
-    ds = getattr(p, "default_settings", None) or "default"
-    pol = getattr(p, "policy", None) or "default"
-    comp = getattr(p, "components", None) or "default"
-    cred = getattr(p, "credentials", None) or "default"
-    cur = int(time.time())
+    # Ensure default resources exist for this tenant
+    await seed_account_defaults(tenant_id, db)
+    await db.commit()
 
-    return _build_manifest(request, cp, tl, sub, ds, pol, comp, cred, cur)
+    # Resolve client-specific profile, falling back to account '__default__' profile
+    stmt = select(ClientProfile).where(
+        ClientProfile.account_id == tenant_id,
+        ClientProfile.client_id == client_uid,
+    )
+    p = (await db.execute(stmt)).scalar_one_or_none()
+    if p is None:
+        stmt_def = select(ClientProfile).where(
+            ClientProfile.account_id == tenant_id,
+            ClientProfile.client_id == "__default__",
+        )
+        p = (await db.execute(stmt_def)).scalar_one_or_none() or ClientProfile()
+
+    cp = p.class_plan if p.class_plan is not None else "default"
+    tl = p.time_layout if p.time_layout is not None else "default"
+    sub = p.subjects if p.subjects is not None else "default"
+    ds = p.default_settings if p.default_settings is not None else "default"
+    pol = p.policy if p.policy is not None else "default"
+    comp = p.components if p.components is not None else "default"
+    cred = p.credentials if p.credentials is not None else "default"
+
+    resource_names = {
+        "ClassPlan": cp,
+        "TimeLayout": tl,
+        "Subjects": sub,
+        "DefaultSettings": ds,
+        "Policy": pol,
+        "Components": comp,
+        "Credentials": cred,
+    }
+
+    sources: dict[str, dict] = {}
+    for rt, res_name in resource_names.items():
+        if not res_name:
+            sources[rt] = {"Value": "", "Version": 0}
+            continue
+        model = MODEL_MAP[rt]
+        rec = (
+            (
+                await db.execute(
+                    select(model).where(
+                        or_(
+                            model.account_id == tenant_id, model.account_id == "default"
+                        ),
+                        model.name == res_name,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if not rec:
+            sources[rt] = {"Value": "", "Version": 0}
+        else:
+            url = request.url_for("get_client_resource", resource_type=rt)
+            full_url = str(url.include_query_params(name=res_name))
+            sources[rt] = {"Value": full_url, "Version": max(1, int(rec.version or 1))}
+
+    return ClientManifest(
+        ClassPlanSource=sources["ClassPlan"],
+        TimeLayoutSource=sources["TimeLayout"],
+        SubjectsSource=sources["Subjects"],
+        DefaultSettingsSource=sources["DefaultSettings"],
+        PolicySource=sources["Policy"],
+        ComponentsSource=sources["Components"],
+        CredentialSource=sources["Credentials"],
+        ServerKind=1,
+        OrganizationName=org_name,
+        CoreVersion="2.0.0.0",
+    )
 
 
 def _build_manifest(request: Request, cp, tl, sub, ds, pol, comp, cred, ver):
     """Assemble Manifest structure for each resource source."""
 
     def _src(rt, n):
-        # Generate full absolute URL using request.url_for with name query param
+        if not n:
+            return {"Value": "", "Version": 0}
         url = request.url_for("get_client_resource", resource_type=rt)
         full_url = str(url.include_query_params(name=n))
         return {"Value": full_url, "Version": ver}
@@ -77,7 +150,7 @@ def _build_manifest(request: Request, cp, tl, sub, ds, pol, comp, cred, ver):
         ComponentsSource=_src("Components", comp),
         CredentialSource=_src("Credentials", cred),
         ServerKind=1,
-        OrganizationName="MINIClassIsland Server",
+        OrganizationName="MINI ClassIsland Server",
         CoreVersion="2.0.0.0",
     )
 
@@ -86,13 +159,17 @@ def _build_manifest(request: Request, cp, tl, sub, ds, pol, comp, cred, ver):
 async def get_client_resource(resource_type: str, name: str, request: Request):
     """Redirect to token-protected download endpoint per protocol rules."""
     if resource_type not in VALID_RESOURCES:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type"
+        )
 
     tenant_id = get_tenant_id()
     client_ip = get_client_ip_from_request(request)
 
     token = await create_token(tenant_id, resource_type, name, client_ip=client_ip)
-    return RedirectResponse(url=f"/get?token={token}", status_code=status.HTTP_302_FOUND)
+    return RedirectResponse(
+        url=f"/get?token={token}", status_code=status.HTTP_302_FOUND
+    )
 
 
 @router.get("/v1/management-config", tags=["Guide"])

@@ -1,5 +1,4 @@
-"""Super Admin API Application Definition.
-"""
+"""Super Admin API Application Definition."""
 
 import logging
 
@@ -7,13 +6,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.admin import router as admin_router
+from app.shared.fonts import router as fonts_router
 from app.shared.security.middlewares import AdminAuthMiddleware, CCProtectMiddleware
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_ADMIN
 
 logger = logging.getLogger(__name__)
 
 admin_app = FastAPI(
-    title="MINIClassIsland Admin API",
+    title="MINI ClassIsland Admin API",
     version="0.3.0",
     redirect_slashes=False,
 )
@@ -32,11 +32,12 @@ admin_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Admin router
+# Mount Admin router and embedded fonts router
 admin_app.include_router(admin_router)
+admin_app.include_router(fonts_router)
 
 
 @admin_app.get("/")
 async def root():
     """Admin API health check status endpoint."""
-    return {"status": "ok", "message": "MINIClassIsland Admin API is running"}
+    return {"status": "ok", "message": "MINI ClassIsland Admin API is running"}

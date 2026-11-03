@@ -1,4 +1,4 @@
-"""MINIClassIsland database entity models.
+"""MINI ClassIsland database entity models.
 
 This file consolidates all SQLAlchemy data models in the system, including global tables and multi-tenant tables.
 """
@@ -12,13 +12,26 @@ from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstrain
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
+def _default_account_id() -> str:
+    """Resolve current tenant account ID from context var or fallback to 'default'."""
+    try:
+        from app.shared.utils.tenant import tenant_ctx
+
+        val = tenant_ctx.get()
+        return val if val else "default"
+    except LookupError:
+        return "default"
+
+
 class Base(DeclarativeBase):
-    """Base class for all MINIClassIsland database models."""
+    """Base class for all MINI ClassIsland database models."""
+
     pass
 
 
 class User(Base):
     """User account entity."""
+
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(
@@ -40,6 +53,7 @@ class User(Base):
 
 class CustomRole(Base):
     """Role hierarchy record (system built-in and custom)."""
+
     __tablename__ = "custom_roles"
 
     id: Mapped[str] = mapped_column(
@@ -53,6 +67,7 @@ class CustomRole(Base):
 
 class Account(Base):
     """Account (Organization/Tenant) identity and settings record."""
+
     __tablename__ = "accounts"
 
     id: Mapped[str] = mapped_column(
@@ -62,11 +77,13 @@ class Account(Base):
     slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     api_key: Mapped[str] = mapped_column(String(256))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    registration_mode: Mapped[str] = mapped_column(String(32), default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AccountMember(Base):
     """User membership relation record in an Account."""
+
     __tablename__ = "account_members"
     __table_args__ = (
         UniqueConstraint("user_id", "account_id", name="uq_user_account"),
@@ -83,6 +100,7 @@ class AccountMember(Base):
 
 class PermissionDef(Base):
     """Atomic permission definition record."""
+
     __tablename__ = "permission_defs"
 
     code: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -92,6 +110,7 @@ class PermissionDef(Base):
 
 class MemberPermission(Base):
     """Member-granularity permission override record."""
+
     __tablename__ = "member_permissions"
     __table_args__ = (
         UniqueConstraint("member_id", "permission_code", name="uq_member_perm"),
@@ -107,6 +126,7 @@ class MemberPermission(Base):
 
 class AccountQuota(Base):
     """Account-level resource quota limit record."""
+
     __tablename__ = "account_quotas"
     __table_args__ = (
         UniqueConstraint("account_id", "quota_key", name="uq_acct_quota"),
@@ -123,6 +143,7 @@ class AccountQuota(Base):
 
 class SystemConfig(Base):
     """System-level key-value configuration record."""
+
     __tablename__ = "system_config"
 
     key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -132,6 +153,7 @@ class SystemConfig(Base):
 
 class ReservedName(Base):
     """System reserved name record."""
+
     __tablename__ = "reserved_names"
 
     name: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -139,109 +161,151 @@ class ReservedName(Base):
 
 
 class ResourceMixin:
-    """Resource storage table model Mixin."""
+    """Resource storage table model Mixin (scoped per account_id and resource name)."""
 
-    name: Mapped[str] = mapped_column(String, primary_key=True)
-    content: Mapped[str] = mapped_column(Text)
-    version: Mapped[int] = mapped_column(Integer, default=0)
+    account_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, index=True, default=_default_account_id
+    )
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    content: Mapped[str] = mapped_column(Text, default="{}")
+    version: Mapped[int] = mapped_column(Integer, default=1)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class CPFile(Base, ResourceMixin):
     """Class plan resource file table."""
+
     __tablename__ = "cp_files"
 
 
 class TLFile(Base, ResourceMixin):
     """Time layout resource file table."""
+
     __tablename__ = "tl_files"
 
 
 class SubFile(Base, ResourceMixin):
     """Subjects resource file table."""
+
     __tablename__ = "sub_files"
 
 
 class PolicyFile(Base, ResourceMixin):
     """Policy resource file table."""
+
     __tablename__ = "policy_files"
 
 
 class SettingsFile(Base, ResourceMixin):
     """Default settings resource file table."""
+
     __tablename__ = "settings_files"
 
 
 class ComponentsFile(Base, ResourceMixin):
     """Components resource file table."""
+
     __tablename__ = "components_files"
 
 
 class CredentialsFile(Base, ResourceMixin):
     """Credentials resource file table."""
+
     __tablename__ = "credentials_files"
 
 
 class ClientRecord(Base):
     """Registered physical client device database record."""
+
     __tablename__ = "clients"
 
-    uid: Mapped[str] = mapped_column(String, primary_key=True)
-    client_id: Mapped[str] = mapped_column(String, default="")
-    mac: Mapped[str] = mapped_column(String, default="")
+    uid: Mapped[str] = mapped_column(String(128), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64), index=True, default=_default_account_id
+    )
+    client_id: Mapped[str] = mapped_column(String(128), default="")
+    display_name: Mapped[str] = mapped_column(String(128), default="")
+    mac: Mapped[str] = mapped_column(String(64), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    is_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
 
 
 class ClientProfile(Base):
-    """Mapping relation between client and specific resource files."""
+    """Mapping relation between client (or account '__default__') and specific resource files."""
+
     __tablename__ = "client_profiles"
 
-    client_id: Mapped[str] = mapped_column(String, primary_key=True)
-    class_plan: Mapped[str] = mapped_column(String)
-    time_layout: Mapped[str] = mapped_column(String)
-    subjects: Mapped[str] = mapped_column(String)
-    default_settings: Mapped[str] = mapped_column(String)
-    policy: Mapped[str] = mapped_column(String)
-    components: Mapped[str] = mapped_column(String, nullable=True)
-    credentials: Mapped[str] = mapped_column(String, nullable=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64), primary_key=True, index=True, default=_default_account_id
+    )
+    client_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    class_plan: Mapped[str] = mapped_column(String(255), default="default")
+    time_layout: Mapped[str] = mapped_column(String(255), default="default")
+    subjects: Mapped[str] = mapped_column(String(255), default="default")
+    default_settings: Mapped[str] = mapped_column(String(255), default="default")
+    policy: Mapped[str] = mapped_column(String(255), default="default")
+    components: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default="default"
+    )
+    credentials: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, default="default"
+    )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class AuditLog(Base):
     """Persistent storage for client device event logs."""
+
     __tablename__ = "audit_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    client_uid: Mapped[str] = mapped_column(String)
+    account_id: Mapped[str] = mapped_column(
+        String(64), index=True, default=_default_account_id
+    )
+    client_uid: Mapped[str] = mapped_column(String(128), index=True)
     event: Mapped[int] = mapped_column(Integer)
-    payload: Mapped[str] = mapped_column(Text)
+    payload: Mapped[str] = mapped_column(Text, default="")
+    decoded_json: Mapped[str] = mapped_column(Text, default="{}")
     timestamp_utc: Mapped[int] = mapped_column(Integer)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class ConfigUploadRecord(Base):
-    """Temporary storage for uploaded client configuration data."""
+    """Storage for uploaded client configuration snapshot data."""
+
     __tablename__ = "config_uploads"
 
-    request_guid: Mapped[str] = mapped_column(String, primary_key=True)
-    client_uid: Mapped[str] = mapped_column(String)
-    payload: Mapped[str] = mapped_column(Text)
+    request_guid: Mapped[str] = mapped_column(String(128), primary_key=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64), index=True, default=_default_account_id
+    )
+    client_uid: Mapped[str] = mapped_column(String(128), index=True)
+    config_type: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    payload: Mapped[str] = mapped_column(Text, default="")
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class PairingCode(Base):
     """Device registration pairing code record."""
+
     __tablename__ = "pairing_codes"
 
     id: Mapped[str] = mapped_column(
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    code: Mapped[str] = mapped_column(String(8), unique=True, index=True)
-    tenant_id: Mapped[str] = mapped_column(String, index=True)
-    client_uid: Mapped[str] = mapped_column(String, default="")
-    client_id: Mapped[str] = mapped_column(String, default="")
-    client_mac: Mapped[str] = mapped_column(String, default="")
-    client_ip: Mapped[str] = mapped_column(String, default="")
+    code: Mapped[str] = mapped_column(String(16), unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, default="")
+    client_uid: Mapped[str] = mapped_column(String(128), default="")
+    client_id: Mapped[str] = mapped_column(String(128), default="")
+    client_mac: Mapped[str] = mapped_column(String(64), default="")
+    client_ip: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    preset_profile_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     approved: Mapped[bool] = mapped_column(Boolean, default=False)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -249,26 +313,32 @@ class PairingCode(Base):
 
 class PreRegisteredClient(Base):
     """Pre-registered client record."""
+
     __tablename__ = "pre_registered_clients"
 
     id: Mapped[str] = mapped_column(
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    account_id: Mapped[str] = mapped_column(String, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
     label: Mapped[str] = mapped_column(String(128))
-    class_identity: Mapped[str] = mapped_column(String(64), index=True)
+    class_identity: Mapped[str] = mapped_column(String(128), index=True)
+    mac_address: Mapped[str] = mapped_column(String(64), default="")
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    preset_profile_json: Mapped[str] = mapped_column(Text, default="{}")
+    bound_client_uid: Mapped[str] = mapped_column(String(128), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Invitation(Base):
     """Account invitation code record."""
+
     __tablename__ = "invitations"
 
     id: Mapped[str] = mapped_column(
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    account_id: Mapped[str] = mapped_column(String, index=True)
-    inviter_user_id: Mapped[str] = mapped_column(String)
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
+    inviter_user_id: Mapped[str] = mapped_column(String(64))
     code: Mapped[str] = mapped_column(
         String(32),
         unique=True,
@@ -287,6 +357,7 @@ class Invitation(Base):
 
 class RolePermission(Base):
     """Relation record between role and atomic permission."""
+
     __tablename__ = "role_permissions"
     __table_args__ = (
         UniqueConstraint("role_code", "permission_code", name="uq_role_perm"),
@@ -309,4 +380,3 @@ MODEL_MAP = {
     "Components": ComponentsFile,
     "Credentials": CredentialsFile,
 }
-

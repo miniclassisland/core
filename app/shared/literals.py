@@ -1,10 +1,10 @@
-"""MINIClassIsland shared literal constants."""
+"""MINI ClassIsland shared literal constants."""
 
 import re
 
 # ---- System Metadata & Default Configurations ----
 SYS_NAME = "MINI ClassIsland Core Management Backend System"
-DEFAULT_BASE_DOMAIN = "miniclassisland.com"
+DEFAULT_BASE_DOMAIN = "localminiclassisland.miniopensource.com"
 DEFAULT_KEY_FILE = "miniclassisland_server.key"
 DEFAULT_ADMIN_SECRET = "change-me"
 DEFAULT_CONFIG_DIR = ".miniclassisland"
@@ -94,13 +94,329 @@ ALLOWED_SETTINGS_KEYS = {
 }
 
 RESERVED_SUBDOMAINS = {
-    "admin", "api", "www", "mail", "ftp", "ssh", "dns", "smtp",
-    "pop", "imap", "ntp", "snmp", "ldap", "tcp", "udp", "system",
-    "core", "dev", "test", "staging", "prod", "auth", "login",
+    "admin",
+    "api",
+    "www",
+    "mail",
+    "ftp",
+    "ssh",
+    "dns",
+    "smtp",
+    "pop",
+    "imap",
+    "ntp",
+    "snmp",
+    "ldap",
+    "tcp",
+    "udp",
+    "system",
+    "core",
+    "dev",
+    "test",
+    "staging",
+    "prod",
+    "auth",
+    "login",
 }
 
 
-# ---- 5. HTTP & API Error Messages ----
+# ---- 5. Audit Events & Config Types ----
+AUDIT_EVENT_NAMES: dict[int, str] = {
+    0: "Unspecified",
+    1: "AuthorizeSuccess",
+    2: "AuthorizeFailed",
+    4: "AppSettingsUpdated",
+    5: "ClassChangeCompleted",
+    6: "ClassPlanUpdated",
+    7: "TimeLayoutUpdated",
+    8: "SubjectUpdated",
+    9: "AppCrashed",
+    10: "AppStarted",
+    11: "AppExited",
+    12: "PluginInstalled",
+    13: "PluginUninstalled",
+}
+
+CONFIG_TYPE_NAMES: dict[int, str] = {
+    0: "Unspecified",
+    1: "AppSettings",
+    2: "Profile",
+    3: "CurrentComponent",
+    4: "CurrentAutomation",
+    5: "Logs",
+    6: "PluginList",
+}
+
+
+# ---- 6. Default Profile Resource Templates ----
+DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
+    "Subjects": {
+        "default": {
+            "Subjects": {
+                "sub-chinese": {
+                    "Name": "语文",
+                    "Initial": "语",
+                    "TeacherName": "",
+                    "IsOutDoor": False,
+                    "AttachedObjects": {},
+                },
+                "sub-math": {
+                    "Name": "数学",
+                    "Initial": "数",
+                    "TeacherName": "",
+                    "IsOutDoor": False,
+                    "AttachedObjects": {},
+                },
+                "sub-english": {
+                    "Name": "英语",
+                    "Initial": "英",
+                    "TeacherName": "",
+                    "IsOutDoor": False,
+                    "AttachedObjects": {},
+                },
+            }
+        }
+    },
+    "TimeLayout": {
+        "default": {
+            "TimeLayouts": {
+                "tl-weekday": {
+                    "Name": "标准平日作息",
+                    "Layouts": [
+                        {
+                            "StartSecond": "1970-01-01T08:00:00",
+                            "EndSecond": "1970-01-01T08:45:00",
+                            "TimeType": 0,
+                            "IsHideDefault": False,
+                            "DefaultClassId": "sub-chinese",
+                            "BreakName": "",
+                            "ActionSet": None,
+                            "AttachedObjects": {},
+                        },
+                        {
+                            "StartSecond": "1970-01-01T08:45:00",
+                            "EndSecond": "1970-01-01T08:55:00",
+                            "TimeType": 1,
+                            "IsHideDefault": False,
+                            "DefaultClassId": "",
+                            "BreakName": "课间休息",
+                            "ActionSet": None,
+                            "AttachedObjects": {},
+                        },
+                        {
+                            "StartSecond": "1970-01-01T08:55:00",
+                            "EndSecond": "1970-01-01T09:40:00",
+                            "TimeType": 0,
+                            "IsHideDefault": False,
+                            "DefaultClassId": "sub-math",
+                            "BreakName": "",
+                            "ActionSet": None,
+                            "AttachedObjects": {},
+                        },
+                    ],
+                    "AttachedObjects": {},
+                }
+            }
+        }
+    },
+    "ClassPlan": {
+        "default": {
+            "ClassPlans": {
+                "cp-monday": {
+                    "Name": "周一课表",
+                    "TimeLayoutId": "tl-weekday",
+                    "TimeRule": {
+                        "WeekDay": 1,
+                        "WeekCountDiv": 0,
+                        "WeekCountDivTotal": 2,
+                    },
+                    "Classes": [
+                        {
+                            "SubjectId": "sub-chinese",
+                            "IsEnabled": True,
+                            "AttachedObjects": {},
+                        },
+                        {
+                            "SubjectId": "sub-math",
+                            "IsEnabled": True,
+                            "AttachedObjects": {},
+                        },
+                    ],
+                    "IsOverlay": False,
+                    "OverlaySourceId": None,
+                    "OverlaySetupTime": "2026-01-01T00:00:00",
+                    "IsEnabled": True,
+                    "AssociatedGroup": "00000000-0000-0000-0000-000000000000",
+                    "AttachedObjects": {},
+                }
+            },
+            "ClassPlanGroups": {
+                "00000000-0000-0000-0000-000000000000": {
+                    "Name": "默认课表群",
+                    "IsGlobal": False,
+                }
+            },
+        }
+    },
+    "Policy": {
+        "default": {
+            "DisableProfileClassPlanEditing": False,
+            "DisableProfileTimeLayoutEditing": False,
+            "DisableProfileSubjectsEditing": False,
+            "DisableProfileEditing": False,
+            "DisableSettingsEditing": False,
+            "DisableSplashCustomize": False,
+            "DisableDebugMenu": False,
+            "AllowExitManagement": True,
+            "DisableEasterEggs": False,
+        }
+    },
+    "DefaultSettings": {
+        "default": {
+            "IsWelcomeWindowShowed": True,
+            "WindowDockingLocation": 1,
+            "WindowDockingOffsetX": 0,
+            "WindowDockingOffsetY": 0,
+            "WindowLayer": 1,
+            "Scale": 1.0,
+            "Theme": 0,
+            "PrimaryColor": "#0090FF",
+            "IsNotificationEnabled": True,
+            "IsNotificationEffectEnabled": True,
+            "IsNotificationSoundEnabled": True,
+            "IsSpeechEnabled": True,
+            "SpeechVolume": 1.0,
+            "TimeOffsetSeconds": 0.0,
+        }
+    },
+    "Components": {
+        "default": {
+            "Lines": [
+                {
+                    "Children": [
+                        {
+                            "Id": "df3f8295-21f6-482e-bada-fa0e5f14bb66",
+                            "NameCache": "日期",
+                            "HideOnRule": False,
+                            "HidingRules": {"Rules": [], "GroupingMode": 0},
+                            "IsResourceOverridingEnabled": False,
+                            "MainWindowSecondaryFontSize": 14.0,
+                            "MainWindowBodyFontSize": 16.0,
+                            "MainWindowEmphasizedFontSize": 18.0,
+                            "MainWindowLargeFontSize": 20.0,
+                            "IsCustomForegroundColorEnabled": False,
+                            "ForegroundColor": "#FFFFFFFF",
+                            "IsCustomMarginEnabled": False,
+                            "MarginLeft": 0.0,
+                            "MarginTop": 0.0,
+                            "MarginRight": 0.0,
+                            "MarginBottom": 0.0,
+                            "HorizontalAlignment": 1,
+                            "IsMinWidthEnabled": False,
+                            "MinWidth": 100.0,
+                            "IsMaxWidthEnabled": False,
+                            "MaxWidth": 300.0,
+                            "IsFixedWidthEnabled": False,
+                            "FixedWidth": 200.0,
+                            "Settings": {},
+                            "Children": [],
+                        },
+                        {
+                            "Id": "1db2017d-e374-4bc6-9d57-0b4adf03a6b8",
+                            "NameCache": "课程表",
+                            "HideOnRule": False,
+                            "HidingRules": {"Rules": [], "GroupingMode": 0},
+                            "IsResourceOverridingEnabled": False,
+                            "MainWindowSecondaryFontSize": 14.0,
+                            "MainWindowBodyFontSize": 16.0,
+                            "MainWindowEmphasizedFontSize": 18.0,
+                            "MainWindowLargeFontSize": 20.0,
+                            "IsCustomForegroundColorEnabled": False,
+                            "ForegroundColor": "#FFFFFFFF",
+                            "IsCustomMarginEnabled": False,
+                            "MarginLeft": 0.0,
+                            "MarginTop": 0.0,
+                            "MarginRight": 0.0,
+                            "MarginBottom": 0.0,
+                            "HorizontalAlignment": 1,
+                            "IsMinWidthEnabled": False,
+                            "MinWidth": 100.0,
+                            "IsMaxWidthEnabled": False,
+                            "MaxWidth": 300.0,
+                            "IsFixedWidthEnabled": False,
+                            "FixedWidth": 200.0,
+                            "Settings": {},
+                            "Children": [],
+                        },
+                        {
+                            "Id": "9e1af71d-8f77-4b21-a342-448787104dd9",
+                            "NameCache": "时钟",
+                            "HideOnRule": False,
+                            "HidingRules": {"Rules": [], "GroupingMode": 0},
+                            "IsResourceOverridingEnabled": False,
+                            "MainWindowSecondaryFontSize": 14.0,
+                            "MainWindowBodyFontSize": 16.0,
+                            "MainWindowEmphasizedFontSize": 18.0,
+                            "MainWindowLargeFontSize": 20.0,
+                            "IsCustomForegroundColorEnabled": False,
+                            "ForegroundColor": "#FFFFFFFF",
+                            "IsCustomMarginEnabled": False,
+                            "MarginLeft": 0.0,
+                            "MarginTop": 0.0,
+                            "MarginRight": 0.0,
+                            "MarginBottom": 0.0,
+                            "HorizontalAlignment": 1,
+                            "IsMinWidthEnabled": False,
+                            "MinWidth": 100.0,
+                            "IsMaxWidthEnabled": False,
+                            "MaxWidth": 300.0,
+                            "IsFixedWidthEnabled": False,
+                            "FixedWidth": 200.0,
+                            "Settings": {},
+                            "Children": [],
+                        },
+                    ],
+                    "IsMainLine": True,
+                    "IsNotificationEnabled": True,
+                    "IsHidden": False,
+                    "IslandSeparationMode": 0,
+                    "HideOnRule": False,
+                    "HidingRules": {"Rules": [], "GroupingMode": 0},
+                    "IsResourceOverridingEnabled": False,
+                    "MainWindowSecondaryFontSize": 14.0,
+                    "MainWindowBodyFontSize": 16.0,
+                    "MainWindowEmphasizedFontSize": 18.0,
+                    "MainWindowLargeFontSize": 20.0,
+                    "IsCustomForegroundColorEnabled": False,
+                    "ForegroundColor": "#FFFFFFFF",
+                    "BackgroundColor": "#00000000",
+                    "IsCustomBackgroundColorEnabled": False,
+                    "BackgroundOpacity": 0.5,
+                    "IsCustomBackgroundOpacityEnabled": False,
+                    "CustomCornerRadius": 8.0,
+                    "IsCustomCornerRadiusEnabled": False,
+                    "Opacity": 1.0,
+                }
+            ]
+        }
+    },
+    "Credentials": {
+        "default": {
+            "UserCredential": "",
+            "AdminCredential": "",
+            "EditPolicyAuthorizeLevel": 2,
+            "ExitManagementAuthorizeLevel": 2,
+            "EditProfileAuthorizeLevel": 0,
+            "EditSettingsAuthorizeLevel": 0,
+            "ExitApplicationAuthorizeLevel": 0,
+            "EditComponentsAuthorizeLevel": 0,
+            "PluginManagementAuthorizeLevel": 0,
+        }
+    },
+}
+
+
+# ---- 7. HTTP & API Error Messages ----
 MSG_USER_NOT_FOUND = "User not found"
 MSG_ACCOUNT_NOT_FOUND = "Account not found"
 MSG_INVALID_CREDENTIALS = "Invalid username or password"
@@ -121,13 +437,13 @@ MSG_TENANT_NOT_FOUND = "Tenant account not found"
 MSG_INVALID_TENANT_CONTEXT = "Invalid tenant context"
 
 
-# ---- 6. gRPC Status & Error Messages ----
+# ---- 8. gRPC Status & Error Messages ----
 MSG_GRPC_UNAUTHENTICATED = "Unauthenticated gRPC request"
 MSG_GRPC_SESSION_INVALID = "Invalid gRPC session token"
 MSG_GRPC_CLIENT_NOT_REGISTERED = "Client device not registered"
 MSG_GRPC_HANDSHAKE_FAILED = "Handshake verification failed"
 
 
-# ---- 7. Logging & Formats ----
+# ---- 9. Logging & Formats ----
 LOG_FORMAT = "%(asctime)s.%(msecs)03d | %(levelname)-5s | %(port_tag)s | %(name)-30s | %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"

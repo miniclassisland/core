@@ -1,5 +1,4 @@
-"""Management API Application Definition.
-"""
+"""Management API Application Definition."""
 
 import logging
 
@@ -8,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.management import router as mgr_router
 from app.client import token_get_router
+from app.shared.fonts import router as fonts_router
 from app.shared.security.middlewares import (
     AdminAuthMiddleware,
     AccountContextMiddleware,
@@ -18,7 +18,7 @@ from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_MGMT
 logger = logging.getLogger(__name__)
 
 management_app = FastAPI(
-    title="MINIClassIsland Management API",
+    title="MINI ClassIsland Management API",
     version="0.3.0",
     redirect_slashes=False,
 )
@@ -40,12 +40,13 @@ management_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Management router and token_get router
+# Mount Management router, token_get router, and fonts router
 management_app.include_router(mgr_router)
 management_app.include_router(token_get_router, tags=["TokenGet"])
+management_app.include_router(fonts_router)
 
 
 @management_app.get("/")
 async def root():
     """Management API health check status endpoint."""
-    return {"status": "ok", "message": "MINIClassIsland Management API is running"}
+    return {"status": "ok", "message": "MINI ClassIsland Management API is running"}

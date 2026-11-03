@@ -1,4 +1,4 @@
-"""MINIClassIsland Backend Services Entry Point.
+"""MINI ClassIsland Backend Services Entry Point.
 
 Concurrently starts Client API, Management API, and Admin API services.
 """
@@ -6,11 +6,14 @@ Concurrently starts Client API, Management API, and Admin API services.
 import asyncio
 import logging
 import os
-import sys
 import uvicorn
-from pathlib import Path
 
-from app.shared.utils.config import CLIENT_PORT, MANAGEMENT_PORT, ADMIN_PORT, CONFIG_FILE
+from app.shared.utils.config import (
+    CLIENT_PORT,
+    MANAGEMENT_PORT,
+    ADMIN_PORT,
+    CONFIG_FILE,
+)
 from app.shared.utils.pid import PID
 
 logger = logging.getLogger(__name__)
@@ -84,7 +87,7 @@ async def start_servers():
         logger.info("All services stopped, PID file cleaned up")
 
 
-from app.cli.main import cli
+from app.cli.main import cli  # noqa: E402
 
 __all__ = ["start_servers", "main", "cli"]
 
@@ -92,6 +95,7 @@ __all__ = ["start_servers", "main", "cli"]
 def main():
     """Main application entry point (unified CLI)."""
     from app.cli.main import main as cli_main
+
     cli_main()
 
 

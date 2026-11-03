@@ -1,4 +1,4 @@
-"""MINIClassIsland unified logging and client IP extraction system.
+"""MINI ClassIsland unified logging and client IP extraction system.
 
 Takes over FastAPI / uvicorn / gRPC log streams, providing unified formatting and reverse-proxy client IP parsing.
 """
@@ -32,6 +32,7 @@ PORT_TAG_SYSTEM = "SYSTEM"
 
 
 # ---- Real IP Parsing Utilities ----
+
 
 def _parse_forwarded_for(value: str) -> str:
     """Parse X-Forwarded-For header to retrieve first client real IP."""
@@ -77,6 +78,7 @@ def get_client_ip_from_grpc(context: grpc.aio.ServicerContext) -> str:
 
 # ---- Log Formatter & Filters ----
 
+
 class _PortTagFilter(logging.Filter):
     """Log filter to inject port_tag attribute."""
 
@@ -95,9 +97,9 @@ class _ColorFormatter(logging.Formatter):
 
     _COLORS = {
         PORT_TAG_CLIENT: "\033[36m",  # Cyan
-        PORT_TAG_MGMT: "\033[33m",    # Yellow
-        PORT_TAG_ADMIN: "\033[35m",   # Magenta
-        PORT_TAG_GRPC: "\033[32m",    # Green
+        PORT_TAG_MGMT: "\033[33m",  # Yellow
+        PORT_TAG_ADMIN: "\033[35m",  # Magenta
+        PORT_TAG_GRPC: "\033[32m",  # Green
         PORT_TAG_SYSTEM: "\033[37m",  # White
     }
     _LEVEL_COLORS = {
@@ -133,6 +135,7 @@ class _ColorFormatter(logging.Formatter):
 
 
 # ---- Logging Initialization ----
+
 
 def setup_logging(*, level: int = logging.INFO) -> None:
     """Globally initialize logging format and file rotating handler."""
@@ -194,6 +197,7 @@ def get_port_logger(tag: str) -> logging.Logger:
 
 
 # ---- Starlette/FastAPI Request Logging Middleware ----
+
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Unified HTTP request logging middleware."""

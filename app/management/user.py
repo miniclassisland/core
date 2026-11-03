@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +11,9 @@ from app.shared.schemas.schemas import (
     UserRegisterRequest,
     EmailUpdate,
     UsernameUpdate,
+    DisplayNameUpdate,
     PasswordChange,
+    PasswordReset,
     MessageResponse,
     TotpEnableResponse,
     TotpConfirmRequest,
@@ -47,6 +49,7 @@ router = APIRouter(prefix="/user")
 
 # ---- 1. User Self-Registration & Availability Verification ----
 
+
 @router.post("/apply", response_model=MessageResponse, tags=["User"])
 async def apply_user(
     payload: UserRegisterRequest = Body(...),
@@ -63,7 +66,9 @@ async def apply_user(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    return MessageResponse(message="Registration successful, awaiting administrator approval")
+    return MessageResponse(
+        message="Registration successful, awaiting administrator approval"
+    )
 
 
 @router.get("/availability/mail", tags=["Availability"])
@@ -79,7 +84,9 @@ async def check_mail_availability(
 
 @router.get("/availability/username", tags=["Availability"])
 async def check_username_availability(
-    value: str = Query(..., min_length=3, max_length=64, description="Username to check"),
+    value: str = Query(
+        ..., min_length=3, max_length=64, description="Username to check"
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Check username availability (format, reserved list, and uniqueness)."""
@@ -94,6 +101,7 @@ async def check_username_availability(
 
 
 # ---- 2. Login Authentication ----
+
 
 @router.post("/auth", tags=["User"])
 async def user_login(
@@ -113,15 +121,20 @@ async def user_login(
 
 # ---- 3. User Profile Management ----
 
+
 @router.get("/info", response_model=UserOut, tags=["User"])
 async def get_user_info(
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
 ):
     """Get current logged-in user profile."""
-    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    user = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
     return UserOut(
         id=user.id,
         username=user.username,
@@ -129,8 +142,13 @@ async def get_user_info(
         display_name=user.display_name,
         role_code=user.role_code,
         is_active=user.is_active,
+        totp_enabled=bool(user.totp_enabled),
         can_create_account=user.can_create_account,
-        created_at=str(user.created_at),
+        created_at=(
+            user.created_at.isoformat()
+            if hasattr(user.created_at, "isoformat")
+            else str(user.created_at)
+        ),
     )
 
 
@@ -141,9 +159,17 @@ async def change_email(
     uid: str = Depends(get_current_user_id),
 ):
     """Update current user's email address."""
+    dup = await db.execute(select(User).where(User.email == body.email, User.id != uid))
+    if dup.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email is already registered",
+        )
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
     user.email = body.email
     await db.commit()
     return {"status": "ok", "message": "Email updated"}
@@ -157,18 +183,41 @@ async def change_username(
 ):
     """Update current user's username."""
     if not validate_username_format(body.username):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid"
+        )
     dup = await db.execute(
         select(User).where(User.username == body.username, User.id != uid)
     )
     if dup.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username is already taken")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Username is already taken"
+        )
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
     user.username = body.username
     await db.commit()
     return {"status": "ok", "message": "Username updated"}
+
+
+@router.post("/info/display-name", tags=["UserInfo"])
+async def change_display_name(
+    body: DisplayNameUpdate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
+):
+    """Update current user's display name."""
+    user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    user.display_name = body.display_name.strip()
+    await db.commit()
+    return {"status": "ok", "message": "Display name updated"}
 
 
 @router.post("/info/password/change", tags=["UserInfo"])
@@ -180,9 +229,13 @@ async def change_password(
     """Change user password with old password verification."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
     if not verify_password(body.old_password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password"
+        )
     user.hashed_password = hash_password(body.new_password)
     await db.commit()
     return {"status": "ok", "message": "Password updated"}
@@ -190,14 +243,24 @@ async def change_password(
 
 @router.post("/info/password/reset", tags=["UserInfo"])
 async def reset_password(
+    body: PasswordReset = Body(default=None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
     """Reset user password."""
-    return {"status": "ok", "message": "Not implemented yet"}
+    user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    if body and body.new_password:
+        user.hashed_password = hash_password(body.new_password)
+        await db.commit()
+    return {"status": "ok", "message": "Password reset"}
 
 
 # ---- 4. User 2FA TOTP Settings ----
+
 
 @router.post("/2fa/totp/enable", response_model=TotpEnableResponse, tags=["2FA"])
 async def enable_2fa(
@@ -207,7 +270,9 @@ async def enable_2fa(
     """Generate TOTP secret key and recovery codes for current user."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if user.totp_enabled:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="2FA is already enabled")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="2FA is already enabled"
+        )
     secret = generate_totp_secret()
     user.totp_secret = secret
     await db.commit()
@@ -229,9 +294,13 @@ async def confirm_2fa(
     """Confirm and activate 2FA with one-time verification code."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if not user.totp_secret:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Please call /enable first")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Please call /enable first"
+        )
     if not verify_totp(user.totp_secret, body.code):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid TOTP code")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid TOTP code"
+        )
     user.totp_enabled = True
     await db.commit()
     return {"status": "2fa_enabled"}
@@ -246,7 +315,9 @@ async def disable_2fa(
     """Disable TOTP 2FA for current user (requires password verification)."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if not verify_password(body.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password"
+        )
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
@@ -260,7 +331,9 @@ async def verify_2fa_login(body: TotpVerifyRequest):
     async with AsyncSessionLocal() as db:
         user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
     if not verify_totp(user.totp_secret, body.code):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code"
+        )
     token = await create_session_token(uid)
     return {"token": token, "user_id": uid}
 
@@ -271,6 +344,9 @@ async def recover_2fa(body: TotpRecoverRequest):
     uid = await pop_2fa_temp_token(body.temp_token)
     ok = await use_recovery_code(uid, body.recovery_code)
     if not ok:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or used recovery code")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or used recovery code",
+        )
     token = await create_session_token(uid)
     return {"token": token, "user_id": uid}

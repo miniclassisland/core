@@ -1,2 +1,1 @@
-"""MINIClassIsland shared schemas package.
-"""
+"""MINI ClassIsland shared schemas package."""

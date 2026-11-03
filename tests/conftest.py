@@ -1,16 +1,20 @@
 import sys
 import os
-import pytest
 import pytest_asyncio
 
 # Force tests to use dedicated test database miniclassisland_test to protect runtime database
-TEST_DB_URL = os.getenv("TEST_DATABASE_URL", "postgresql+psycopg://postgres:password@localhost:5432/miniclassisland_test")
+TEST_DB_URL = os.getenv(
+    "TEST_DATABASE_URL",
+    "postgresql+psycopg://postgres:password@localhost:5432/miniclassisland_test",
+)
 os.environ["DATABASE_URL"] = TEST_DB_URL
 
-import app.shared.utils.config as cfg
-from app.shared.db import session as db_session
+import app.shared.utils.config as cfg  # noqa: E402
+from app.shared.db import session as db_session  # noqa: E402
+
 cfg.DATABASE_URL = TEST_DB_URL
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
+
 test_engine = create_async_engine(TEST_DB_URL, echo=False)
 db_session.engine = test_engine
 db_session.AsyncSessionLocal.configure(bind=test_engine)
@@ -29,17 +33,32 @@ for path in paths_to_remove:
     except ValueError:
         pass
 
+_schema_reset_done = False
+
 
 @pytest_asyncio.fixture(autouse=True)
 async def db_cleaner():
-    """Clean all database tables in test database before each test to ensure test isolation."""
+    """Clean all database tables and rate-limit state before each test to ensure test isolation."""
+    global _schema_reset_done
     from app.shared.db.models import Base
+    from app.shared.security import crypto, middlewares
     from sqlalchemy import text
 
+    crypto.get_ip_failures_dict().clear()
+    crypto.get_global_requests().clear()
+    crypto.set_cc_state(False)
+    middlewares.IP_FAILURE_LIMIT = 100000
+    middlewares.GLOBAL_CC_LIMIT = 100000
+
     async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        for table in reversed(Base.metadata.sorted_tables):
-            await conn.execute(text(f'TRUNCATE TABLE "{table.name}" CASCADE;'))
+        if not _schema_reset_done:
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+            _schema_reset_done = True
+        else:
+            await conn.run_sync(Base.metadata.create_all)
+            for table in reversed(Base.metadata.sorted_tables):
+                await conn.execute(text(f'TRUNCATE TABLE "{table.name}" CASCADE;'))
 
 
 @pytest_asyncio.fixture
@@ -52,7 +71,9 @@ async def test_superadmin_user():
     from sqlalchemy import select
 
     async with AsyncSessionLocal() as db:
-        existing = (await db.execute(select(User).where(User.username == "superadmin_test"))).scalar_one_or_none()
+        existing = (
+            await db.execute(select(User).where(User.username == "superadmin_test"))
+        ).scalar_one_or_none()
         if existing:
             return existing.id
 
@@ -70,5 +91,3 @@ async def test_superadmin_user():
         await db.commit()
         await db.refresh(user)
         return user.id
-
-

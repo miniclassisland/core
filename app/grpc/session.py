@@ -5,8 +5,6 @@ Contains key pair management (PGPy), handshake challenge state, heartbeat online
 
 import os
 import uuid
-import secrets
-import json
 import logging
 import pgpy
 from pgpy.constants import (
@@ -15,7 +13,6 @@ from pgpy.constants import (
     HashAlgorithm,
     SymmetricKeyAlgorithm,
 )
-import redis.asyncio as aioredis
 
 from app.shared.utils.config import REDIS_DB_SESSION, KEY_FILE
 from app.shared.utils.redis import get_redis
@@ -25,10 +22,11 @@ logger = logging.getLogger(__name__)
 # Session and handshake TTL configuration
 SESSION_TTL = 86400  # 24 hours
 HANDSHAKE_TTL = 120  # 2 minutes
-ONLINE_TTL = 60      # 60 seconds
+ONLINE_TTL = 60  # 60 seconds
 
 
 # ---- GPG Key Generation & Decryption ----
+
 
 class GPGKeyManager:
     """Manages RSA encryption key pairs, handling import, generation, and challenge decryption."""
@@ -50,7 +48,7 @@ class GPGKeyManager:
                 logger.warning("Key file corrupted, re-generating: %s", self._key_file)
 
         k = pgpy.PGPKey.new(PubKeyAlgorithm.RSAEncryptOrSign, 2048)
-        u = pgpy.PGPUID.new("MINIClassIsland Server", comment="ClassIsland")
+        u = pgpy.PGPUID.new("MINI ClassIsland Server", comment="MINI ClassIsland")
         k.add_uid(
             u,
             usage={KeyFlags.EncryptCommunications},
@@ -74,6 +72,7 @@ class GPGKeyManager:
 
 # ---- gRPC Peer IP Parser ----
 
+
 def parse_grpc_peer_ip(peer: str) -> str:
     """Clean and extract IP segment from peer address."""
     if not peer:
@@ -92,6 +91,7 @@ def parse_grpc_peer_ip(peer: str) -> str:
 
 
 # ---- Session Manager Class ----
+
 
 class SessionManager:
     """Core entity for device connection and long-connection lifecycle management."""
@@ -132,10 +132,14 @@ class SessionManager:
         await rd.expire(key, SESSION_TTL)
         return sid
 
-    async def complete_handshake(self, tenant_id: str, cuid: str, accepted: bool) -> str | None:
+    async def complete_handshake(
+        self, tenant_id: str, cuid: str, accepted: bool
+    ) -> str | None:
         """Complete handshake evaluation."""
         pending = await self.pop_handshake_challenge(tenant_id, cuid)
-        return await self.create_session(tenant_id, cuid) if pending and accepted else None
+        return (
+            await self.create_session(tenant_id, cuid) if pending and accepted else None
+        )
 
     async def validate_session(self, sid: str) -> str | None:
         """Retrieve corresponding client cuid from session ID."""
@@ -166,7 +170,11 @@ class SessionManager:
     async def is_client_online(self, tid: str, cuid: str) -> bool:
         """Check if device is online."""
         rd = get_redis(REDIS_DB_SESSION)
-        return await rd.exists(f"online:{tid}:{cuid}") > 0
+        if await rd.exists(f"online:{tid}:{cuid}") > 0:
+            return True
+        if tid and await rd.exists(f"online::{cuid}") > 0:
+            return True
+        return False
 
     async def update_heartbeat(self, tid: str, cuid: str):
         """Extend device online expiration."""
@@ -185,7 +193,11 @@ class SessionManager:
         async for key in rd.scan_iter(match=f"{prefix}*"):
             data = await rd.hgetall(key)
             res.append(
-                {"uid": key[len(prefix) :], "status": "online", "ip": data.get("ip", "")}
+                {
+                    "uid": key[len(prefix) :],
+                    "status": "online",
+                    "ip": data.get("ip", ""),
+                }
             )
         return res
 

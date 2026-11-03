@@ -1,14 +1,15 @@
-"""MINIClassIsland client device pairing and registration service.
-"""
+"""MINI ClassIsland client device pairing and registration service."""
 
+import json
 import secrets
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import select, delete as sa_delete
 
 from app.shared.db.session import AsyncSessionLocal
-from app.shared.db.models import PairingCode
+from app.shared.db.models import PairingCode, ClientProfile
 from app.shared.utils.tenant import set_search_path
 from app.shared.literals import PAIRING_CHARSET, PAIRING_CODE_LEN
 
@@ -42,6 +43,13 @@ async def create_pairing_request(
         )
         existing = (await db.execute(stmt)).scalars().first()
         if existing:
+            if client_id:
+                existing.client_id = client_id
+            if client_mac:
+                existing.client_mac = client_mac
+            if client_ip:
+                existing.client_ip = client_ip
+            await db.commit()
             return existing.code
 
         code = generate_code()
@@ -52,16 +60,22 @@ async def create_pairing_request(
             client_id=client_id,
             client_mac=client_mac,
             client_ip=client_ip,
+            status="pending",
             created_at=datetime.now(timezone.utc),
         )
         db.add(record)
         await db.commit()
-        logger.info("Generated pairing request code %s (tenant=%s, device=%s)", code, tenant_id, client_uid)
+        logger.info(
+            "Generated pairing request code %s (tenant=%s, device=%s)",
+            code,
+            tenant_id,
+            client_uid,
+        )
         return code
 
 
 async def check_approved(client_uid: str, tenant_id: str) -> bool:
-    """Check if pairing request for device has been approved by admin. If so, consume the pairing request."""
+    """Check if pairing request for device has been approved by admin. If so, consume and apply profile."""
     async with AsyncSessionLocal() as db:
         await set_search_path(db)
         stmt = (
@@ -74,6 +88,41 @@ async def check_approved(client_uid: str, tenant_id: str) -> bool:
         record = (await db.execute(stmt)).scalar_one_or_none()
         if record:
             record.used = True
+            record.status = "used"
+            if record.preset_profile_json and record.preset_profile_json != "{}":
+                try:
+                    preset = json.loads(record.preset_profile_json)
+                    if isinstance(preset, dict) and preset:
+                        acct_id = tenant_id or "default"
+                        prof = (
+                            await db.execute(
+                                select(ClientProfile).where(
+                                    ClientProfile.account_id == acct_id,
+                                    ClientProfile.client_id == client_uid,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if not prof:
+                            prof = ClientProfile(
+                                account_id=acct_id,
+                                client_id=client_uid,
+                                updated_at=datetime.now(timezone.utc),
+                            )
+                        for k in (
+                            "class_plan",
+                            "time_layout",
+                            "subjects",
+                            "default_settings",
+                            "policy",
+                            "components",
+                            "credentials",
+                        ):
+                            if k in preset and preset[k]:
+                                setattr(prof, k, preset[k])
+                        prof.updated_at = datetime.now(timezone.utc)
+                        db.add(prof)
+                except Exception:
+                    pass
             await db.commit()
             return True
     return False
@@ -91,7 +140,9 @@ async def get_pairing_by_code(code: str, tenant_id: str) -> PairingCode | None:
         return (await db.execute(stmt)).scalar_one_or_none()
 
 
-async def approve_pairing(code: str, tenant_id: str) -> bool:
+async def approve_pairing(
+    code: str, tenant_id: str, preset_profile: Optional[dict] = None
+) -> bool:
     """Approve pairing request for specified client."""
     async with AsyncSessionLocal() as db:
         await set_search_path(db)
@@ -104,6 +155,9 @@ async def approve_pairing(code: str, tenant_id: str) -> bool:
         if not record or record.approved or record.used:
             return False
         record.approved = True
+        record.status = "approved"
+        if preset_profile:
+            record.preset_profile_json = json.dumps(preset_profile, ensure_ascii=False)
         await db.commit()
         logger.info("Approved pairing code %s (tenant=%s)", code, tenant_id)
         return True

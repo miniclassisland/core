@@ -1,12 +1,12 @@
-"""test_schemas.py
-"""
+"""test_schemas.py"""
 
+import pytest
+from pydantic import ValidationError
 from app.shared.schemas import schemas
 
 
 def test_pydantic_schemas_instantiation():
     """验证所有 Pydantic 校验模型均能被正确实例化和序列化。"""
-    # User schemas
     u_register = schemas.UserRegisterRequest(
         username="teacher1",
         email="teacher1@school.com",
@@ -15,7 +15,38 @@ def test_pydantic_schemas_instantiation():
     )
     assert u_register.username == "teacher1"
 
-    u_login = schemas.UserLoginRequest(email="teacher1@school.com", password="PassWord123!")
+    with pytest.raises(ValidationError):
+        schemas.UserRegisterRequest(
+            username="teacher1",
+            email="teacher1@school.com",
+            password="lowercase123!",
+            display_name="T",
+        )
+    with pytest.raises(ValidationError):
+        schemas.UserRegisterRequest(
+            username="teacher1",
+            email="teacher1@school.com",
+            password="UPPERCASE123!",
+            display_name="T",
+        )
+    with pytest.raises(ValidationError):
+        schemas.UserRegisterRequest(
+            username="teacher1",
+            email="teacher1@school.com",
+            password="NoDigitsHere!",
+            display_name="T",
+        )
+    with pytest.raises(ValidationError):
+        schemas.UserRegisterRequest(
+            username="bad user!",
+            email="teacher1@school.com",
+            password="PassWord123!",
+            display_name="T",
+        )
+
+    u_login = schemas.UserLoginRequest(
+        email="teacher1@school.com", password="PassWord123!"
+    )
     assert u_login.email == "teacher1@school.com"
 
     u_resp = schemas.UserOut(
@@ -30,23 +61,31 @@ def test_pydantic_schemas_instantiation():
     )
     assert u_resp.role_code == "member"
 
-    # CustomRole schemas
-    cr_create = schemas.RoleCreateRequest(
-        code="editor", label="Editor", priority=10
-    )
+    cr_create = schemas.RoleCreateRequest(code="editor", label="Editor", priority=10)
     assert cr_create.code == "editor"
 
-    # Account schemas
-    acc_create = schemas.AccountCreate(
-        name="Test School", slug="test-school"
-    )
+    acc_create = schemas.AccountCreate(name="Test School", slug="test-school")
     assert acc_create.slug == "test-school"
+    with pytest.raises(ValidationError):
+        schemas.AccountCreate(name="Bad", slug="BAD_SLUG!")
 
-    # TOTP schemas
+    acc_update = schemas.AccountUpdate(slug="valid-slug")
+    assert acc_update.slug == "valid-slug"
+    acc_update_none = schemas.AccountUpdate(slug=None)
+    assert acc_update_none.slug is None
+    with pytest.raises(ValidationError):
+        schemas.AccountUpdate(slug="BAD_SLUG!")
+
+    settings_upd = schemas.SettingsUpdate(
+        items={"registration_open": "true", "motd": "Welcome"}
+    )
+    assert settings_upd.items["registration_open"] == "true"
+    with pytest.raises(ValidationError):
+        schemas.SettingsUpdate(items={"illegal_key": "val"})
+
     totp_verify = schemas.TotpVerifyRequest(temp_token="temp-token-123", code="123456")
     assert totp_verify.code == "123456"
 
-    # Batch operation schemas
     bo = schemas.BatchOperation(
         action="create",
         resource_type="ClassPlan",

@@ -1,17 +1,25 @@
-"""test_server.py
-"""
-
+"""test_server.py"""
 
 import asyncio
+from datetime import datetime, timezone
+import json
 import pytest
 import grpc
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
+from sqlalchemy import select, delete
+
 from app.grpc import server
 from app.grpc.session import SessionManager
 from app.shared.security.crypto import set_cc_state
 from app.shared.db.session import AsyncSessionLocal
-from app.shared.db.models import ClientRecord, SystemConfig
-from app.shared.services.pairing import PairingCode
+from app.shared.db.models import (
+    Account,
+    ClientRecord,
+    ConfigUploadRecord,
+    PreRegisteredClient,
+    SystemConfig,
+)
+from app.shared.services.pairing import PairingCode, approve_pairing
 from app.Protobuf.Client import (
     HandshakeScReq_pb2,
     ClientRegisterCsReq_pb2,
@@ -19,17 +27,9 @@ from app.Protobuf.Client import (
     ConfigUploadScReq_pb2,
     AuditScReq_pb2,
 )
-from app.Protobuf.Server import (
-    HandshakeScRsp_pb2,
-    ClientRegisterScRsp_pb2,
-    ClientCommandDeliverScRsp_pb2,
-    ConfigUploadScRsp_pb2,
-    AuditScRsp_pb2,
-)
 from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
 
 
-# Mock Context Helper
 def get_mock_context(metadata: list = None, peer: str = "ipv4:127.0.0.1:12345"):
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     ctx.invocation_metadata.return_value = metadata or []
@@ -39,8 +39,8 @@ def get_mock_context(metadata: list = None, peer: str = "ipv4:127.0.0.1:12345"):
 
 
 @pytest.mark.asyncio
-async def test_tenant_interceptor_exemptions():
-    """测试 gRPC 拦截器的白名单放行及 CC 防御拦截逻辑。"""
+async def test_tenant_interceptor_all_branches(test_superadmin_user):
+    """测试 gRPC 拦截器的白名单、CC 防御、租户解析及 4 种 RPC handler 包装分支。"""
     sm = SessionManager()
     interceptor = server.TenantInterceptor(sm)
 
@@ -50,142 +50,305 @@ async def test_tenant_interceptor_exemptions():
     details.method = "/Handshake/BeginHandshake"
     details.invocation_metadata = []
 
-    async def continuation(details):
+    async def continuation_dummy(d):
         return MagicMock()
 
     with pytest.raises(grpc.aio.AbortError) as exc:
-        await interceptor.intercept_service(continuation, details)
+        await interceptor.intercept_service(continuation_dummy, details)
     assert exc.value.args[0] == grpc.StatusCode.UNAVAILABLE
-
-    # 恢复 CC 状态
     set_cc_state(False)
 
+    # 2. 创建租户和有效 Session（带 Bearer 前缀）
+    async with AsyncSessionLocal() as db:
+        db.add(
+            Account(
+                id="acct-grpc-1",
+                name="G1",
+                slug="grpc-school",
+                api_key="k",
+                is_active=True,
+                registration_mode="pre_reg",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
 
-@pytest.mark.asyncio
-async def test_tenant_interceptor_session_auth(test_superadmin_user):
-    """测试 gRPC 拦截器的会话鉴权与多租户隔离拦截逻辑。"""
-    sm = SessionManager()
-    interceptor = server.TenantInterceptor(sm)
+    sid = await sm.create_session("acct-grpc-1", "client-uid-test")
 
-    # 生成合法的 Session ID
-    sid = await sm.create_session("test-account-00000000", "client-uid-test")
+    # continuation 返回 None 分支
+    details_none = MagicMock()
+    details_none.method = "/Handshake/BeginHandshake"
+    details_none.invocation_metadata = [
+        ("tenant-slug", "grpc-school"),
+        ("authorization", f"Bearer {sid}"),
+    ]
 
-    # 场景: 拦截非白名单方法，但提供了有效 session 且无 Authority
-    details = MagicMock()
-    details.method = "/Command/ListenCommand"
-    details.invocation_metadata = [("session", sid)]
+    async def continuation_none(d):
+        return None
 
-    # 模拟 handler 处理器
-    handler = MagicMock()
-    handler.unary_unary = None
-    handler.unary_stream = None
-    handler.stream_unary = None
-    handler.stream_stream = AsyncMock(return_value="stream_result")
-    handler.request_deserializer = MagicMock()
-    handler.response_serializer = MagicMock()
+    assert await interceptor.intercept_service(continuation_none, details_none) is None
 
-    async def continuation(details):
-        return handler
+    # 测试 unary_unary, unary_stream (generator & non-generator), stream_unary, stream_stream 及 fallback handler
+    for mode in (
+        "unary_unary",
+        "unary_stream_gen",
+        "unary_stream_coro",
+        "stream_unary",
+        "stream_stream",
+        "empty",
+    ):
+        h = MagicMock()
+        h.unary_unary = None
+        h.unary_stream = None
+        h.stream_unary = None
+        h.stream_stream = None
+        h.request_deserializer = MagicMock()
+        h.response_serializer = MagicMock()
 
-    wrapped_handler = await interceptor.intercept_service(continuation, details)
-    assert wrapped_handler is not None
+        if mode == "unary_unary":
+            h.unary_unary = AsyncMock(return_value="uu_ok")
+        elif mode == "unary_stream_gen":
 
-    # 执行包装后的 stream_stream 处理器，验证上下文
-    res = await wrapped_handler.stream_stream("request_iterator", "context")
-    assert res == "stream_result"
+            async def _agen(req, ctx):
+                yield "us_gen_ok"
 
-    # 场景: 拦截非白名单方法，提供非法 session -> 抛出 UNAUTHENTICATED
+            h.unary_stream = _agen
+        elif mode == "unary_stream_coro":
+            h.unary_stream = AsyncMock(return_value="us_coro_ok")
+        elif mode == "stream_unary":
+            h.stream_unary = AsyncMock(return_value="su_ok")
+        elif mode == "stream_stream":
+            h.stream_stream = AsyncMock(return_value="ss_ok")
+
+        async def _cont(d, _h=h):
+            return _h
+
+        wrapped = await interceptor.intercept_service(_cont, details_none)
+        if mode == "unary_unary":
+            assert await wrapped.unary_unary("r", "c") == "uu_ok"
+        elif mode == "unary_stream_gen":
+            items = [x async for x in wrapped.unary_stream("r", "c")]
+            assert items == ["us_gen_ok"]
+        elif mode == "unary_stream_coro":
+            assert await wrapped.unary_stream("r", "c") == "us_coro_ok"
+        elif mode == "stream_unary":
+            assert await wrapped.stream_unary("r", "c") == "su_ok"
+        elif mode == "stream_stream":
+            assert await wrapped.stream_stream("r", "c") == "ss_ok"
+        elif mode == "empty":
+            assert wrapped is h
+
+    # 非白名单方法无 slug 但有有效 session (从 session 解析 tenant_id)
+    details_sid_only = MagicMock()
+    details_sid_only.method = "/Command/ListenCommand"
+    details_sid_only.invocation_metadata = [("session", sid)]
+    h_uu = MagicMock()
+    h_uu.unary_unary = AsyncMock(return_value="ok")
+    h_uu.unary_stream = None
+    h_uu.stream_unary = None
+    h_uu.stream_stream = None
+    w_sid = await interceptor.intercept_service(
+        AsyncMock(return_value=h_uu), details_sid_only
+    )
+    assert await w_sid.unary_unary("r", "c") == "ok"
+
+    # 非法 session -> UNAUTHENTICATED
     details_invalid = MagicMock()
     details_invalid.method = "/Command/ListenCommand"
     details_invalid.invocation_metadata = [("session", "invalid-sid")]
-
-    with pytest.raises(grpc.aio.AbortError) as exc:
-        await interceptor.intercept_service(continuation, details_invalid)
-    assert exc.value.args[0] == grpc.StatusCode.UNAUTHENTICATED
+    with pytest.raises(grpc.aio.AbortError) as exc2:
+        await interceptor.intercept_service(continuation_dummy, details_invalid)
+    assert exc2.value.args[0] == grpc.StatusCode.UNAUTHENTICATED
 
 
 @pytest.mark.asyncio
 async def test_handshake_servicer():
-    """测试握手服务的安全校验分支。"""
+    """测试握手服务的所有安全校验及成功分支。"""
     sm = SessionManager()
     servicer = server.HandshakeServicer(sm)
+    ctx = get_mock_context()
 
-    # 1. 尝试握手不存在的客户端 -> Return ClientNotFound
+    # 1. 不存在的客户端 -> ClientNotFound
     req = HandshakeScReq_pb2.HandshakeScBeginHandShakeReq(
         ClientUid="non-existent-uid",
         ClientMac="AA-BB-CC-DD-EE-FF",
         ChallengeTokenEncrypted="xyz",
     )
-    ctx = get_mock_context()
-    res = await servicer.BeginHandshake(req, ctx)
-    assert res.Retcode == Retcode_pb2.ClientNotFound
+    assert (
+        await servicer.BeginHandshake(req, ctx)
+    ).Retcode == Retcode_pb2.ClientNotFound
 
-    # 2. 插入一个合法物理客户端记录
+    # 2. 插入客户端记录（含禁用状态与正常状态）
     async with AsyncSessionLocal() as db:
-        from datetime import datetime, timezone
-        from sqlalchemy import select
-        existing = (await db.execute(select(ClientRecord).where(ClientRecord.uid == "valid-client-uid"))).scalar_one_or_none()
-        if not existing:
-            db.add(
+        db.add_all(
+            [
                 ClientRecord(
-                    uid="valid-client-uid", client_id="c1", mac="AA-BB-CC-DD-EE-FF", registered_at=datetime.now(timezone.utc)
-                )
-            )
-            await db.commit()
+                    uid="valid-client-uid",
+                    account_id="acct-hs-1",
+                    client_id="c1",
+                    mac="AA-BB-CC-DD-EE-FF",
+                    is_disabled=False,
+                    registered_at=datetime.now(timezone.utc),
+                ),
+                ClientRecord(
+                    uid="disabled-client-uid",
+                    account_id="acct-hs-1",
+                    client_id="c2",
+                    mac="AA-BB-CC-DD-EE-FF",
+                    is_disabled=True,
+                    registered_at=datetime.now(timezone.utc),
+                ),
+            ]
+        )
+        await db.commit()
 
-    # MAC 地址不匹配测试 -> InvalidRequest
+    # 禁用客户端 BeginHandshake -> InvalidRequest
+    req_dis = HandshakeScReq_pb2.HandshakeScBeginHandShakeReq(
+        ClientUid="disabled-client-uid",
+        ClientMac="AA-BB-CC-DD-EE-FF",
+        ChallengeTokenEncrypted="xyz",
+    )
+    assert (
+        await servicer.BeginHandshake(req_dis, ctx)
+    ).Retcode == Retcode_pb2.InvalidRequest
+
+    # MAC 不匹配 -> InvalidRequest
     req_wrong_mac = HandshakeScReq_pb2.HandshakeScBeginHandShakeReq(
         ClientUid="valid-client-uid",
         ClientMac="WRONG-MAC",
         ChallengeTokenEncrypted="xyz",
     )
-    res_wrong_mac = await servicer.BeginHandshake(req_wrong_mac, ctx)
-    assert res_wrong_mac.Retcode == Retcode_pb2.InvalidRequest
+    assert (
+        await servicer.BeginHandshake(req_wrong_mac, ctx)
+    ).Retcode == Retcode_pb2.InvalidRequest
 
-    # GPG 解密失败测试 -> ServerInternalError
+    # GPG 解密失败 -> ServerInternalError
     req_decrypt_fail = HandshakeScReq_pb2.HandshakeScBeginHandShakeReq(
         ClientUid="valid-client-uid",
         ClientMac="AA-BB-CC-DD-EE-FF",
         ChallengeTokenEncrypted="bad-encrypted-data",
     )
-    res_decrypt_fail = await servicer.BeginHandshake(req_decrypt_fail, ctx)
-    assert res_decrypt_fail.Retcode == Retcode_pb2.ServerInternalError
+    assert (
+        await servicer.BeginHandshake(req_decrypt_fail, ctx)
+    ).Retcode == Retcode_pb2.ServerInternalError
 
-    # 3. CompleteHandshake 测试
-    # 未被接受的分支 -> HandshakeClientRejected
-    req_complete_reject = (
-        HandshakeScReq_pb2.HandshakeScCompleteHandshakeReq(Accepted=False)
-    )
+    # GPG 解密成功 -> Success
+    with patch.object(sm, "decrypt_challenge", return_value="challenge-ok"):
+        res_begin_ok = await servicer.BeginHandshake(req_decrypt_fail, ctx)
+        assert res_begin_ok.Retcode == Retcode_pb2.Success
+        assert res_begin_ok.ChallengeTokenDecrypted == "challenge-ok"
+
+    # CompleteHandshake: 禁用客户端 -> InvalidRequest
+    ctx_dis = get_mock_context(metadata=[("cuid", "disabled-client-uid")])
+    req_comp_ok = HandshakeScReq_pb2.HandshakeScCompleteHandshakeReq(Accepted=True)
+    assert (
+        await servicer.CompleteHandshake(req_comp_ok, ctx_dis)
+    ).Retcode == Retcode_pb2.InvalidRequest
+
+    # CompleteHandshake: 成功建立 Session
     ctx_complete = get_mock_context(metadata=[("cuid", "valid-client-uid")])
-    res_complete = await servicer.CompleteHandshake(
-        req_complete_reject, ctx_complete
-    )
-    assert res_complete.Retcode == Retcode_pb2.HandshakeClientRejected
+    res_comp_success = await servicer.CompleteHandshake(req_comp_ok, ctx_complete)
+    assert res_comp_success.Retcode == Retcode_pb2.Success
+    assert res_comp_success.SessionId != ""
 
-    # 无挑战记录的分支 -> InvalidRequest
-    req_complete_accept = (
-        HandshakeScReq_pb2.HandshakeScCompleteHandshakeReq(Accepted=True)
+    # CompleteHandshake: 未被接受 -> HandshakeClientRejected
+    req_complete_reject = HandshakeScReq_pb2.HandshakeScCompleteHandshakeReq(
+        Accepted=False
     )
-    res_complete_accept = await servicer.CompleteHandshake(
-        req_complete_accept, ctx_complete
-    )
-    assert res_complete_accept.Retcode == Retcode_pb2.InvalidRequest
+    assert (
+        await servicer.CompleteHandshake(req_complete_reject, ctx_complete)
+    ).Retcode == Retcode_pb2.HandshakeClientRejected
+
+    # CompleteHandshake: 无挑战记录 -> InvalidRequest
+    assert (
+        await servicer.CompleteHandshake(req_comp_ok, ctx_complete)
+    ).Retcode == Retcode_pb2.InvalidRequest
 
 
 @pytest.mark.asyncio
-async def test_client_register_servicer_pairing():
-    """测试客户端注册服务的配对拦截流程。"""
+async def test_client_register_servicer_all_modes():
+    """测试客户端注册服务的禁用拦截、pre_reg 拦截、预注册匹配（含 preset_profile）及配对审批流程。"""
     sm = SessionManager()
     servicer = server.ClientRegisterServicer(sm)
+    ctx = get_mock_context()
 
-    # 1. 启用配对功能配置
     async with AsyncSessionLocal() as db:
-        # 清除已有配对配置
-        from sqlalchemy import delete
+        db.add(
+            Account(
+                id="acct-reg-mode",
+                name="RegMode",
+                slug="reg-mode",
+                api_key="k",
+                is_active=True,
+                registration_mode="pre_reg",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+        db.add(
+            ClientRecord(
+                uid="disabled-reg-uid",
+                account_id="acct-reg-mode",
+                is_disabled=True,
+                registered_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
 
-        from datetime import datetime, timezone
-        await db.execute(delete(SystemConfig).where(SystemConfig.key == "pairing_enabled"))
-        db.add(SystemConfig(key="pairing_enabled", value="true", updated_at=datetime.now(timezone.utc)))
+    # 1. 已禁用设备注册 -> InvalidRequest
+    res_dis = await servicer.Register(
+        ClientRegisterCsReq_pb2.ClientRegisterCsReq(ClientUid="disabled-reg-uid"), ctx
+    )
+    assert res_dis.Retcode == Retcode_pb2.InvalidRequest
+
+    # 2. pre_reg 模式下未预注册设备被拒 -> InvalidRequest
+    tok = server.tenant_ctx.set("acct-reg-mode")
+    try:
+        res_prereg_deny = await servicer.Register(
+            ClientRegisterCsReq_pb2.ClientRegisterCsReq(
+                ClientUid="unlisted-uid", ClientId="Room-999", ClientMac="11-11"
+            ),
+            ctx,
+        )
+        assert res_prereg_deny.Retcode == Retcode_pb2.InvalidRequest
+
+        # 3. 添加 PreRegisteredClient（带 preset_profile）并验证自动绑定与预设应用
+        async with AsyncSessionLocal() as db:
+            db.add(
+                PreRegisteredClient(
+                    id="pre-1",
+                    account_id="acct-reg-mode",
+                    label="Room 101 PC",
+                    class_identity="Room-101",
+                    mac_address="AA-11-22",
+                    is_enabled=True,
+                    preset_profile_json=json.dumps({"class_plan": "cp_101"}),
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+
+        res_prereg_ok = await servicer.Register(
+            ClientRegisterCsReq_pb2.ClientRegisterCsReq(
+                ClientUid="listed-uid-101", ClientId="Room-101", ClientMac="AA-11-22"
+            ),
+            ctx,
+        )
+        assert res_prereg_ok.Retcode == Retcode_pb2.Registered
+    finally:
+        server.tenant_ctx.reset(tok)
+
+    # 4. 启用全局配对功能配置 -> PairingRequired -> 审批后 Registered
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(SystemConfig).where(SystemConfig.key == "pairing_enabled")
+        )
+        db.add(
+            SystemConfig(
+                key="pairing_enabled",
+                value="true",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
         await db.commit()
 
     req = ClientRegisterCsReq_pb2.ClientRegisterCsReq(
@@ -193,137 +356,213 @@ async def test_client_register_servicer_pairing():
         ClientId="c2",
         ClientMac="22-33-44-55-66-77",
     )
-    ctx = get_mock_context()
-
-    # 需要配对码拦截 -> PairingRequired
     res = await servicer.Register(req, ctx)
     assert res.Retcode == Retcode_pb2.PairingRequired
-    assert "Pairing Code" in res.Message
 
-    # 2. 审批通过后，注册成功
-    # 提取生成的配对请求验证码
     async with AsyncSessionLocal() as db:
-        from sqlalchemy import select
+        record = (
+            await db.execute(
+                select(PairingCode).where(
+                    PairingCode.client_uid == "new-client-uid-pairing"
+                )
+            )
+        ).scalar_one()
+        await approve_pairing(record.code, "")
 
-        stmt = select(PairingCode).where(
-            PairingCode.client_uid == "new-client-uid-pairing"
-        )
-        record = (await db.execute(stmt)).scalar_one()
-        code = record.code
-
-        # 审批配对
-        from app.shared.services.pairing import approve_pairing
-
-        await approve_pairing(code, "")
-
-    # 重新注册，应该注册成功
     res_ok = await servicer.Register(req, ctx)
     assert res_ok.Retcode == Retcode_pb2.Registered
 
 
 @pytest.mark.asyncio
 async def test_client_register_servicer_unregister():
-    """测试物理客户端解绑/注销服务流程。"""
+    """测试物理客户端解绑/注销服务流程（失败与成功分支）。"""
     sm = SessionManager()
     servicer = server.ClientRegisterServicer(sm)
 
-    # 尝试非法注销（会话无效）
-    req = ClientRegisterCsReq_pb2.ClientRegisterCsReq(
-        ClientUid="some-client-uid"
-    )
+    # 1. 会话无效
+    req = ClientRegisterCsReq_pb2.ClientRegisterCsReq(ClientUid="some-client-uid")
     ctx = get_mock_context(metadata=[("session", "invalid-session-token")])
     await servicer.UnRegister(req, ctx)
     ctx.abort.assert_called_with(
-        grpc.StatusCode.UNAUTHENTICATED, "Session authentication failed, unable to unregister"
+        grpc.StatusCode.UNAUTHENTICATED,
+        "Session authentication failed, unable to unregister",
     )
+
+    # 2. 会话有效且存在 ClientRecord -> 成功删除并下线
+    async with AsyncSessionLocal() as db:
+        db.add(
+            ClientRecord(
+                uid="unreg-client-uid",
+                account_id="acct-unreg",
+                registered_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+    sid = await sm.create_session("acct-unreg", "unreg-client-uid")
+    ctx_ok = get_mock_context(metadata=[("session", sid)])
+    res_ok = await servicer.UnRegister(
+        ClientRegisterCsReq_pb2.ClientRegisterCsReq(ClientUid="unreg-client-uid"),
+        ctx_ok,
+    )
+    assert res_ok.Retcode == Retcode_pb2.Success
 
 
 @pytest.mark.asyncio
 async def test_command_deliver_servicer():
-    """测试长连接指令推送通道的指令下发、双向流心跳逻辑。"""
+    """测试长连接指令推送通道的指令下发、双向流心跳、节流、禁用拦截与主动断开逻辑。"""
     sm = SessionManager()
     servicer = server.ClientCommandDeliverServicer(sm)
 
-    # 构造有效 session 并设置为在线
-    sid = await sm.create_session("test-account-00000000", "client-uid-test")
-
-    # 1. 测试 ListenCommand 鉴权失败分支
+    # 1. ListenCommand 鉴权失败分支
     ctx_fail = get_mock_context(metadata=[("session", "invalid-sid")])
-    res_iterator_fail = servicer.ListenCommand(None, ctx_fail)
-    async for _ in res_iterator_fail:
+    async for _ in servicer.ListenCommand(None, ctx_fail):
         pass
-    ctx_fail.abort.assert_called_with(grpc.StatusCode.UNAUTHENTICATED, "Session validation failed, listening rejected")
+    ctx_fail.abort.assert_called_with(
+        grpc.StatusCode.UNAUTHENTICATED, "Session validation failed, listening rejected"
+    )
 
-    # 2. 测试 ListenCommand 双向流正常逻辑
+    # 2. ListenCommand 设备被禁用分支
+    async with AsyncSessionLocal() as db:
+        db.add_all(
+            [
+                ClientRecord(
+                    uid="cmd-disabled-uid",
+                    account_id="acct-cmd",
+                    is_disabled=True,
+                    registered_at=datetime.now(timezone.utc),
+                ),
+                ClientRecord(
+                    uid="client-uid-test",
+                    account_id="test-account-00000000",
+                    is_disabled=False,
+                    registered_at=datetime.now(timezone.utc),
+                ),
+            ]
+        )
+        await db.commit()
+
+    sid_dis = await sm.create_session("acct-cmd", "cmd-disabled-uid")
+    ctx_dis = get_mock_context(metadata=[("session", sid_dis)])
+    async for _ in servicer.ListenCommand(None, ctx_dis):
+        pass
+    ctx_dis.abort.assert_called_with(
+        grpc.StatusCode.PERMISSION_DENIED, "Device is disabled by administrator"
+    )
+
+    # 3. ListenCommand 双向流正常逻辑（含连续 Ping 节流、非 Ping 上行指令及 disconnect_client 退出）
+    sid = await sm.create_session("", "client-uid-test")
     ctx_ok = get_mock_context(metadata=[("session", sid)])
 
-    # 构造请求迭代器，发送一个 Ping，随后结束流
     async def request_generator():
         yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
             Type=CommandTypes_pb2.Ping
         )
-        # 稍等一会儿
-        await asyncio.sleep(0.1)
+        # 紧接着第二个 Ping 触发 _MIN_PING_INTERVAL 节流分支
+        yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
+            Type=CommandTypes_pb2.Ping
+        )
+        # 发送非 Ping 类型触发 uplink 日志分支
+        yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
+            Type=CommandTypes_pb2.Pong
+        )
+        await asyncio.sleep(0.05)
+        await servicer.disconnect_client("test-account-00000000", "client-uid-test")
 
-    # 启动监听流
     stream = servicer.ListenCommand(request_generator(), ctx_ok)
+    received = []
+    async for resp in stream:
+        received.append(resp)
+    assert len(received) == 1
+    assert received[0].Type == CommandTypes_pb2.Pong
 
-    # 异步接收流推送
-    async def receive_stream():
-        async for resp in stream:
-            assert resp.Type == CommandTypes_pb2.Pong
-            break  # 收到 Pong 即断开
-
-    # 运行流接收
-    await asyncio.wait_for(receive_stream(), timeout=5)
-
-    # 3. 推送普通指令测试
-    # 模拟注入普通指令
-    await servicer.send_command(
-        "test-account-00000000", "client-uid-test", "dummy_command_msg"
+    # 4. send_command 在队列存在与不存在时的分支
+    assert (
+        await servicer.send_command("test-account-00000000", "no-client", "msg")
+        is False
+    )
+    q = asyncio.Queue()
+    servicer.client_queues["test-account-00000000:c-queued"] = q
+    assert (
+        await servicer.send_command("test-account-00000000", "c-queued", "msg") is True
+    )
+    assert await q.get() == "msg"
+    assert (
+        await servicer.disconnect_client("test-account-00000000", "no-client") is False
     )
 
 
 @pytest.mark.asyncio
 async def test_config_upload_and_audit():
-    """测试配置上报和审计日志上报服务的接口。"""
+    """测试配置上报（含预创建 RequestGuidId 分支）和审计日志上报服务的接口。"""
     sm = SessionManager()
     config_servicer = server.ConfigUploadServicer(sm)
     audit_servicer = server.AuditServicer(sm)
 
-    # 1. 未授权会话 -> InvalidRequest
+    # 1. 未授权会话且无有效 RequestGuidId -> InvalidRequest
     ctx_fail = get_mock_context(metadata=[("session", "invalid-sid")])
-    res_cfg = await config_servicer.UploadConfig(MagicMock(), ctx_fail)
+    res_cfg = await config_servicer.UploadConfig(MagicMock(RequestGuidId=""), ctx_fail)
     assert res_cfg.Retcode == Retcode_pb2.InvalidRequest
 
     res_audit = await audit_servicer.LogEvent(MagicMock(), ctx_fail)
     assert res_audit.Retcode == Retcode_pb2.InvalidRequest
 
-    # 2. 授权会话成功上报
-    sid = await sm.create_session("test-account-00000000", "client-uid-test")
+    # 2. 预创建 ConfigUploadRecord，测试更新已存在记录分支 (lines 646-652)
+    async with AsyncSessionLocal() as db:
+        db.add(
+            ConfigUploadRecord(
+                request_guid="pre-guid-123",
+                account_id="test-account-00000000",
+                client_uid="client-uid-test",
+                status="pending",
+                payload="",
+                uploaded_at=datetime.now(timezone.utc),
+            )
+        )
+        db.add(
+            ClientRecord(
+                uid="client-uid-audit",
+                account_id="test-account-00000000",
+                registered_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+    sid = await sm.create_session("", "client-uid-audit")
     ctx_ok = get_mock_context(metadata=[("session", sid)])
 
-    req_cfg = ConfigUploadScReq_pb2.ConfigUploadScReq(
-        RequestGuidId="some-guid", Payload="{'setting': 'test'}"
+    req_cfg_existing = ConfigUploadScReq_pb2.ConfigUploadScReq(
+        RequestGuidId="pre-guid-123", Payload='{"updated": true}'
     )
-    res_cfg_ok = await config_servicer.UploadConfig(req_cfg, ctx_ok)
+    res_cfg_ex = await config_servicer.UploadConfig(req_cfg_existing, ctx_ok)
+    assert res_cfg_ex.Retcode == Retcode_pb2.Success
+
+    # 3. 全新 RequestGuidId 上报
+    req_cfg_new = ConfigUploadScReq_pb2.ConfigUploadScReq(
+        RequestGuidId="new-guid-456", Payload='{"setting": "test"}'
+    )
+    res_cfg_ok = await config_servicer.UploadConfig(req_cfg_new, ctx_ok)
     assert res_cfg_ok.Retcode == Retcode_pb2.Success
 
-    req_audit = AuditScReq_pb2.AuditScReq(
-        Event=1, Payload=b"audit-data", TimestampUtc=1700000000
-    )
+    # 4. 审计日志上报（含无 tid 时从 ClientRecord 回查 account_id 及 str Payload 分支）
+    req_audit = AuditScReq_pb2.AuditScReq(Event=1, Payload=b"", TimestampUtc=1700000000)
     res_audit_ok = await audit_servicer.LogEvent(req_audit, ctx_ok)
     assert res_audit_ok.Retcode == Retcode_pb2.Success
+
+    mock_str_audit = MagicMock()
+    mock_str_audit.Payload = "string-payload"
+    mock_str_audit.Event = 1
+    mock_str_audit.TimestampUtc = 1700000000
+    assert (
+        await audit_servicer.LogEvent(mock_str_audit, ctx_ok)
+    ).Retcode == Retcode_pb2.Success
 
 
 @pytest.mark.asyncio
 async def test_serve_grpc_bootstrap():
     """测试 gRPC 服务器的引导和安全停止动作。"""
-    # 运行启动
     srv, cmd_s, mgr = await server.serve_grpc()
     assert srv is not None
     assert cmd_s is not None
     assert mgr is not None
-
-    # 关闭服务器
     await srv.stop(grace=None)

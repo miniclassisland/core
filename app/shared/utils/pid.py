@@ -1,5 +1,4 @@
-"""Process PID file manager.
-"""
+"""Process PID file manager."""
 
 import os
 import logging

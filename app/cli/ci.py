@@ -2,7 +2,6 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Optional
 import typer
 
 ci_app = typer.Typer(help="CI continuous integration and toolchain")
@@ -14,6 +13,7 @@ ci_app.add_typer(grpc_app, name="grpc")
 def build_package():
     """Build project distribution package using uv build."""
     import subprocess
+
     result = subprocess.run(["uv", "build"], capture_output=True, text=True)
     if result.returncode == 0:
         print("built successfully")
@@ -51,9 +51,8 @@ def generate_grpc():
     api_init = out_dir / "__init__.py"
     try:
         api_init.write_text(
-            "import sys\n"
-            "sys.modules['Protobuf'] = sys.modules[__name__]\n",
-            encoding="utf-8"
+            "import sys\n" "sys.modules['Protobuf'] = sys.modules[__name__]\n",
+            encoding="utf-8",
         )
     except Exception:
         pass
@@ -66,7 +65,7 @@ def generate_grpc():
         "--grpc_python_out=app",
         "--pyi_out=app",
     ]
-    
+
     proto_args = []
     for p in proto_files:
         parts = p.parts
@@ -75,7 +74,7 @@ def generate_grpc():
             proto_args.append(os.path.join(*parts[idx:]))
         else:
             proto_args.append(str(p))
-            
+
     args.extend(proto_args)
 
     # Run protoc compilation

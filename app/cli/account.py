@@ -15,6 +15,7 @@ account_app = typer.Typer(help="Account and tenant management")
 @account_app.command("list")
 def list_accounts():
     """List all tenant accounts."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             r = await db.execute(select(Account))
@@ -24,6 +25,7 @@ def list_accounts():
                 return
             for a in rows:
                 print(f"  {a.slug} ({a.name}) [active={a.is_active}]")
+
     asyncio.run(_run())
 
 
@@ -34,6 +36,7 @@ def create_account_cmd(
 ):
     """Create a new tenant account."""
     actual_slug = slug or name.replace("_", "-")
+
     async def _run():
         async with AsyncSessionLocal() as db:
             db.add(
@@ -48,6 +51,7 @@ def create_account_cmd(
             )
             await db.commit()
             print(f"✅ Account {actual_slug} created")
+
     asyncio.run(_run())
 
 
@@ -56,6 +60,7 @@ def delete_account_cmd(
     slug: str = typer.Argument(..., help="Slug of account to delete"),
 ):
     """Delete specified account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             acct = (
@@ -67,6 +72,7 @@ def delete_account_cmd(
             await db.delete(acct)
             await db.commit()
             print(f"✅ Account {slug} deleted")
+
     asyncio.run(_run())
 
 
@@ -74,9 +80,12 @@ def delete_account_cmd(
 def add_member_cmd(
     slug: str = typer.Argument(..., help="Account Slug"),
     username: str = typer.Argument(..., help="Username to add"),
-    role: str = typer.Option("owner", "--role", help="Member role (owner / admin / member)"),
+    role: str = typer.Option(
+        "owner", "--role", help="Member role (owner / admin / member)"
+    ),
 ):
     """Add a member to a tenant account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             acct = (
@@ -99,6 +108,7 @@ def add_member_cmd(
             )
             await db.commit()
             print(f"✅ {username} added to {slug}")
+
     asyncio.run(_run())
 
 
@@ -108,9 +118,11 @@ def remove_member_cmd(
     username: str = typer.Argument(..., help="Username to remove"),
 ):
     """Remove a member from a tenant account."""
+
     async def _run():
         async with AsyncSessionLocal() as db:
             from sqlalchemy import and_
+
             acct = (
                 await db.execute(select(Account).where(Account.slug == slug))
             ).scalar_one_or_none()
@@ -136,4 +148,5 @@ def remove_member_cmd(
             await db.delete(m)
             await db.commit()
             print(f"✅ {username} removed from {slug}")
+
     asyncio.run(_run())

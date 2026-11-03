@@ -1,8 +1,13 @@
-"""MINIClassIsland cryptography and security services.
+"""MINI ClassIsland cryptography and security services.
 
-Includes Argon2id password hashing, TOTP (pyotp) generation/verification, and Redis 2FA recovery code manager.
+Includes Argon2id password hashing, TOTP (pyotp) generation/verification, Redis 2FA recovery code manager,
+and upstream ClassIsland Credential Base64 JSON encoding.
 """
 
+import base64
+import hashlib
+import json
+import os
 import secrets
 import pyotp
 from argon2 import PasswordHasher
@@ -33,6 +38,7 @@ _RECOVERY_CODE_LENGTH = RECOVERY_CODE_LENGTH
 
 # ---- Argon2id Password Hashing ----
 
+
 def hash_password(plain: str) -> str:
     """Hash plain password into Argon2id digest string."""
     return _hasher.hash(plain)
@@ -46,7 +52,66 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
+# ---- Upstream ClassIsland Credential Encoding ----
+
+
+def is_encoded_classisland_credential(value: str) -> bool:
+    """Check if a string is already a Base64-encoded ClassIsland Credential JSON object."""
+    if not value or not isinstance(value, str):
+        return False
+    try:
+        raw = base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
+        parsed = json.loads(raw)
+        return isinstance(parsed, dict) and isinstance(parsed.get("Items"), list)
+    except Exception:
+        return False
+
+
+def encode_classisland_credential(password: str) -> str:
+    """Encode plaintext password into upstream ClassIsland Credential Base64 JSON string.
+
+    Upstream ClassIsland PasswordAuthorizeProvider expects:
+      SHA256(UTF8(password) + salt_16_bytes) -> Base64 PasswordHash & Base64 PasswordSalt
+    wrapped in Credential(Items=[CredentialItem(ProviderId="classisland.authProviders.password", ...)])
+    and Base64-encoded.
+    """
+    if not password:
+        return ""
+    if is_encoded_classisland_credential(password):
+        return password
+    salt = os.urandom(16)
+    digest = hashlib.sha256(password.encode("utf-8") + salt).digest()
+    credential_obj = {
+        "Items": [
+            {
+                "ProviderId": "classisland.authProviders.password",
+                "ProviderSettings": {
+                    "PasswordHash": base64.b64encode(digest).decode("ascii"),
+                    "PasswordSalt": base64.b64encode(salt).decode("ascii"),
+                },
+                "CustomName": "",
+                "IsCustomNameEnabled": False,
+            }
+        ]
+    }
+    raw_json = json.dumps(credential_obj, separators=(",", ":"), ensure_ascii=False)
+    return base64.b64encode(raw_json.encode("utf-8")).decode("ascii")
+
+
+def normalize_credentials_payload(payload: dict) -> dict:
+    """Ensure UserCredential and AdminCredential in a Credentials payload are properly encoded."""
+    if not isinstance(payload, dict):
+        return payload
+    out = dict(payload)
+    for key in ("UserCredential", "AdminCredential"):
+        val = out.get(key)
+        if isinstance(val, str) and val and not is_encoded_classisland_credential(val):
+            out[key] = encode_classisland_credential(val)
+    return out
+
+
 # ---- TOTP Two-Factor Authentication ----
+
 
 def generate_totp_secret() -> str:
     """Randomly generate Base32 encoded TOTP secret key."""
@@ -55,7 +120,9 @@ def generate_totp_secret() -> str:
 
 def get_totp_uri(secret: str, email: str) -> str:
     """Construct otpauth URI for client QR code scanning."""
-    return pyotp.totp.TOTP(secret).provisioning_uri(name=email, issuer_name="MINIClassIsland")
+    return pyotp.totp.TOTP(secret).provisioning_uri(
+        name=email, issuer_name="MINI ClassIsland"
+    )
 
 
 def verify_totp(secret: str, code: str) -> bool:
@@ -65,6 +132,7 @@ def verify_totp(secret: str, code: str) -> bool:
 
 
 # ---- 2FA One-Time Recovery Codes ----
+
 
 def generate_recovery_codes() -> list[str]:
     """Generate 8 2FA one-time HEX recovery codes."""
@@ -123,4 +191,3 @@ def get_ip_failures_dict() -> dict:
 def get_global_requests() -> list:
     """Get global request timestamp list reference."""
     return _global_requests
-

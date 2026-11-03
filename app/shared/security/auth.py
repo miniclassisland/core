@@ -1,4 +1,4 @@
-"""MINIClassIsland authentication and security dependencies.
+"""MINI ClassIsland authentication and security dependencies.
 
 Provides authentication and authorization via Redis sessions and API tokens, as well as RBAC-based FastAPI dependencies.
 """
@@ -25,9 +25,6 @@ from app.shared.db.models import (
 from app.shared.literals import (
     DEFAULT_TTL,
     GRACE_TTL,
-    MSG_PERMISSION_DENIED,
-    MSG_UNAUTHORIZED_ACCESS,
-    MSG_USER_NOT_FOUND,
     REDIS_AUTH_PREFIX,
     TOKEN_BYTES,
 )
@@ -42,9 +39,14 @@ _GRACE_TTL = GRACE_TTL
 
 # ---- API Token Lifecycle Management ----
 
+
 def _token_redis_key(tenant_id: str, token: str) -> str:
     """Construct tenant-isolated Redis token key."""
-    return f"{REDIS_AUTH_PREFIX}{tenant_id}:{token}" if tenant_id else f"{REDIS_AUTH_PREFIX}:{token}"
+    return (
+        f"{REDIS_AUTH_PREFIX}{tenant_id}:{token}"
+        if tenant_id
+        else f"{REDIS_AUTH_PREFIX}:{token}"
+    )
 
 
 async def generate_token(
@@ -123,7 +125,9 @@ async def get_current_user_id(request: Request) -> str:
     """FastAPI dependency: retrieve current authenticated user ID from request state."""
     uid = getattr(request.state, "current_user_id", None)
     if not uid:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthenticated")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthenticated"
+        )
     return uid
 
 
@@ -136,11 +140,14 @@ async def get_current_user(
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found"
+        )
     return user
 
 
 # ---- Role and RBAC Limiters ----
+
 
 def require_role(min_priority: int):
     """Enforce user role priority level."""
@@ -155,7 +162,9 @@ def require_role(min_priority: int):
         role = result.scalar_one_or_none()
         priority = role.priority if role else 0
         if priority < min_priority:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied"
+            )
         return user
 
     return _check
@@ -206,7 +215,9 @@ def require_permission(*perms: str):
         user_id = await get_current_user_id(request)
         account_id = get_tenant_id()
         if not account_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context missing")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context missing"
+            )
 
         granted = await _get_member_permissions(user_id, account_id)
         if "*" in granted:
@@ -214,8 +225,13 @@ def require_permission(*perms: str):
 
         for p in perms:
             if p not in granted:
-                logger.warning("Permission check failed: user=%s missing perm=%s", user_id, p)
-                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"Permission missing: {p}")
+                logger.warning(
+                    "Permission check failed: user=%s missing perm=%s", user_id, p
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"Permission missing: {p}",
+                )
         return user_id
 
     return _checker
@@ -290,6 +306,7 @@ def generate_oobe_codes() -> None:
     import random
     import string
     import uuid
+
     global OOBE_PASSCODE, OOBE_TOKEN
     pool = string.ascii_uppercase + string.digits
     OOBE_PASSCODE = "".join(random.choices(pool, k=8))
@@ -340,9 +357,9 @@ async def pop_2fa_temp_token(token: str) -> str:
     key = f"{_TEMP_2FA_PREFIX}:{token}"
     uid = await rd.get(key)
     if not uid:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Temporary token invalid or expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Temporary token invalid or expired",
+        )
     await rd.delete(key)
     return uid
-
-
-

@@ -1,13 +1,11 @@
-"""MINIClassIsland shared user, account, and role management business logic service.
-"""
+"""MINI ClassIsland shared user, account, and role management business logic service."""
 
-import re
 import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.models import (
@@ -18,6 +16,7 @@ from app.shared.db.models import (
     CustomRole,
     ReservedName,
 )
+from app.shared.db.schema_init import seed_account_defaults
 from app.shared.security.crypto import hash_password, verify_password
 from app.shared.security.auth import create_session_token
 from app.shared.literals import DEFAULT_QUOTAS, SLUG_RE, SYSTEM_ROLES, USERNAME_RE
@@ -34,6 +33,7 @@ _SYSTEM_ROLES = SYSTEM_ROLES
 
 
 # ---- Format and Reserved Name Validation ----
+
 
 def validate_username_format(name: str) -> bool:
     """Validate username format (3-64 lowercase alphanumeric characters and underscores)."""
@@ -55,20 +55,30 @@ async def is_name_reserved(name: str, db: AsyncSession) -> bool:
 
 # ---- User Registration and Login ----
 
+
 async def register_user(
     email: str,
     password: str,
     display_name: str,
     db: AsyncSession,
     username: Optional[str] = None,
+    *,
+    role_code: str = "pending",
+    is_active: bool = False,
+    can_create_account: bool = False,
+    create_default_account: bool = False,
 ) -> User:
-    """User self-registration flow: validate email uniqueness -> Hashing -> create User in Pending status."""
+    """User registration flow: validate uniqueness -> Argon2id hash -> create User."""
     exists = await db.execute(select(User).where(User.email == email))
     if exists.scalar_one_or_none():
         raise ValueError("Email is already registered")
 
     if not username:
         username = f"user_{secrets.token_hex(4)}"
+    else:
+        dup_u = await db.execute(select(User).where(User.username == username))
+        if dup_u.scalar_one_or_none():
+            raise ValueError("Username already exists")
 
     user = User(
         id=str(uuid.uuid4()),
@@ -76,12 +86,14 @@ async def register_user(
         email=email,
         hashed_password=hash_password(password),
         display_name=display_name or username,
-        role_code="pending",
-        is_active=False,
-        can_create_account=False,
+        role_code=role_code,
+        is_active=is_active,
+        can_create_account=can_create_account,
         created_at=datetime.now(timezone.utc),
     )
     db.add(user)
+    if create_default_account:
+        await _create_default_account(user, db)
     await db.commit()
     return user
 
@@ -112,12 +124,27 @@ async def login_user(
 
 # ---- User Management and Approval ----
 
+
 async def list_users(
-    db: AsyncSession, *, offset: int = 0, limit: int = 20
+    db: AsyncSession, *, offset: int = 0, limit: int = 20, search: str = ""
 ) -> tuple[list[User], int]:
     """Super admin query list of system users. Returns (users, total_count)."""
-    total = await db.scalar(select(func.count(User.id)))
-    result = await db.execute(select(User).offset(offset).limit(limit))
+    stmt = select(User)
+    count_stmt = select(func.count(User.id))
+    if search:
+        pattern = f"%{search}%"
+        cond = or_(
+            User.username.ilike(pattern),
+            User.email.ilike(pattern),
+            User.display_name.ilike(pattern),
+        )
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
+
+    total = await db.scalar(count_stmt)
+    result = await db.execute(
+        stmt.order_by(User.created_at.desc()).offset(offset).limit(limit)
+    )
     return list(result.scalars().all()), total or 0
 
 
@@ -127,9 +154,7 @@ async def get_user_by_id(user_id: str, db: AsyncSession) -> Optional[User]:
     return result.scalar_one_or_none()
 
 
-async def update_user(
-    user_id: str, db: AsyncSession, **fields
-) -> Optional[User]:
+async def update_user(user_id: str, db: AsyncSession, **fields) -> Optional[User]:
     """Update user profile fields."""
     user = await get_user_by_id(user_id, db)
     if not user:
@@ -164,16 +189,24 @@ async def reject_user(user_id: str, db: AsyncSession) -> bool:
     return True
 
 
-async def _create_default_account(user: User, db: AsyncSession) -> None:
-    """Automatically create default account space and quotas for user upon approval."""
+async def _create_default_account(user: User, db: AsyncSession) -> Account:
+    """Automatically create default account space, quotas, and default resources for user."""
     now = datetime.now(timezone.utc)
-    slug = user.username.replace("_", "-")
+    base_slug = user.username.replace("_", "-").lower()
+    slug = base_slug if len(base_slug) >= 3 else f"org-{base_slug}"
+    dup = (
+        await db.execute(select(Account).where(Account.slug == slug))
+    ).scalar_one_or_none()
+    if dup:
+        slug = f"{slug}-{secrets.token_hex(2)}"
+
     account = Account(
         id=str(uuid.uuid4()),
-        name=f"{user.display_name}'s Account",
+        name=f"{user.display_name or user.username}'s Account",
         slug=slug,
         api_key=secrets.token_urlsafe(32),
         is_active=True,
+        registration_mode="open",
         created_at=now,
     )
     db.add(account)
@@ -196,6 +229,9 @@ async def _create_default_account(user: User, db: AsyncSession) -> None:
                 max_value=val,
             )
         )
+
+    await seed_account_defaults(account.id, db)
+    return account
 
 
 async def approve_user(
@@ -220,6 +256,7 @@ async def approve_user(
 
 # ---- Account Creation and Slug Management ----
 
+
 async def create_account(
     name: str, user_id: str, db: AsyncSession, slug: Optional[str] = None
 ) -> Account:
@@ -227,6 +264,14 @@ async def create_account(
     now = datetime.now(timezone.utc)
     if not slug:
         slug = f"org-{secrets.token_hex(4)}"
+    else:
+        if not validate_slug_format(slug):
+            raise ValueError(
+                "Slug format invalid (3-64 lowercase alphanumeric characters and hyphens)"
+            )
+        dup = await db.execute(select(Account).where(Account.slug == slug))
+        if dup.scalar_one_or_none():
+            raise ValueError("Slug is already taken")
 
     account = Account(
         id=str(uuid.uuid4()),
@@ -234,19 +279,21 @@ async def create_account(
         slug=slug,
         api_key=secrets.token_urlsafe(32),
         is_active=True,
+        registration_mode="open",
         created_at=now,
     )
     db.add(account)
 
-    db.add(
-        AccountMember(
-            id=str(uuid.uuid4()),
-            user_id=user_id,
-            account_id=account.id,
-            role_in_account="owner",
-            joined_at=now,
+    if user_id:
+        db.add(
+            AccountMember(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                account_id=account.id,
+                role_in_account="owner",
+                joined_at=now,
+            )
         )
-    )
 
     for key, val in _DEFAULT_QUOTAS:
         db.add(
@@ -258,6 +305,7 @@ async def create_account(
             )
         )
 
+    await seed_account_defaults(account.id, db)
     await db.commit()
     return account
 
@@ -267,7 +315,9 @@ async def update_account_slug(
 ) -> Optional[Account]:
     """Update tenant slug (requires owner or admin role)."""
     if not validate_slug_format(new_slug):
-        raise ValueError("Slug format invalid (3-64 lowercase alphanumeric characters and hyphens)")
+        raise ValueError(
+            "Slug format invalid (3-64 lowercase alphanumeric characters and hyphens)"
+        )
 
     dup = await db.execute(
         select(Account).where(Account.slug == new_slug, Account.id != account_id)
@@ -290,12 +340,18 @@ async def update_account_slug(
     if not account:
         return None
 
+    old_slug = account.slug
     account.slug = new_slug
     await db.commit()
+    from app.shared.utils.tenant import invalidate_cached_account
+
+    await invalidate_cached_account(old_slug)
+    await invalidate_cached_account(new_slug)
     return account
 
 
 # ---- Role and Permission Configuration ----
+
 
 async def ensure_system_roles(db: AsyncSession) -> None:
     """Initialize and ensure built-in system roles exist."""

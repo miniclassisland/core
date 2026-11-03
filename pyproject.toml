@@ -1,7 +1,7 @@
 [project]
 name = "miniclassisland-core"
 version = "2.0.34a19"
-description = "MINIClassIsland Core"
+description = "MINI ClassIsland Core"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -29,7 +29,6 @@ dependencies = [
 
 [project.scripts]
 miniclassisland = "app.main:main"
-cims = "app.main:main"
 
 [dependency-groups]
 dev = [
@@ -59,12 +58,33 @@ filterwarnings = [
     "ignore:Selected compression algorithm:UserWarning",
     "ignore::pytest.PytestUnraisableExceptionWarning",
     "ignore:coroutine.*was never awaited:RuntimeWarning",
-    "ignore:imghdr was removed:DeprecationWarning",
+    "ignore:.*imghdr.*:DeprecationWarning",
 ]
 
 [tool.coverage.run]
 concurrency = ["greenlet", "thread"]
 omit = [
-    "app/grpc/api/Protobuf/*",
+    "app/Protobuf/*",
     "app/main.py",
 ]
+
+[tool.coverage.report]
+exclude_also = [
+    "if __name__ == .__main__.:",
+    "except Exception:",
+    "except \\(KeyError, ValueError\\):",
+    "except \\(asyncio\\.CancelledError, asyncio\\.TimeoutError\\):",
+    "except KeyError:",
+    "except LookupError:",
+    "except RuntimeError:",
+    "if os\\.name != .nt.",
+    "if not model:",
+]
+
+[tool.black]
+target-version = ["py312"]
+extend-exclude = "app/Protobuf"
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["app/Protobuf"]

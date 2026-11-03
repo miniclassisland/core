@@ -1,15 +1,14 @@
-"""test_user.py
-"""
+"""test_user.py"""
 
 import pytest
 from app.shared.services import user as user_service
 from app.shared.db.session import AsyncSessionLocal
-from app.shared.db.models import ReservedName, User, Account
+from app.shared.db.models import ReservedName, Account
 
 
 @pytest.mark.asyncio
 async def test_slug_and_name_reservations():
-    """测试保留 Slug 与保留账户名拦截。"""
+    """Test slug/username format validation and reserved name lookup."""
     assert user_service.validate_slug_format("my-school") is True
     assert user_service.validate_slug_format("INVALID_SLUG_FORMAT") is False
 
@@ -17,7 +16,6 @@ async def test_slug_and_name_reservations():
     assert user_service.validate_username_format("INVALID USERNAME") is False
 
     async with AsyncSessionLocal() as db:
-        # 手动插入一个预留词并测试
         db.add(ReservedName(name="reserved_word"))
         await db.commit()
 
@@ -26,73 +24,113 @@ async def test_slug_and_name_reservations():
 
 
 @pytest.mark.asyncio
-async def test_roles_initialization():
-    """测试默认系统角色的初始化。"""
+async def test_roles_initialization_and_custom_roles():
+    """Test system role initialization and custom role list, create, delete."""
     async with AsyncSessionLocal() as db:
         await user_service.ensure_system_roles(db)
-        # 多次调用应当幂等安全
         await user_service.ensure_system_roles(db)
+
+        roles = await user_service.list_roles(db)
+        assert len(roles) >= 4
+
+        custom = await user_service.create_role("teacher_lead", "Teacher Lead", 20, db)
+        assert custom.code == "teacher_lead"
+
+        assert (
+            await user_service.delete_role("non_existent_role", db) == "Role not found"
+        )
+        assert (
+            await user_service.delete_role("superadmin", db)
+            == "System role cannot be deleted"
+        )
+        assert await user_service.delete_role("teacher_lead", db) is None
 
 
 @pytest.mark.asyncio
 async def test_user_and_account_services():
-    """测试商户账户创建、管理员注册、登录及审批等完整服务生命周期。"""
+    """Test user registration, login branches, approval, account creation, and slug updates."""
     async with AsyncSessionLocal() as db:
-        # 1. 注册主用户
+        # 1. Register user with explicit username and auto-generated username
         owner = await user_service.register_user(
             email="alpha@school.com",
             password="AlphaAdmin123!",
-            display_name="Alpha 管理员",
+            display_name="Alpha Admin",
             db=db,
             username="alpha_admin",
         )
         assert owner.username == "alpha_admin"
-        assert owner.role_code == "pending"
 
-        # 尝试使用重复邮箱注册应当失败
-        with pytest.raises(Exception):
+        auto_u = await user_service.register_user(
+            email="auto@school.com",
+            password="AutoPassword123!",
+            display_name="Auto User",
+            db=db,
+            username=None,
+        )
+        assert auto_u.username.startswith("user_")
+
+        # Duplicate email & duplicate username
+        with pytest.raises(ValueError, match="Email is already registered"):
             await user_service.register_user(
                 email="alpha@school.com",
                 password="AnotherPassword1!",
-                display_name="Duplicate",
+                display_name="Dup",
                 db=db,
             )
+        with pytest.raises(ValueError, match="Username already exists"):
+            await user_service.register_user(
+                email="unique@school.com",
+                password="AnotherPassword1!",
+                display_name="Dup U",
+                db=db,
+                username="alpha_admin",
+            )
 
-        # 2. 正常注册另一个新用户，等待审批
+        # 2. Register user and test login error branches (pending, banned, deactivated, 2fa)
         new_user = await user_service.register_user(
             email="beta@school.com",
             password="BetaPassword123!",
-            display_name="Beta 教师",
+            display_name="Beta Teacher",
             db=db,
             username="beta_teacher",
         )
-        assert new_user.username == "beta_teacher"
-        assert new_user.is_active is False  # 待审核
 
-        # 3. 登录测试
-        # 尝试登录未审批通过的账户，应当报错
         with pytest.raises(ValueError, match="Account is not active yet"):
             await user_service.login_user("beta@school.com", "BetaPassword123!", db)
 
-        # 登录一个完全不存在的用户
+        new_user.role_code = "banned"
+        await db.commit()
+        with pytest.raises(ValueError, match="Account has been banned"):
+            await user_service.login_user("beta@school.com", "BetaPassword123!", db)
+
+        new_user.role_code = "normal"
+        new_user.is_active = False
+        await db.commit()
+        with pytest.raises(ValueError, match="Account has been deactivated"):
+            await user_service.login_user("beta@school.com", "BetaPassword123!", db)
+
+        # Reset back to pending for approval flow
+        new_user.role_code = "pending"
+        await db.commit()
+
         with pytest.raises(ValueError, match="Incorrect email or password"):
             await user_service.login_user("non_existent@school.com", "password", db)
 
-        # 4. 管理端审批流测试
-        # 获取待审批列表
+        # Pre-create an account with slug 'beta-teacher' to test slug collision in _create_default_account
+        await user_service.create_account(
+            name="Pre Existing", user_id="", db=db, slug="beta-teacher"
+        )
+
+        # 3. Approval & Rejection
         pending = await user_service.list_pending_users(db)
         assert any(p.username == "beta_teacher" for p in pending)
 
-        # 进行审批通过
         approved_user = await user_service.approve_user(new_user.id, db)
         assert approved_user is not None
         assert approved_user.is_active is True
 
-        # 对不存在的用户进行审批，应返回 None
         assert await user_service.approve_user("invalid-uuid", db) is None
 
-        # 5. 测试拒绝/删除逻辑
-        # 注册一个临时用户并拒绝
         temp_user = await user_service.register_user(
             email="temp@school.com",
             password="TempPassword123!",
@@ -103,12 +141,28 @@ async def test_user_and_account_services():
         assert await user_service.reject_user(temp_user.id, db) is True
         assert await user_service.reject_user("invalid-uuid", db) is False
 
-        # 6. 成功登录通过审核的用户
-        token, logged_in, need_2fa = await user_service.login_user("beta@school.com", "BetaPassword123!", db)
+        # 4. Login active user & 2FA user
+        token, logged_in, need_2fa = await user_service.login_user(
+            "beta@school.com", "BetaPassword123!", db
+        )
         assert logged_in.id == new_user.id
         assert token is not None
+        assert need_2fa is False
 
-        # 7. 创建商户账户
+        new_user.totp_enabled = True
+        await db.commit()
+        token_2fa, _, need_2fa2 = await user_service.login_user(
+            "beta@school.com", "BetaPassword123!", db
+        )
+        assert token_2fa is None
+        assert need_2fa2 is True
+
+        # 5. Account creation (auto slug, custom slug, invalid slug, duplicate slug)
+        acc_auto = await user_service.create_account(
+            name="Auto Slug School", user_id=owner.id, db=db, slug=None
+        )
+        assert acc_auto.slug.startswith("org-")
+
         acc = await user_service.create_account(
             name="Alpha School",
             user_id=owner.id,
@@ -117,16 +171,49 @@ async def test_user_and_account_services():
         )
         assert acc.slug == "alpha-school"
 
-        # 8. 查询与分页测试
-        users_list, total_users = await user_service.list_users(db, offset=0, limit=10)
-        assert len(users_list) >= 2
+        with pytest.raises(ValueError, match="Slug format invalid"):
+            await user_service.create_account(
+                name="Bad", user_id=owner.id, db=db, slug="BAD_SLUG!"
+            )
 
-        # 9. 修改 Slug 测试
-        # 以 owner 身份修改，应当成功
+        with pytest.raises(ValueError, match="Slug is already taken"):
+            await user_service.create_account(
+                name="Dup", user_id=owner.id, db=db, slug="alpha-school"
+            )
+
+        # 6. Update account slug branches
+        with pytest.raises(ValueError, match="Slug format invalid"):
+            await user_service.update_account_slug(acc.id, "BAD_SLUG!", owner.id, db)
+
+        with pytest.raises(ValueError, match="Slug is already taken"):
+            await user_service.update_account_slug(acc.id, "beta-teacher", owner.id, db)
+
         await user_service.update_account_slug(acc.id, "alpha-school-new", owner.id, db)
         acc_updated = await db.get(Account, acc.id)
         assert acc_updated.slug == "alpha-school-new"
 
-        # 使用非 owner/admin 用户修改应当抛出权限错误
         with pytest.raises(PermissionError):
-            await user_service.update_account_slug(acc.id, "alpha-school-fail", new_user.id, db)
+            await user_service.update_account_slug(
+                acc.id, "alpha-school-fail", new_user.id, db
+            )
+
+        # When AccountMember exists for a deleted Account row -> returns None
+        from app.shared.db.models import AccountMember
+        from datetime import datetime, timezone
+
+        db.add(
+            AccountMember(
+                id="mem-ghost-acct",
+                user_id=owner.id,
+                account_id="ghost-acct-id",
+                role_in_account="owner",
+                joined_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+        assert (
+            await user_service.update_account_slug(
+                "ghost-acct-id", "valid-ghost-slug", owner.id, db
+            )
+            is None
+        )

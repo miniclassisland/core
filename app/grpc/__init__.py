@@ -1,4 +1,5 @@
-"""MINIClassIsland gRPC service and session manager package.
-"""
+"""gRPC Session Module."""
 
-from .session import SessionManager
+from .session import SessionManager as SessionManager
+
+__all__ = ["SessionManager"]

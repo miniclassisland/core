@@ -1,5 +1,4 @@
-"""test_main.py
-"""
+"""test_main.py"""
 
 from app import main
 
