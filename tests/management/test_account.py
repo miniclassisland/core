@@ -1486,6 +1486,26 @@ async def test_management_account_full_suite(test_superadmin_user):
         ).status_code == 403
         assert (
             await client.post(
+                f"/account/{acct_id}/credentials/encode",
+                json={"password": "test"},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                f"/account/{acct_id}/client/__default__/config",
+                json={"class_plan": "default"},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                f"/account/{acct_id}/client/c1/command/restart",
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
                 f"/account/{acct_id}/batch",
                 json={
                     "operations": [

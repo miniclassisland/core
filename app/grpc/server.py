@@ -293,8 +293,11 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
         effective_tid = tid or (
             client.account_id if client.account_id != "default" else ""
         )
+        peer_ip = get_client_ip_from_grpc(context)
         record_bandwidth_bytes(effective_tid, 2400)
-        await self._sm.store_pending_handshake(effective_tid, cuid, decrypted)
+        await self._sm.store_pending_handshake(
+            effective_tid, cuid, decrypted, peer_ip=peer_ip
+        )
         return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
             Retcode=Retcode_pb2.Success,
             ChallengeTokenDecrypted=decrypted,
@@ -325,15 +328,17 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                     effective_tid = client.account_id
 
             pending = await self._sm.pop_handshake_challenge(effective_tid, cuid)
+            pending_ip = await self._sm.pop_handshake_ip(effective_tid, cuid)
             if not pending and effective_tid != tenant_id:
                 pending = await self._sm.pop_handshake_challenge(tenant_id, cuid)
+                pending_ip = await self._sm.pop_handshake_ip(tenant_id, cuid)
 
             if not request.Accepted:
                 return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
                     Retcode=Retcode_pb2.HandshakeClientRejected
                 )
 
-            if not pending:
+            if not pending or (pending_ip and peer_ip and pending_ip != peer_ip):
                 return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
                     Retcode=Retcode_pb2.InvalidRequest
                 )

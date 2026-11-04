@@ -224,6 +224,7 @@ def show_stats():
 @sys_app.command("settings")
 def list_settings():
     """Display all system configuration settings from database."""
+    from app.admin.settings import mask_sensitive_setting
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -236,7 +237,7 @@ def list_settings():
                 print("No system settings found")
                 return
             for r in rows:
-                print(f"  {r.key} = {r.value}")
+                print(f"  {r.key} = {mask_sensitive_setting(r.key, r.value)}")
 
     asyncio.run(_run())
 

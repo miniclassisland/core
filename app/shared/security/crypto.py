@@ -315,13 +315,19 @@ def generate_recovery_codes() -> list[str]:
     ]
 
 
+def _hash_recovery_code(code: str) -> str:
+    """Compute SHA-256 hex digest of normalized uppercase recovery code."""
+    return hashlib.sha256(code.strip().upper().encode("utf-8")).hexdigest()
+
+
 async def store_recovery_codes(user_id: str, codes: list[str]) -> None:
-    """Persist one-time recovery codes into Redis set."""
+    """Persist SHA-256 hashed one-time recovery codes into Redis set."""
     rd = get_redis(REDIS_DB_AUTH)
     key = f"{_RECOVERY_KEY_PREFIX}:{user_id}"
     await rd.delete(key)
     if codes:
-        await rd.sadd(key, *codes)
+        hashed_codes = [_hash_recovery_code(c) for c in codes]
+        await rd.sadd(key, *hashed_codes)
 
 
 async def delete_recovery_codes(user_id: str) -> None:
@@ -331,11 +337,15 @@ async def delete_recovery_codes(user_id: str) -> None:
 
 
 async def use_recovery_code(user_id: str, code: str) -> bool:
-    """Verify and consume a one-time recovery code."""
+    """Verify and consume a one-time recovery code (supports hashed and legacy raw entries)."""
     rd = get_redis(REDIS_DB_AUTH)
     key = f"{_RECOVERY_KEY_PREFIX}:{user_id}"
-    removed = await rd.srem(key, code.upper())
-    return removed > 0
+    hashed = _hash_recovery_code(code)
+    removed = await rd.srem(key, hashed)
+    if removed > 0:
+        return True
+    removed_legacy = await rd.srem(key, code.strip().upper())
+    return removed_legacy > 0
 
 
 async def get_remaining_recovery_count(user_id: str) -> int:

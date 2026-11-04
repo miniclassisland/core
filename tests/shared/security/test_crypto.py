@@ -148,6 +148,15 @@ async def test_recovery_codes():
     assert await crypto.get_remaining_recovery_count(user_id) == 2
     assert await crypto.use_recovery_code(user_id, "code1") is False
     assert await crypto.use_recovery_code(user_id, "INVALID") is False
+
+    # Legacy unhashed entry compatibility branch
+    from app.shared.utils.redis import get_redis
+    from app.shared.utils.config import REDIS_DB_AUTH
+
+    rd = get_redis(REDIS_DB_AUTH)
+    await rd.sadd(f"{crypto._RECOVERY_KEY_PREFIX}:{user_id}", "LEGACYRAW")
+    assert await crypto.use_recovery_code(user_id, "legacyraw") is True
+
     await crypto.delete_recovery_codes(user_id)
     assert await crypto.get_remaining_recovery_count(user_id) == 0
 

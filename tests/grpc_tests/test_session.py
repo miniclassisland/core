@@ -87,10 +87,14 @@ async def test_session_manager_flows():
         sm._private_key = orig_pk
 
         challenge = "challenge-plain-text-12345"
-        await sm.store_pending_handshake(tenant_id, cuid, challenge)
+        await sm.store_pending_handshake(
+            tenant_id, cuid, challenge, peer_ip="127.0.0.1"
+        )
 
         retrieved = await sm.pop_handshake_challenge(tenant_id, cuid)
         assert retrieved == challenge
+        assert await sm.pop_handshake_ip(tenant_id, cuid) == "127.0.0.1"
+        assert await sm.pop_handshake_ip(tenant_id, cuid) is None
 
         retrieved_again = await sm.pop_handshake_challenge(tenant_id, cuid)
         assert retrieved_again is None

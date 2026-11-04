@@ -88,6 +88,15 @@ desktop.ini
 *.sqlite3
 *-journal
 dump.rdb
+*.rdb
+*.sql
+*.dump
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+.pypirc
+pip.conf
 
 # Generated Protobuf code
 app/Protobuf/

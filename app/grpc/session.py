@@ -64,6 +64,10 @@ class GPGKeyManager:
         self.private_key, self.public_key_armor = k, str(k.pubkey)
         with open(self._key_file, "w") as f:
             f.write(str(k))
+        try:
+            os.chmod(self._key_file, 0o600)
+        except OSError:  # pragma: no cover
+            pass
 
     def decrypt(self, encrypted: str) -> Any:
         """Decrypt challenge Token uploaded by client."""
@@ -115,16 +119,29 @@ class SessionManager:
             return None
         return self._km.decrypt(token)
 
-    async def store_pending_handshake(self, tenant_id: str, cuid: str, token: str):
-        """Cache decrypted challenge token awaiting Complete handshake."""
+    async def store_pending_handshake(
+        self, tenant_id: str, cuid: str, token: str, peer_ip: str = ""
+    ):
+        """Cache decrypted challenge token (and optional initiating peer IP) awaiting Complete handshake."""
         rd = get_redis()  # Default DB
         key = f"handshake:{tenant_id}:{cuid}"
         await rd.set(key, token, ex=HANDSHAKE_TTL)
+        if peer_ip:
+            await rd.set(f"handshake_ip:{tenant_id}:{cuid}", peer_ip, ex=HANDSHAKE_TTL)
 
     async def pop_handshake_challenge(self, tenant_id: str, cuid: str) -> str | None:
         """Retrieve challenge token and delete immediately."""
         rd = get_redis()
         key = f"handshake:{tenant_id}:{cuid}"
+        val = await rd.get(key)
+        if val:
+            await rd.delete(key)
+        return val
+
+    async def pop_handshake_ip(self, tenant_id: str, cuid: str) -> str | None:
+        """Retrieve initiating peer IP recorded during BeginHandshake and delete immediately."""
+        rd = get_redis()
+        key = f"handshake_ip:{tenant_id}:{cuid}"
         val = await rd.get(key)
         if val:
             await rd.delete(key)

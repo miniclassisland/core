@@ -145,19 +145,21 @@ async def setup_tenant_context(
     if isinstance(request, Request):
         request.state.role_in_account = role
         path = request.url.path
+        path_lower = path.lower()
         is_mutating_get = path.endswith("/create") or path.endswith("/delete")
+        is_credentials_path = f"/account/{account_id.lower()}/credentials" in path_lower
         if role == "viewer":
             if (
                 request.method not in ("GET", "HEAD", "OPTIONS")
                 or is_mutating_get
-                or f"/account/{account_id}/Credentials" in path
+                or is_credentials_path
             ):
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Viewer role has read-only access and cannot access Credentials",
                 )
         elif role == "member":
-            if f"/account/{account_id}/Credentials" in path:
+            if is_credentials_path:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="Only account owner or admin can access Credentials",
@@ -170,11 +172,13 @@ async def setup_tenant_context(
                     "/broadcast/",
                     f"/account/{account_id}/Policy/",
                     "/client/batch",
+                    "/client/__default__/config",
                 )
             ) or (
                 f"/account/{account_id}/client/" in path
                 and (
                     request.method == "DELETE"
+                    or "/command/" in path
                     or path.endswith(("/disable", "/enable", "/disconnect"))
                 )
             )

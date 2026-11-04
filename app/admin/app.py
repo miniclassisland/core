@@ -43,11 +43,12 @@ admin_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Admin router (first priority), nested Management routers, token_get router, and embedded fonts router
-admin_app.include_router(admin_router)
-admin_app.include_router(mgr_account_router)
+# Mount static token/user self-info routers before parameterized admin_router (/user/{user_id}),
+# followed by nested Management account router, token_get router, and embedded fonts router
 admin_app.include_router(mgr_token_router)
 admin_app.include_router(mgr_user_router)
+admin_app.include_router(admin_router)
+admin_app.include_router(mgr_account_router)
 admin_app.include_router(token_get_router, tags=["TokenGet"])
 admin_app.include_router(fonts_router)
 

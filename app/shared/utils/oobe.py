@@ -1,6 +1,7 @@
 """MINI ClassIsland OOBE first-time onboarding initialization and service deployment helper."""
 
 import json
+import os
 import uuid
 import secrets
 import logging
@@ -316,6 +317,10 @@ def write_config_file(config: dict) -> None:
     }
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(file_config, f, indent=2, ensure_ascii=False)
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:  # pragma: no cover
+        pass
     logger.info("Configuration written to %s", CONFIG_FILE)
 
 

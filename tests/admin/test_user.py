@@ -211,7 +211,11 @@ async def test_admin_user_and_2fa_endpoints(test_superadmin_user):
                 await client.post(f"/user/non-existent/2fa/{action}", headers=headers)
             ).status_code == 404
 
-        # 8. Delete user, self-delete protection & 404
+        # 8. Delete user, self-delete protection, /user/info non-shadowing & 404
+        r_self_info = await client.get("/user/info", headers=headers)
+        assert r_self_info.status_code == 200
+        assert r_self_info.json()["id"] == test_superadmin_user
+
         assert (
             await client.delete(f"/user/{test_superadmin_user}", headers=headers)
         ).status_code == 400
