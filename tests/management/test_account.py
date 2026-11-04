@@ -168,9 +168,28 @@ async def test_management_account_full_suite(test_superadmin_user):
         assert r_search.status_code == 200
         assert len(r_search.json()) >= 1
 
-        # Account info, slug, name, api-key, preset
+        # Account info, quota, slug, name, api-key, preset
         r_info = await client.get(f"/account/{acct_id}/info", headers=sa_headers)
         assert r_info.status_code == 200
+
+        r_quota_get = await client.get(f"/account/{acct_id}/quota", headers=sa_headers)
+        assert r_quota_get.status_code == 200
+        assert any(q["quota_key"] == "max_grpc_connections" for q in r_quota_get.json())
+
+        r_quota_set_403 = await client.post(
+            f"/account/{acct_id}/quota",
+            json={"quota_key": "max_grpc_connections", "max_value": 100},
+            headers=norm_headers,
+        )
+        assert r_quota_set_403.status_code == 403
+
+        r_quota_set_ok = await client.post(
+            f"/account/{acct_id}/quota",
+            json={"quota_key": "max_grpc_connections", "max_value": 250},
+            headers=sa_headers,
+        )
+        assert r_quota_set_ok.status_code == 200
+        assert r_quota_set_ok.json()["max_value"] == 250
 
         r_slug_bad = await client.post(
             f"/account/{acct_id}/info/slug",
@@ -1276,8 +1295,24 @@ async def test_management_account_direct_helpers_and_edge_branches(
         assert out.preset_profile == {}
 
         # 3. Direct calls to endpoints where account was deleted after middleware check
+        with pytest.raises(HTTPException) as exc_q_403:
+            await account.set_account_quota_mgmt(
+                "missing-id",
+                account.QuotaSetRequest(quota_key="max_clients", max_value=10),
+                db,
+                "non-existent-user",
+            )
+        assert exc_q_403.value.status_code == 403
         with pytest.raises(HTTPException):
             await account.get_account_info("missing-id", db, test_superadmin_user)
+        with pytest.raises(HTTPException) as exc_slug_403:
+            await account.change_slug(
+                "missing-id",
+                account.SlugUpdate(slug="valid-slug"),
+                db,
+                "non-existent-user",
+            )
+        assert exc_slug_403.value.status_code == 403
         with pytest.raises(HTTPException):
             await account.change_slug(
                 "missing-id",

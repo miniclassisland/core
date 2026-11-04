@@ -334,6 +334,33 @@ async def test_client_register_servicer_all_modes():
             ctx,
         )
         assert res_prereg_ok.Retcode == Retcode_pb2.Registered
+
+        # 3b. max_clients 配额超限 -> InvalidRequest
+        from app.shared.services.quota import set_quota
+
+        async with AsyncSessionLocal() as db:
+            await set_quota("acct-reg-mode", "max_clients", 1, db)
+            db.add(
+                PreRegisteredClient(
+                    id="pre-2",
+                    account_id="acct-reg-mode",
+                    label="Room 102 PC",
+                    class_identity="Room-102",
+                    mac_address="AA-11-23",
+                    is_enabled=True,
+                    created_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+
+        res_quota_deny = await servicer.Register(
+            ClientRegisterCsReq_pb2.ClientRegisterCsReq(
+                ClientUid="listed-uid-102", ClientId="Room-102", ClientMac="AA-11-23"
+            ),
+            ctx,
+        )
+        assert res_quota_deny.Retcode == Retcode_pb2.InvalidRequest
+        assert "max_clients" in res_quota_deny.Message
     finally:
         server.tenant_ctx.reset(tok)
 
@@ -491,6 +518,21 @@ async def test_command_deliver_servicer():
         await servicer.disconnect_client("test-account-00000000", "no-client") is False
     )
 
+    # 5. ListenCommand max_grpc_connections 配额限制分支
+    from app.shared.services.quota import set_quota
+
+    async with AsyncSessionLocal() as db:
+        await set_quota("test-account-00000000", "max_grpc_connections", 1, db)
+    sid_q = await sm.create_session("test-account-00000000", "client-uid-test")
+    ctx_q = get_mock_context(metadata=[("session", sid_q)])
+    async for _ in servicer.ListenCommand(None, ctx_q):
+        pass
+    ctx_q.abort.assert_called_with(
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+        "Account gRPC connection quota (max_grpc_connections) exceeded",
+    )
+    servicer.client_queues.pop("test-account-00000000:c-queued", None)
+
 
 @pytest.mark.asyncio
 async def test_config_upload_and_audit():
@@ -560,6 +602,15 @@ async def test_config_upload_and_audit():
     assert (
         await audit_servicer.LogEvent(mock_str_audit, ctx_ok)
     ).Retcode == Retcode_pb2.Success
+
+    # 5. feature.audit 配额关闭 (0) 时拒绝上报
+    from app.shared.services.quota import set_quota
+
+    async with AsyncSessionLocal() as db:
+        await set_quota("test-account-00000000", "feature.audit", 0, db)
+    assert (
+        await audit_servicer.LogEvent(req_audit, ctx_ok)
+    ).Retcode == Retcode_pb2.InvalidRequest
 
 
 @pytest.mark.asyncio

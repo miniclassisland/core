@@ -197,6 +197,22 @@ async def test_user_and_account_services():
                 acc.id, "alpha-school-fail", new_user.id, db
             )
 
+        # Superadmin user can update slug even without AccountMember row
+        sa_u = await user_service.register_user(
+            email="sa_slug@school.com",
+            password="SaPassword123!",
+            display_name="SA Slug",
+            db=db,
+            username="sa_slug_user",
+            role_code="superadmin",
+            is_active=True,
+        )
+        await user_service.update_account_slug(
+            acc.id, "alpha-school-by-sa", sa_u.id, db
+        )
+        acc_by_sa = await db.get(Account, acc.id)
+        assert acc_by_sa.slug == "alpha-school-by-sa"
+
         # When AccountMember exists for a deleted Account row -> returns None
         from app.shared.db.models import AccountMember
         from datetime import datetime, timezone

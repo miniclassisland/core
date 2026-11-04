@@ -57,7 +57,6 @@ async def get_client_manifest(
 
     # Ensure default resources exist for this tenant
     await seed_account_defaults(tenant_id, db)
-    await db.commit()
 
     # Resolve client-specific profile, falling back to account '__default__' profile
     stmt = select(ClientProfile).where(

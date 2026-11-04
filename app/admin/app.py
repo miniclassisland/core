@@ -6,8 +6,15 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.admin import router as admin_router
+from app.management.account import router as mgr_account_router
+from app.management.token import router as mgr_token_router
+from app.management.user import router as mgr_user_router
+from app.client import token_get_router
 from app.shared.fonts import router as fonts_router
-from app.shared.security.middlewares import AdminAuthMiddleware, CCProtectMiddleware
+from app.shared.security.middlewares import (
+    AdminAuthMiddleware,
+    CCProtectMiddleware,
+)
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_ADMIN
 
 logger = logging.getLogger(__name__)
@@ -32,8 +39,12 @@ admin_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Admin router and embedded fonts router
+# Mount Admin router (first priority), nested Management routers, token_get router, and embedded fonts router
 admin_app.include_router(admin_router)
+admin_app.include_router(mgr_account_router)
+admin_app.include_router(mgr_token_router)
+admin_app.include_router(mgr_user_router)
+admin_app.include_router(token_get_router, tags=["TokenGet"])
 admin_app.include_router(fonts_router)
 
 

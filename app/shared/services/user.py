@@ -333,7 +333,11 @@ async def update_account_slug(
     )
     m = member.scalar_one_or_none()
     if not m or m.role_in_account not in ("owner", "admin"):
-        raise PermissionError("Account owner or admin role required")
+        u = (
+            await db.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+        if not u or u.role_code != "superadmin":
+            raise PermissionError("Account owner or admin role required")
 
     acct = await db.execute(select(Account).where(Account.id == account_id))
     account = acct.scalar_one_or_none()

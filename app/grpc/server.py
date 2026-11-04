@@ -37,6 +37,7 @@ from app.shared.utils.logging import get_client_ip_from_grpc
 from app.shared.utils.audit import decode_audit_payload_json
 from app.shared.security.middlewares import get_cc_state
 from app.shared.services.pairing import check_approved, create_pairing_request
+from app.shared.services.quota import check_quota
 
 # Protobuf package imports
 from app.Protobuf.Service import (
@@ -398,6 +399,13 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
             acct_id = tid or (
                 matched_pre_reg.account_id if matched_pre_reg else "default"
             )
+            if existing_record is None and acct_id and acct_id != "default":
+                if not await check_quota(acct_id, "max_clients", db):
+                    return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
+                        Retcode=Retcode_pb2.InvalidRequest,
+                        Message="Account registered device quota (max_clients) exceeded.",
+                    )
+
             record = existing_record or ClientRecord(
                 uid=cuid,
                 account_id=acct_id,
@@ -545,9 +553,31 @@ class ClientCommandDeliverServicer(
         except Exception:
             pass
 
+        # Enforce max_grpc_connections quota before accepting new active stream
+        q_key = f"{tid}:{real_cuid}"
+        if tid and tid != "default":
+            online_items = await self._sm.get_all_clients_status(tid)
+            online_uids = {item["uid"] for item in online_items}
+            for k in self.client_queues:
+                if k.startswith(f"{tid}:"):
+                    online_uids.add(k.split(":", 1)[1])
+            other_active_count = len(online_uids - {real_cuid})
+            async with AsyncSessionLocal() as db:
+                quota_ok = await check_quota(
+                    tid,
+                    "max_grpc_connections",
+                    db,
+                    live_current=other_active_count,
+                )
+            if not quota_ok:
+                await context.abort(
+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
+                    "Account gRPC connection quota (max_grpc_connections) exceeded",
+                )
+                return
+
         # Set device online and allocate queue
         await self._sm.set_client_online(tid, real_cuid, ip=client_ip)
-        q_key = f"{tid}:{real_cuid}"
         queue = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
         self.client_queues[q_key] = queue
 
@@ -737,6 +767,9 @@ class AuditServicer(Audit_pb2_grpc.AuditServicer):
                 ).scalar_one_or_none()
                 if rec and rec.account_id:
                     tid = rec.account_id
+            if tid and tid != "default":
+                if not await check_quota(tid, "feature.audit", db):
+                    return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
             db.add(
                 AuditLog(
                     account_id=tid or "default",

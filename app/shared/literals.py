@@ -58,6 +58,7 @@ SAFE_IDENTIFIER_RE = re.compile(r"^[a-z0-9_\-]+$")
 
 DEFAULT_QUOTAS = [
     ("max_clients", 50),
+    ("max_grpc_connections", 50),
     ("max_bandwidth_mb", 1024),
     ("feature.ota", 1),
     ("feature.audit", 1),

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 IP_FAILURE_LIMIT = 20
 IP_BLOCK_DURATION = 300
-GLOBAL_CC_LIMIT = 500
+GLOBAL_CC_LIMIT = 5000
 GLOBAL_CC_WINDOW = 1.0
 
 

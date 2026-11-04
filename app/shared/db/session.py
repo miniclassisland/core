@@ -10,7 +10,7 @@ from app.shared.utils.tenant import set_search_path
 from app.shared.db.models import Base
 
 # Configure async database engine
-engine = create_async_engine(DATABASE_URL, echo=False, pool_size=10, max_overflow=20)
+engine = create_async_engine(DATABASE_URL, echo=False, pool_size=25, max_overflow=35)
 
 # Create async Session factory
 AsyncSessionLocal = async_sessionmaker(

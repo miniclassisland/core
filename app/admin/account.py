@@ -273,6 +273,7 @@ async def admin_delete_account(
 )
 async def admin_get_account_quotas(
     account_id: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
@@ -286,9 +287,16 @@ async def admin_get_account_quotas(
         )
         or 0
     )
+    sm = get_session_manager(request)
+    grpc_conn_count = len(await sm.get_all_clients_status(account_id)) if sm else 0
     out = []
     for r in rows:
-        cur = client_count if r.quota_key == "max_clients" else r.current_value
+        if r.quota_key == "max_clients":
+            cur = client_count
+        elif r.quota_key == "max_grpc_connections":
+            cur = grpc_conn_count
+        else:
+            cur = r.current_value
         out.append(
             QuotaOut(
                 id=r.id,

@@ -57,6 +57,8 @@ from app.shared.services.user import (
     validate_slug_format,
     is_name_reserved,
 )
+from app.shared.services.quota import get_quotas, set_quota
+from app.shared.schemas.schemas import QuotaOut, QuotaSetRequest
 from app.shared.literals import AUDIT_EVENT_NAMES, CONFIG_TYPE_NAMES, DEFAULT_RESOURCES
 from app.shared.runtime import get_session_manager, get_command_servicer
 from app.shared.utils.config import BASE_DOMAIN
@@ -262,6 +264,80 @@ async def get_account_info(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
         )
     return _account_out(acct)
+
+
+@router.get(
+    "/account/{account_id}/quota",
+    response_model=list[QuotaOut],
+    tags=["Account"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def get_account_quotas_mgmt(
+    account_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get all resource quotas and live usage for the account."""
+    from sqlalchemy import func
+
+    rows = await get_quotas(account_id, db)
+    client_count = (
+        await db.scalar(
+            select(func.count(ClientRecord.uid)).where(
+                ClientRecord.account_id == account_id
+            )
+        )
+        or 0
+    )
+    sm = get_session_manager(request)
+    grpc_conn_count = len(await sm.get_all_clients_status(account_id)) if sm else 0
+    out = []
+    for r in rows:
+        if r.quota_key == "max_clients":
+            cur = client_count
+        elif r.quota_key == "max_grpc_connections":
+            cur = grpc_conn_count
+        else:
+            cur = r.current_value
+        out.append(
+            QuotaOut(
+                id=r.id,
+                account_id=r.account_id,
+                quota_key=r.quota_key,
+                max_value=r.max_value,
+                current_value=cur,
+            )
+        )
+    return out
+
+
+@router.post(
+    "/account/{account_id}/quota",
+    response_model=QuotaOut,
+    tags=["Account"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def set_account_quota_mgmt(
+    account_id: str,
+    body: QuotaSetRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
+):
+    """Set a quota limit for the account (Super Admin only)."""
+    u = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+    if not u or u.role_code != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Super Admin can modify resource quotas",
+        )
+    q = await set_quota(account_id, body.quota_key, body.max_value, db)
+    return QuotaOut(
+        id=q.id,
+        account_id=q.account_id,
+        quota_key=q.quota_key,
+        max_value=q.max_value,
+        current_value=q.current_value,
+    )
 
 
 @router.post(
