@@ -49,14 +49,14 @@ def create_user_cmd(
         async with AsyncSessionLocal() as db:
             try:
                 user = await register_user(
-                    email,
-                    password,
-                    username,
+                    email or "",
+                    password or "",
+                    username or "",
                     db,
                     username=username,
                 )
                 if role != "normal":
-                    user.role_code = role
+                    user.role_code = role or "normal"
                     await db.commit()
                 print(f"✅ User {user.username} created")
             except ValueError as exc:
@@ -148,7 +148,7 @@ def reset_password_cmd(
             if not user:
                 print(f"❌ User {username} does not exist")
                 return
-            user.hashed_password = hash_password(password)
+            user.hashed_password = hash_password(password or "")
             await db.commit()
             print(f"✅ User {username} password reset")
 
@@ -173,7 +173,7 @@ def set_role_cmd(
             if not user:
                 print(f"❌ User {username} does not exist")
                 return
-            user.role_code = role
+            user.role_code = role or "normal"
             await db.commit()
             print(f"✅ User {username} role set to {role}")
 

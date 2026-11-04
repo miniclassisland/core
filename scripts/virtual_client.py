@@ -298,10 +298,12 @@ class VirtualClassIslandClient:
         raw_bytes = secrets.token_bytes(64)
         challenge_token = base64.b64encode(raw_bytes).decode("ascii")
         if cached_pub_key is not None:
-            pub_key = cached_pub_key
+            pub_key: Any = cached_pub_key
         else:
-            pub_key, _ = pgpy.PGPKey.from_blob(self.server_public_key)
-        key_id_uint = int(str(pub_key.fingerprint.keyid), 16)
+            blob_res: Any = pgpy.PGPKey.from_blob(self.server_public_key)
+            pub_key, _ = blob_res
+        fp: Any = pub_key.fingerprint
+        key_id_uint = int(str(fp.keyid), 16)
         key_id_int = (
             key_id_uint - (1 << 64) if key_id_uint >= (1 << 63) else key_id_uint
         )
@@ -1079,9 +1081,10 @@ async def run_comprehensive_e2e_suite() -> None:
             )
 
             # Step 3.4: Parse server PGP public key once and run OpenPGP Handshake for all 200 clients
-            cached_pub_key, _ = pgpy.PGPKey.from_blob(
+            blob_cached: Any = pgpy.PGPKey.from_blob(
                 virtual_clients[0].server_public_key
             )
+            cached_pub_key, _ = blob_cached
 
             async def _handshake_worker(vc: VirtualClassIslandClient) -> None:
                 async with sem:

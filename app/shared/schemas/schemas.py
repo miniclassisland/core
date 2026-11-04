@@ -57,9 +57,9 @@ class UserRegisterRequest(BaseModel):
 
     email: EmailStr = Field(..., description="Registered email address")
     password: str = Field(..., min_length=12, max_length=128)
-    username: Optional[str] = Field(None, max_length=64)
-    display_name: str = Field("", max_length=128)
-    role_code: Optional[str] = Field(None, max_length=32)
+    username: Optional[str] = Field(default=None, max_length=64)
+    display_name: str = Field(default="", max_length=128)
+    role_code: Optional[str] = Field(default=None, max_length=32)
     can_create_account: Optional[bool] = None
 
     @field_validator("password")
@@ -120,8 +120,8 @@ class AccountCreate(BaseModel):
     """Create tenant account request schema."""
 
     name: str = Field(..., min_length=1, max_length=128)
-    slug: Optional[str] = Field(None, min_length=3, max_length=64)
-    owner_user_id: Optional[str] = Field(None, max_length=64)
+    slug: Optional[str] = Field(default=None, min_length=3, max_length=64)
+    owner_user_id: Optional[str] = Field(default=None, max_length=64)
 
     @field_validator("slug")
     @classmethod
@@ -136,10 +136,10 @@ class AccountCreate(BaseModel):
 class AccountUpdate(BaseModel):
     """Update tenant account request schema."""
 
-    name: Optional[str] = Field(None, max_length=128)
-    slug: Optional[str] = Field(None, min_length=3, max_length=64)
+    name: Optional[str] = Field(default=None, max_length=128)
+    slug: Optional[str] = Field(default=None, min_length=3, max_length=64)
     is_active: Optional[bool] = None
-    registration_mode: Optional[str] = Field(None, max_length=32)
+    registration_mode: Optional[str] = Field(default=None, max_length=32)
 
     @field_validator("slug")
     @classmethod

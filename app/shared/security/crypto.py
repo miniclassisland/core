@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import uuid
+from typing import Any
 import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -100,7 +101,7 @@ def encode_classisland_credential(password: str) -> str:
     return base64.b64encode(raw_json.encode("utf-8")).decode("ascii")
 
 
-def normalize_credentials_payload(payload: dict) -> dict:
+def normalize_credentials_payload(payload: Any) -> Any:
     """Ensure UserCredential and AdminCredential in a Credentials payload are properly encoded."""
     if not isinstance(payload, dict):
         return payload
@@ -145,7 +146,7 @@ def _normalize_hhmmss(raw: str, default: str = "08:00:00") -> tuple[str, str]:
     return f"1970-01-01T{span}", span
 
 
-def normalize_resource_payload(resource_type: str, payload: dict) -> dict:
+def normalize_resource_payload(resource_type: str, payload: Any) -> Any:
     """Normalize resource JSON to strictly conform to upstream ClassIsland C# Profile/Model serialization."""
     if not isinstance(payload, dict):
         return payload
@@ -154,9 +155,10 @@ def normalize_resource_payload(resource_type: str, payload: dict) -> dict:
         return normalize_credentials_payload(payload)
 
     if resource_type == "Subjects":
-        raw_subs = (
-            payload.get("Subjects")
-            if isinstance(payload.get("Subjects"), dict)
+        sub_val = payload.get("Subjects")
+        raw_subs: dict = (
+            sub_val
+            if isinstance(sub_val, dict)
             else {k: v for k, v in payload.items() if isinstance(v, dict)}
         )
         norm_subs: dict[str, dict] = {}
@@ -166,9 +168,10 @@ def normalize_resource_payload(resource_type: str, payload: dict) -> dict:
         return {"Subjects": norm_subs}
 
     if resource_type == "TimeLayout":
-        raw_tls = (
-            payload.get("TimeLayouts")
-            if isinstance(payload.get("TimeLayouts"), dict)
+        tl_val = payload.get("TimeLayouts")
+        raw_tls: dict = (
+            tl_val
+            if isinstance(tl_val, dict)
             else {k: v for k, v in payload.items() if isinstance(v, dict)}
         )
         norm_tls: dict[str, dict] = {}
@@ -242,9 +245,10 @@ def normalize_resource_payload(resource_type: str, payload: dict) -> dict:
                 cp_copy["Classes"] = norm_classes
             norm_cps[ensure_guid_str(str(k))] = cp_copy
 
-        raw_groups = (
-            payload.get("ClassPlanGroups")
-            if isinstance(payload.get("ClassPlanGroups"), dict)
+        grp_val = payload.get("ClassPlanGroups")
+        raw_groups: dict = (
+            grp_val
+            if isinstance(grp_val, dict)
             else {_EMPTY_GUID: {"Name": "默认课表群", "IsGlobal": False}}
         )
         norm_groups: dict[str, dict] = {}

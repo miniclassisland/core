@@ -190,7 +190,7 @@ async def test_user_and_account_services():
 
         await user_service.update_account_slug(acc.id, "alpha-school-new", owner.id, db)
         acc_updated = await db.get(Account, acc.id)
-        assert acc_updated.slug == "alpha-school-new"
+        assert acc_updated is not None and acc_updated.slug == "alpha-school-new"
 
         with pytest.raises(PermissionError):
             await user_service.update_account_slug(
@@ -211,7 +211,7 @@ async def test_user_and_account_services():
             acc.id, "alpha-school-by-sa", sa_u.id, db
         )
         acc_by_sa = await db.get(Account, acc.id)
-        assert acc_by_sa.slug == "alpha-school-by-sa"
+        assert acc_by_sa is not None and acc_by_sa.slug == "alpha-school-by-sa"
 
         # When AccountMember exists for a deleted Account row -> returns None
         from app.shared.db.models import AccountMember

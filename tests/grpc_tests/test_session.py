@@ -32,7 +32,10 @@ def test_gpg_key_manager_lifecycle():
         assert km.private_key is not None
 
         # 测试正常加密与解密
-        pubkey, _ = pgpy.PGPKey.from_blob(km.public_key_armor)
+        from typing import Any
+
+        blob_res: Any = pgpy.PGPKey.from_blob(km.public_key_armor)
+        pubkey, _ = blob_res
         msg = pgpy.PGPMessage.new("challenge-secret-123")
         enc = str(pubkey.encrypt(msg))
         dec = km.decrypt(enc)

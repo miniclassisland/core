@@ -77,7 +77,7 @@ async def validate_and_refresh(
 
     # Automatic renewal
     await rd.expire(key, ttl)
-    return data.get("scope"), data.get("tenant_id", "")
+    return str(data.get("scope") or ""), str(data.get("tenant_id") or "")
 
 
 async def revoke_token(token: str, *, tenant_id: str = "") -> bool:

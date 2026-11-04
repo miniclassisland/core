@@ -6,6 +6,7 @@ Contains key pair management (PGPy), handshake challenge state, heartbeat online
 import os
 import uuid
 import logging
+from typing import Any
 import pgpy
 from pgpy.constants import (
     PubKeyAlgorithm,
@@ -41,7 +42,8 @@ class GPGKeyManager:
         """Load or dynamically create 2048-bit RSA key pair."""
         if os.path.exists(self._key_file):
             try:
-                k, _ = pgpy.PGPKey.from_file(self._key_file)
+                loaded: Any = pgpy.PGPKey.from_file(self._key_file)
+                k, _ = loaded
                 self.private_key, self.public_key_armor = k, str(k.pubkey)
                 return
             except Exception:
@@ -59,11 +61,12 @@ class GPGKeyManager:
         with open(self._key_file, "w") as f:
             f.write(str(k))
 
-    def decrypt(self, encrypted: str) -> str:
+    def decrypt(self, encrypted: str) -> Any:
         """Decrypt challenge Token uploaded by client."""
         try:
             msg = pgpy.PGPMessage.from_blob(encrypted)
-            raw = self.private_key.decrypt(msg).message
+            pk: Any = self.private_key
+            raw = pk.decrypt(msg).message
             return bytes(raw) if isinstance(raw, bytearray) else raw
         except Exception as e:
             logger.error("GPG decryption failed: %s", e)
@@ -102,7 +105,7 @@ class SessionManager:
         self.public_key_armor = self._km.public_key_armor
         self._private_key = self._km.private_key
 
-    def decrypt_challenge(self, token: str) -> str:
+    def decrypt_challenge(self, token: str) -> Any:
         """Decrypt challenge token."""
         if self._private_key is None:
             return None
@@ -114,7 +117,7 @@ class SessionManager:
         key = f"handshake:{tenant_id}:{cuid}"
         await rd.set(key, token, ex=HANDSHAKE_TTL)
 
-    async def pop_handshake_challenge(self, tenant_id: str, cuid: str) -> str:
+    async def pop_handshake_challenge(self, tenant_id: str, cuid: str) -> str | None:
         """Retrieve challenge token and delete immediately."""
         rd = get_redis()
         key = f"handshake:{tenant_id}:{cuid}"

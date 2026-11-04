@@ -178,7 +178,7 @@ async def revoke_pairing(code: str, tenant_id: str) -> bool:
             .where(PairingCode.tenant_id == tenant_id)
         )
         await db.commit()
-        return result.rowcount > 0
+        return int(getattr(result, "rowcount", 0) or 0) > 0
 
 
 async def list_pending(tenant_id: str) -> list[PairingCode]:

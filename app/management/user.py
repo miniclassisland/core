@@ -297,7 +297,7 @@ async def confirm_2fa(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Please call /enable first"
         )
-    if not verify_totp(user.totp_secret, body.code):
+    if not verify_totp(user.totp_secret or "", body.code):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid TOTP code"
         )
@@ -330,7 +330,7 @@ async def verify_2fa_login(body: TotpVerifyRequest):
     uid = await pop_2fa_temp_token(body.temp_token)
     async with AsyncSessionLocal() as db:
         user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if not verify_totp(user.totp_secret, body.code):
+    if not verify_totp(user.totp_secret or "", body.code):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code"
         )

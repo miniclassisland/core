@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import pytest
 import grpc
+from typing import Any
 from unittest.mock import MagicMock, AsyncMock, patch
 from sqlalchemy import select, delete
 
@@ -30,7 +31,7 @@ from app.Protobuf.Client import (
 from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
 
 
-def get_mock_context(metadata: list = None, peer: str = "ipv4:127.0.0.1:12345"):
+def get_mock_context(metadata: list | None = None, peer: str = "ipv4:127.0.0.1:12345"):
     ctx = MagicMock(spec=grpc.aio.ServicerContext)
     ctx.invocation_metadata.return_value = metadata or []
     ctx.peer.return_value = peer
@@ -123,7 +124,7 @@ async def test_tenant_interceptor_all_branches(test_superadmin_user):
         async def _cont(d, _h=h):
             return _h
 
-        wrapped = await interceptor.intercept_service(_cont, details_none)
+        wrapped: Any = await interceptor.intercept_service(_cont, details_none)
         if mode == "unary_unary":
             assert await wrapped.unary_unary("r", "c") == "uu_ok"
         elif mode == "unary_stream_gen":
@@ -147,7 +148,7 @@ async def test_tenant_interceptor_all_branches(test_superadmin_user):
     h_uu.unary_stream = None
     h_uu.stream_unary = None
     h_uu.stream_stream = None
-    w_sid = await interceptor.intercept_service(
+    w_sid: Any = await interceptor.intercept_service(
         AsyncMock(return_value=h_uu), details_sid_only
     )
     assert await w_sid.unary_unary("r", "c") == "ok"

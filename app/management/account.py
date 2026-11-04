@@ -1548,11 +1548,8 @@ async def config_pre_reg(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Pre-registered client not found",
         )
-    preset = (
-        body.get("preset_profile")
-        if isinstance(body.get("preset_profile"), dict)
-        else body
-    )
+    raw_preset = body.get("preset_profile")
+    preset: dict = raw_preset if isinstance(raw_preset, dict) else body
     clean_preset = _normalize_profile_dict(preset)
     row.preset_profile_json = json.dumps(clean_preset, ensure_ascii=False)
     await db.commit()
@@ -1686,9 +1683,7 @@ async def _serialize_clients(
                     r.registered_at.isoformat() if r.registered_at else None
                 ),
                 "last_seen_at": (
-                    r.last_seen_at.isoformat()
-                    if getattr(r, "last_seen_at", None)
-                    else None
+                    r.last_seen_at.isoformat() if r.last_seen_at is not None else None
                 ),
                 "has_custom_profile": client_prof is not None,
                 "profile": _profile_to_dict(client_prof or default_prof),

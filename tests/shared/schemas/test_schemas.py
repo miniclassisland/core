@@ -87,7 +87,7 @@ def test_pydantic_schemas_instantiation():
     assert totp_verify.code == "123456"
 
     bo = schemas.BatchOperation(
-        action="create",
+        action=schemas.BatchOpType.create,
         resource_type="ClassPlan",
         name="plan1",
         payload={"content": "data"},

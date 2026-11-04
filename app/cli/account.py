@@ -46,7 +46,8 @@ def create_account_cmd(
 ):
     """Create a new tenant account."""
     _require_args(name=name)
-    actual_slug = slug or name.replace("_", "-")
+    name_str = name or ""
+    actual_slug = slug or name_str.replace("_", "-")
 
     async def _run():
         async with AsyncSessionLocal() as db:

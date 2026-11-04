@@ -12,6 +12,7 @@ import logging
 import base64
 import time
 from datetime import datetime, timezone
+from typing import Any
 import grpc
 from sqlalchemy import select, or_
 
@@ -47,7 +48,6 @@ from app.Protobuf.Service import (
     ConfigUpload_pb2_grpc,
     Audit_pb2_grpc,
 )
-from app.Protobuf.Client import HandshakeScReq_pb2, ClientRegisterCsReq_pb2
 from app.Protobuf.Server import (
     HandshakeScRsp_pb2,
     ClientRegisterScRsp_pb2,
@@ -91,9 +91,13 @@ _GRPC_SERVER_OPTIONS = [
 # ---- Helper Functions ----
 
 
-def _get_metadata_dict(context: grpc.aio.ServicerContext) -> dict:
+def _get_metadata_dict(context: Any) -> dict[str, str]:
     """Extract gRPC context metadata dictionary."""
-    return dict(context.invocation_metadata())
+    raw = context.invocation_metadata() or ()
+    return {
+        str(k): (v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v))
+        for k, v in raw
+    }
 
 
 def _get_tenant_id_safe() -> str:
@@ -124,7 +128,13 @@ class TenantInterceptor(grpc.aio.ServerInterceptor):
                 "Network congestion defense enabled; registration and handshake rejected",
             )
 
-        metadata = dict(handler_call_details.invocation_metadata)
+        raw_md = handler_call_details.invocation_metadata or ()
+        metadata: dict[str, str] = {
+            str(k): (
+                v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+            )
+            for k, v in raw_md
+        }
         authority = (
             metadata.get("x-forwarded-host")
             or metadata.get("host")
@@ -239,7 +249,7 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
     def __init__(self, session_manager: SessionManager):
         self._sm = session_manager
 
-    async def BeginHandshake(self, request: HandshakeScReq_pb2, context):
+    async def BeginHandshake(self, request: Any, context):
         tid = _get_tenant_id_safe()
         cuid, mac = request.ClientUid, request.ClientMac
 
@@ -333,7 +343,7 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
     def __init__(self, session_manager: SessionManager):
         self._sm = session_manager
 
-    async def Register(self, request: ClientRegisterCsReq_pb2, context):
+    async def Register(self, request: Any, context):
         cuid = request.ClientUid
         tid = _get_tenant_id_safe()
         peer_ip = get_client_ip_from_grpc(context)

@@ -3,12 +3,13 @@
 import asyncio
 import os
 import logging
+from typing import Any
 import redis.asyncio as aioredis
 from app.shared.utils.config import REDIS_URL
 
 logger = logging.getLogger(__name__)
 
-_pools: dict[int, aioredis.Redis] = {}
+_pools: dict[int, Any] = {}
 _lock = asyncio.Lock()
 _max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "2000"))
 
@@ -35,7 +36,7 @@ async def init_redis(*, dbs: tuple[int, ...] = (0, 1, 2)) -> None:
                         await _pools[db].aclose()
                     except Exception:
                         pass
-            pool = aioredis.from_url(
+            pool: Any = aioredis.from_url(
                 _build_url(db), decode_responses=True, max_connections=_max_conn
             )
             await pool.ping()
@@ -43,7 +44,7 @@ async def init_redis(*, dbs: tuple[int, ...] = (0, 1, 2)) -> None:
         logger.info("Redis connected successfully DB: %s", list(_pools.keys()))
 
 
-def get_redis(db: int = 0) -> aioredis.Redis:
+def get_redis(db: int = 0) -> Any:
     """Get Redis instance for specified logical DB, recreating if event loop changed."""
     try:
         current_loop = asyncio.get_running_loop()

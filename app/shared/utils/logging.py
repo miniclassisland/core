@@ -10,14 +10,14 @@ import time
 from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from typing import Callable, TYPE_CHECKING
+from typing import Any, Callable, TYPE_CHECKING
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
 if TYPE_CHECKING:
-    import grpc
+    pass
 
 # ---- Log Configuration Constants ----
 _LOG_DIR = Path(".miniclassisland") / "logs"
@@ -55,9 +55,13 @@ def get_client_ip_from_request(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
-def get_client_ip_from_grpc(context: grpc.aio.ServicerContext) -> str:
+def get_client_ip_from_grpc(context: Any) -> str:
     """Parse real client IP from gRPC call invocation metadata."""
-    metadata = dict(context.invocation_metadata())
+    raw_md = context.invocation_metadata() or ()
+    metadata: dict[str, str] = {
+        str(k): (v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v))
+        for k, v in raw_md
+    }
 
     forwarded = metadata.get("x-forwarded-for", "")
     ip = _parse_forwarded_for(forwarded)
