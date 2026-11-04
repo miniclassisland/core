@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ---- Session Token (HTTP Session) Management ----
 
-_SESSION_TOKEN_BYTES = 32
+_SESSION_TOKEN_BYTES = 96
 _SESSION_DEFAULT_TTL = 3600
 
 
@@ -94,7 +94,7 @@ def require_role(min_priority: int):
 
 # ---- Resource Access Token Management ----
 
-_RES_TOKEN_LENGTH = 64
+_RES_TOKEN_LENGTH = 144
 _RES_DEFAULT_TTL = 300
 _RES_DEFAULT_MAX_USES = 1
 
@@ -195,13 +195,14 @@ def verify_oobe_token(token: str) -> bool:
 # ---- 2FA Temp Token Management ----
 
 _TEMP_2FA_PREFIX = "2fa_pending"
+_TEMP_2FA_TOKEN_BYTES = 96
 _TEMP_2FA_TTL = 300
 
 
 async def create_2fa_temp_token(user_id: str) -> str:
     """Create temporary token for 2FA verification flow."""
     rd = get_redis(REDIS_DB_AUTH)
-    token = secrets.token_urlsafe(32)
+    token = secrets.token_urlsafe(_TEMP_2FA_TOKEN_BYTES)
     await rd.setex(f"{_TEMP_2FA_PREFIX}:{token}", _TEMP_2FA_TTL, user_id)
     return token
 

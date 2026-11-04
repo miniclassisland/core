@@ -24,6 +24,7 @@ from app.shared.services.user import ensure_system_roles
 async def test_api_token_lifecycle():
     """Test multi-use resource access token lifecycle."""
     rtok = await auth.create_token("t1", "Subjects", "default", max_uses=2)
+    assert len(rtok) == 192
     assert await auth.resolve_token(rtok) is not None
     assert await auth.resolve_token(rtok) is not None
     assert await auth.resolve_token(rtok) is None
@@ -34,10 +35,12 @@ async def test_session_token_and_2fa_temp_token():
     """Test session token and 2FA temporary token creation, resolution, and expiration."""
     user_id = "test-user-id"
     sid = await auth.create_session_token(user_id, ttl=3600)
+    assert len(sid) == 128
     assert await auth.resolve_user_from_token(sid) == user_id
     assert await auth.resolve_user_from_token("invalid-sid") is None
 
     temp = await auth.create_2fa_temp_token(user_id)
+    assert len(temp) == 128
     assert await auth.pop_2fa_temp_token(temp) == user_id
     with pytest.raises(HTTPException) as exc:
         await auth.pop_2fa_temp_token(temp)
