@@ -7,6 +7,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.db.models import AccountQuota, ClientRecord
 from app.shared.literals import DEFAULT_QUOTAS
 
+# High-performance in-memory bandwidth byte accumulator per tenant account
+_BANDWIDTH_BYTES: dict[str, int] = {}
+
+
+def record_bandwidth_bytes(account_id: str, byte_count: int) -> int:
+    """Record outbound/inbound payload bytes for tenant account in O(1) memory."""
+    if not account_id or account_id == "default" or byte_count <= 0:
+        return 0
+    total = _BANDWIDTH_BYTES.get(account_id, 0) + byte_count
+    _BANDWIDTH_BYTES[account_id] = total
+    return total
+
+
+def get_bandwidth_mb(account_id: str, db_current_mb: int = 0) -> int:
+    """Calculate total bandwidth usage in MB combining DB persisted value and live byte counter."""
+    raw_bytes = _BANDWIDTH_BYTES.get(account_id, 0)
+    live_mb = (raw_bytes + (1024 * 1024) - 1) // (1024 * 1024) if raw_bytes > 0 else 0
+    return db_current_mb + live_mb
+
+
+def reset_bandwidth_bytes(account_id: str) -> None:
+    """Reset in-memory bandwidth byte counter for specified account."""
+    _BANDWIDTH_BYTES.pop(account_id, None)
+
 
 async def get_quota_record(
     account_id: str, key: str, db: AsyncSession
@@ -50,6 +74,8 @@ async def check_quota(
             or 0
         )
         return cnt < quota.max_value
+    if quota_key == "max_bandwidth_mb":
+        return get_bandwidth_mb(account_id, quota.current_value) < quota.max_value
     return quota.current_value < quota.max_value
 
 

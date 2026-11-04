@@ -80,6 +80,19 @@ async def test_client_app_endpoints():
         assert r_man_custom.json()["ClassPlanSource"]["Version"] == 0
         assert r_man_custom.json()["TimeLayoutSource"]["Version"] == 0
 
+        # 3b. Manifest when max_bandwidth_mb quota is exceeded -> 429
+        from app.shared.services.quota import set_quota
+
+        async with AsyncSessionLocal() as db:
+            await set_quota("acct-client-test", "max_bandwidth_mb", 0, db)
+        r_man_429 = await client.get(
+            "/api/v1/client/uid-empty-profile/manifest",
+            headers=host_headers,
+        )
+        assert r_man_429.status_code == 429
+        async with AsyncSessionLocal() as db:
+            await set_quota("acct-client-test", "max_bandwidth_mb", 100, db)
+
         # 4. get_client_resource valid & invalid
         r_res_bad = await client.get(
             "/api/v1/client/InvalidType",

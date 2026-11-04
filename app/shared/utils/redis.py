@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 _pools: dict[int, aioredis.Redis] = {}
 _lock = asyncio.Lock()
-_max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "200"))
+_max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "2000"))
 
 
 def _build_url(db: int) -> str:

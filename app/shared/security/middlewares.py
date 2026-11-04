@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 IP_FAILURE_LIMIT = 20
 IP_BLOCK_DURATION = 300
-GLOBAL_CC_LIMIT = 5000
+GLOBAL_CC_LIMIT = 25000
 GLOBAL_CC_WINDOW = 1.0
 
 
@@ -109,7 +109,7 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
                 )
 
         resp = await call_next(request)
-        if resp.status_code >= 400:
+        if resp.status_code >= 400 and resp.status_code != 429:
             record_ip_failure(ip)
 
         return resp
@@ -309,10 +309,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-        from app.shared.db.session import AsyncSessionLocal
-
-        async with AsyncSessionLocal() as db:
-            account = await resolve_account(slug, db)
+        account = await resolve_account(slug)
         if not account:
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,

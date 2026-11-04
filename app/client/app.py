@@ -4,6 +4,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.client import router as client_router
 from app.client import token_get_router
@@ -21,8 +22,9 @@ client_app = FastAPI(
     lifespan=app_lifespan,
 )
 
-# Multi-tenant subdomain resolution, logging, and security middleware
+# Multi-tenant subdomain resolution, GZip compression, logging, and security middleware
 client_app.add_middleware(TenantMiddleware)
+client_app.add_middleware(GZipMiddleware, minimum_size=500)
 client_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_CLIENT)
 client_app.add_middleware(CCProtectMiddleware)
 

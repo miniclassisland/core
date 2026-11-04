@@ -4,6 +4,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.admin import router as admin_router
 from app.management.account import router as mgr_account_router
@@ -25,8 +26,9 @@ admin_app = FastAPI(
     redirect_slashes=False,
 )
 
-# Authentication, logging, and security middleware
+# Authentication, GZip compression, logging, and security middleware
 admin_app.add_middleware(AdminAuthMiddleware)
+admin_app.add_middleware(GZipMiddleware, minimum_size=500)
 admin_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_ADMIN)
 admin_app.add_middleware(CCProtectMiddleware)
 

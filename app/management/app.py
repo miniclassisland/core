@@ -4,6 +4,7 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from app.management import router as mgr_router
 from app.client import token_get_router
@@ -26,8 +27,9 @@ management_app = FastAPI(
 # Account multi-tenant context middleware (verifies AccountMember membership)
 management_app.add_middleware(AccountContextMiddleware, require_membership=True)
 
-# Session token and authentication middleware
+# Session token, GZip compression, and authentication middleware
 management_app.add_middleware(AdminAuthMiddleware)
+management_app.add_middleware(GZipMiddleware, minimum_size=500)
 management_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_MGMT)
 management_app.add_middleware(CCProtectMiddleware)
 

@@ -68,3 +68,12 @@ async def test_get_resource_by_token_branches():
         tok_corrupt = await create_token("acct-corrupt", "Subjects", "corrupt_sub")
         r_corrupt = await client.get("/get", params={"token": tok_corrupt})
         assert r_corrupt.status_code == 500
+
+        # 6. Bandwidth quota exceeded on /get -> 429
+        from app.shared.services.quota import set_quota
+
+        async with AsyncSessionLocal() as db:
+            await set_quota("acct-bw-limit", "max_bandwidth_mb", 0, db)
+        tok_bw = await create_token("acct-bw-limit", "Subjects", "default")
+        r_bw = await client.get("/get", params={"token": tok_bw})
+        assert r_bw.status_code == 429

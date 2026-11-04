@@ -9,8 +9,15 @@ from app.shared.utils.config import DATABASE_URL
 from app.shared.utils.tenant import set_search_path
 from app.shared.db.models import Base
 
-# Configure async database engine
-engine = create_async_engine(DATABASE_URL, echo=False, pool_size=25, max_overflow=35)
+# Configure async database engine for 10,000+ active devices high concurrency
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=60,
+    max_overflow=140,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 
 # Create async Session factory
 AsyncSessionLocal = async_sessionmaker(

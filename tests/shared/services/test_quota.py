@@ -42,7 +42,7 @@ async def test_quota_service_fallback():
         await db.commit()
         assert await quota.check_quota(account_id, "clients_limit", db) is False
 
-        # Test feature.* and max_clients branches
+        # Test feature.*, max_clients, and max_bandwidth_mb branches
         await quota.set_quota(account_id, "feature.audit", 1, db)
         assert await quota.check_quota(account_id, "feature.audit", db) is True
         await quota.set_quota(account_id, "feature.audit", 0, db)
@@ -50,6 +50,19 @@ async def test_quota_service_fallback():
 
         await quota.set_quota(account_id, "max_clients", 1, db)
         assert await quota.check_quota(account_id, "max_clients", db) is True
+
+        assert quota.record_bandwidth_bytes("", 100) == 0
+        assert quota.record_bandwidth_bytes("default", 100) == 0
+        assert quota.record_bandwidth_bytes(account_id, 0) == 0
+        quota.reset_bandwidth_bytes(account_id)
+        assert quota.get_bandwidth_mb(account_id, 0) == 0
+        assert quota.record_bandwidth_bytes(account_id, 512 * 1024) == 512 * 1024
+        assert quota.get_bandwidth_mb(account_id, 0) == 1
+        await quota.set_quota(account_id, "max_bandwidth_mb", 2, db)
+        assert await quota.check_quota(account_id, "max_bandwidth_mb", db) is True
+        await quota.set_quota(account_id, "max_bandwidth_mb", 1, db)
+        assert await quota.check_quota(account_id, "max_bandwidth_mb", db) is False
+        quota.reset_bandwidth_bytes(account_id)
 
         all_q = await quota.get_quotas(account_id, db)
         assert len(all_q) >= 5

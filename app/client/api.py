@@ -9,9 +9,14 @@ from app.shared.db.models import ClientProfile, Account, PreRegisteredClient, MO
 from app.shared.db.schema_init import seed_account_defaults
 from app.shared.schemas.schemas import ClientManifest
 from app.shared.utils.logging import get_client_ip_from_request
-from app.shared.utils.tenant import get_tenant_id, get_tenant_id_or_default
+from app.shared.utils.tenant import (
+    get_tenant_id,
+    get_tenant_id_or_default,
+    get_cached_account,
+)
 from app.shared.utils.config import BASE_DOMAIN
 from app.shared.security.auth import create_token
+from app.shared.services.quota import check_quota, record_bandwidth_bytes
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -50,7 +55,14 @@ async def get_client_manifest(
 
     account = None
     if tenant_id and tenant_id != "default":
+        if not await check_quota(tenant_id, "max_bandwidth_mb", db):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Account bandwidth quota (max_bandwidth_mb) exceeded",
+            )
         account = (
+            await get_cached_account(slug) if slug and slug != "Unknown" else None
+        ) or (
             await db.execute(select(Account).where(Account.id == tenant_id))
         ).scalar_one_or_none()
     org_name = account.name if account and account.name else "MINI ClassIsland Server"
@@ -58,18 +70,14 @@ async def get_client_manifest(
     # Ensure default resources exist for this tenant
     await seed_account_defaults(tenant_id, db)
 
-    # Resolve client-specific profile, falling back to account '__default__' profile
+    # Resolve client-specific profile and account '__default__' fallback in a single query
     stmt = select(ClientProfile).where(
         ClientProfile.account_id == tenant_id,
-        ClientProfile.client_id == client_uid,
+        ClientProfile.client_id.in_([client_uid, "__default__"]),
     )
-    p = (await db.execute(stmt)).scalar_one_or_none()
-    if p is None:
-        stmt_def = select(ClientProfile).where(
-            ClientProfile.account_id == tenant_id,
-            ClientProfile.client_id == "__default__",
-        )
-        p = (await db.execute(stmt_def)).scalar_one_or_none() or ClientProfile()
+    prof_rows = (await db.execute(stmt)).scalars().all()
+    prof_map = {row.client_id: row for row in prof_rows}
+    p = prof_map.get(client_uid) or prof_map.get("__default__") or ClientProfile()
 
     cp = p.class_plan if p.class_plan is not None else "default"
     tl = p.time_layout if p.time_layout is not None else "default"
@@ -95,25 +103,24 @@ async def get_client_manifest(
             sources[rt] = {"Value": "", "Version": 0}
             continue
         model = MODEL_MAP[rt]
-        rec = (
-            (
-                await db.execute(
-                    select(model).where(
-                        model.account_id == tenant_id,
-                        model.name == res_name,
-                    )
+        ver_val = (
+            await db.execute(
+                select(model.version)
+                .where(
+                    model.account_id == tenant_id,
+                    model.name == res_name,
                 )
+                .limit(1)
             )
-            .scalars()
-            .first()
-        )
-        if not rec:
+        ).scalar_one_or_none()
+        if ver_val is None:
             sources[rt] = {"Value": "", "Version": 0}
         else:
             url = request.url_for("get_client_resource", resource_type=rt)
             full_url = str(url.include_query_params(name=res_name))
-            sources[rt] = {"Value": full_url, "Version": max(1, int(rec.version or 1))}
+            sources[rt] = {"Value": full_url, "Version": max(1, int(ver_val or 1))}
 
+    record_bandwidth_bytes(tenant_id, 1024)
     return ClientManifest(
         ClassPlanSource=sources["ClassPlan"],
         TimeLayoutSource=sources["TimeLayout"],

@@ -57,9 +57,9 @@ SLUG_RE = re.compile(r"^[a-z0-9\-]{3,64}$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[a-z0-9_\-]+$")
 
 DEFAULT_QUOTAS = [
-    ("max_clients", 50),
-    ("max_grpc_connections", 50),
-    ("max_bandwidth_mb", 1024),
+    ("max_clients", 6),
+    ("max_grpc_connections", 4),
+    ("max_bandwidth_mb", 100),
     ("feature.ota", 1),
     ("feature.audit", 1),
 ]

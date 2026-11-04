@@ -874,6 +874,28 @@ async def run_comprehensive_e2e_suite() -> None:
                 )
                 assert r_def.status_code == 200, r_def.text
 
+                # Verify new default quotas (max_clients=6, max_grpc_connections=4, max_bandwidth_mb=100)
+                r_q = await mgmt.get(f"/account/{acct_id}/quota", headers=owner_hdr)
+                assert r_q.status_code == 200, r_q.text
+                q_defaults = {
+                    item["quota_key"]: item["max_value"] for item in r_q.json()
+                }
+                assert (
+                    q_defaults.get("max_clients") == 6
+                ), f"Expected 6, got {q_defaults}"
+                assert (
+                    q_defaults.get("max_grpc_connections") == 4
+                ), f"Expected 4, got {q_defaults}"
+                assert (
+                    q_defaults.get("max_bandwidth_mb") == 100
+                ), f"Expected 100, got {q_defaults}"
+
+                # Elevate quotas for the 200-client matrix stress test (~17 clients per account)
+                async with AsyncSessionLocal() as db:
+                    await set_quota(acct_id, "max_clients", 50, db)
+                    await set_quota(acct_id, "max_grpc_connections", 50, db)
+                    await set_quota(acct_id, "max_bandwidth_mb", 1024, db)
+
             await asyncio.gather(
                 *(_seed_account_clusters(a_idx) for a_idx in range(num_accounts))
             )
@@ -1480,11 +1502,24 @@ async def run_comprehensive_e2e_suite() -> None:
             )
             assert aud_blocked_ret == Retcode_pb2.InvalidRequest
 
+            # 4) Test max_bandwidth_mb = 0 blocks client manifest & resource downloads with HTTP 429
+            async with AsyncSessionLocal() as db:
+                await set_quota(acct0_id, "max_bandwidth_mb", 0, db)
+            r_bw_blocked = await client_http.get(
+                f"http://127.0.0.1:{client_port}/api/v1/client/{acct0_clients[0].client_uid}/manifest",
+                headers={"Host": f"{account_slugs[0]}.miniclassisland.com"},
+            )
+            assert (
+                r_bw_blocked.status_code == 429
+            ), f"Expected 429 on bandwidth quota exceeded, got {r_bw_blocked.status_code}"
+            async with AsyncSessionLocal() as db:
+                await set_quota(acct0_id, "max_bandwidth_mb", 100, db)
+
             print(
-                f"  ✅ Dual device quotas (max_clients={len(acct0_clients)}, max_grpc_connections=2) & feature.audit verified in {time.perf_counter() - t_phase_q:.2f}s"
+                f"  ✅ Default quotas (6/4/100MB) & live enforcement (max_clients={len(acct0_clients)}, max_grpc_connections=2, max_bandwidth_mb, feature.audit) verified in {time.perf_counter() - t_phase_q:.2f}s"
             )
 
-            # 4) Compute & Print Per-Device Real-World Traffic / Bandwidth Overhead Estimation
+            # 5) Compute & Print Per-Device & 4000/10000-Device Real-World Traffic / Bandwidth Overhead Estimation
             total_tx_grpc = sum(vc.bytes_tx_grpc for vc in virtual_clients)
             total_rx_grpc = sum(vc.bytes_rx_grpc for vc in virtual_clients)
             total_tx_http = sum(vc.bytes_tx_http for vc in virtual_clients)
@@ -1504,58 +1539,55 @@ async def run_comprehensive_e2e_suite() -> None:
             ) / len(virtual_clients)
             avg_cold_start = avg_reg_bytes + avg_hs_bytes + avg_sync_bytes
 
-            # Upstream ClassIsland sends Ping every 60s (or 30s) in steady state; each Ping+Pong HTTP/2 frame pair is ~72 bytes (L7) / ~140 bytes (with TCP/TLS/IP)
-            heartbeat_pair_bytes = 140  # L3/L4/TLS + HTTP/2 DATA frame for Ping + Pong
-            # Scenario A: Standard production heartbeat (1 Ping/Pong per 30s = 2 per min) + 2 full profile syncs/day + 10 push/audit events/day
-            steady_bps_30s = (heartbeat_pair_bytes / 30.0) * 8.0
-            hourly_kb_30s = (heartbeat_pair_bytes * 120) / 1024.0
+            # Upstream ClassIsland (ManagementServerConnection.cs:66) sends Ping every 10s!
+            # Wire-level (L2-L7 Ethernet/IP/TCP/TLS1.3/HTTP2) Ping+Pong pair is ~400 bytes bidirectional (~220 bytes Server TX).
+            wire_hb_bi_bytes = 400
+            wire_hb_tx_bytes = 220
+            steady_bi_bps_10s = (wire_hb_bi_bytes / 10.0) * 8.0  # ~320 bps
+            steady_tx_bps_10s = (wire_hb_tx_bytes / 10.0) * 8.0  # ~176 bps
+            hourly_wire_kb_10s = (wire_hb_bi_bytes * 360) / 1024.0  # ~140.6 KB/h
             daily_8h_kb = (
-                avg_cold_start + (heartbeat_pair_bytes * 120 * 8) + avg_sync_bytes * 2
+                (avg_cold_start * 1.35)
+                + (wire_hb_bi_bytes * 360 * 8)
+                + (avg_sync_bytes * 2)
             ) / 1024.0
             daily_24h_kb = (
-                avg_cold_start + (heartbeat_pair_bytes * 120 * 24) + avg_sync_bytes * 4
+                (avg_cold_start * 1.35)
+                + (wire_hb_bi_bytes * 360 * 24)
+                + (avg_sync_bytes * 4)
             ) / 1024.0
             monthly_22d_mb = (daily_8h_kb * 22) / 1024.0
             monthly_24x7_mb = (daily_24h_kb * 30) / 1024.0
 
-            print("\n" + "-" * 84)
+            print("\n" + "-" * 88)
             print(
-                "📊 PER-DEVICE & 200-DEVICE REAL-WORLD TRAFFIC / BANDWIDTH OVERHEAD REPORT"
+                "📊 PER-DEVICE & 4,000 / 10,000-DEVICE WIRE-LEVEL TRAFFIC & BANDWIDTH OVERHEAD REPORT"
             )
-            print("-" * 84)
+            print("-" * 88)
             print(
-                f"  • Measured Total Traffic in This 200-Client Suite : {total_all_bytes / 1024:.1f} KB "
+                f"  • Measured L7 Payload in This 200-Client Suite    : {total_all_bytes / 1024:.1f} KB "
                 f"(gRPC TX: {total_tx_grpc / 1024:.1f} KB, gRPC RX: {total_rx_grpc / 1024:.1f} KB, "
                 f"HTTP TX: {total_tx_http / 1024:.1f} KB, HTTP RX: {total_rx_http / 1024:.1f} KB)"
             )
             print(
-                f"  • Single Device Cold Start (Register + PGP Handshake + Manifest + 7 JSONs): ~{avg_cold_start / 1024:.2f} KB"
+                f"  • Single Device Cold Start (L7 Payload / Wire TLS): ~{avg_cold_start / 1024:.2f} KB (L7) / ~{(avg_cold_start * 1.35) / 1024:.2f} KB (Wire)"
             )
             print(
-                f"      ├─ gRPC Register (incl. RSA-2048 ServerPublicKey) : ~{avg_reg_bytes / 1024:.2f} KB"
+                f"  • Single Device Steady Heartbeat (10s interval)   : ~{steady_tx_bps_10s:.0f} bps Server TX (~{steady_bi_bps_10s:.0f} bps Bi-Dir, ~{hourly_wire_kb_10s:.1f} KB/h)"
             )
             print(
-                f"      ├─ gRPC OpenPGP Challenge-Response Handshake      : ~{avg_hs_bytes / 1024:.2f} KB"
+                f"  • Single Device School-Day Traffic (8h/day, 10s)  : ~{daily_8h_kb:.1f} KB / day (~{monthly_22d_mb:.2f} MB / 22-day month)"
             )
             print(
-                f"      └─ HTTP Manifest + 7 Profile JSON Resources Sync  : ~{avg_sync_bytes / 1024:.2f} KB"
+                f"  • Single Device 24x7 Always-On Traffic (10s)      : ~{daily_24h_kb:.1f} KB / day (~{monthly_24x7_mb:.2f} MB / 30-day month)"
             )
             print(
-                f"  • Single Device Steady-State gRPC Stream Heartbeat: ~{steady_bps_30s:.1f} bps (~{hourly_kb_30s:.2f} KB / hour)"
+                f"  • 4,000 Devices Steady-State Bandwidth (on 20Mbps): ~{(steady_tx_bps_10s * 4000) / 1_000_000:.2f} Mbps Server TX (~{(steady_bi_bps_10s * 4000) / 1_000_000:.2f} Mbps Bi-Dir)"
             )
             print(
-                f"  • Single Device School-Day Traffic (8h online/day): ~{daily_8h_kb:.1f} KB / day (~{monthly_22d_mb:.2f} MB / 22-day month)"
+                f"  • 10,000 Devices Steady-State Bandwidth           : ~{(steady_tx_bps_10s * 10000) / 1_000_000:.2f} Mbps Server TX (~{(steady_bi_bps_10s * 10000) / 1_000_000:.2f} Mbps Bi-Dir)"
             )
-            print(
-                f"  • Single Device 24x7 Always-On Traffic            : ~{daily_24h_kb:.1f} KB / day (~{monthly_24x7_mb:.2f} MB / 30-day month)"
-            )
-            print(
-                f"  • 200 Devices Concurrent Steady-State Bandwidth   : ~{(steady_bps_30s * 200) / 1000:.2f} kbps (~{(monthly_22d_mb * 200):.1f} MB / month total)"
-            )
-            print(
-                f"  • 200 Devices Simultaneous Cold-Start Peak Burst  : ~{(avg_cold_start * 200) / (1024 * 1024):.2f} MB total payload"
-            )
-            print("-" * 84)
+            print("-" * 88)
 
     finally:
         # ------------------------------------------------------------------

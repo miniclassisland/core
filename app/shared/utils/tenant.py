@@ -127,15 +127,24 @@ async def invalidate_cached_account(slug: str) -> None:
         pass
 
 
-async def resolve_account(slug: str, db: AsyncSession) -> Optional[Account]:
-    """Resolve active tenant entity via cache or database."""
+async def resolve_account(
+    slug: str, db: Optional[AsyncSession] = None
+) -> Optional[Account]:
+    """Resolve active tenant entity via cache or database (acquiring DB session only on cache miss)."""
     account = await get_cached_account(slug)
     if account is not None:
         return account if account.is_active else None
 
     stmt = select(Account).where(Account.slug == slug)
-    result = await db.execute(stmt)
-    account = result.scalar_one_or_none()
+    if db is not None:
+        result = await db.execute(stmt)
+        account = result.scalar_one_or_none()
+    else:
+        from app.shared.db.session import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(stmt)
+            account = result.scalar_one_or_none()
 
     if account and account.is_active:
         await set_cached_account(slug, account)

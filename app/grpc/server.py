@@ -37,7 +37,7 @@ from app.shared.utils.logging import get_client_ip_from_grpc
 from app.shared.utils.audit import decode_audit_payload_json
 from app.shared.security.middlewares import get_cc_state
 from app.shared.services.pairing import check_approved, create_pairing_request
-from app.shared.services.quota import check_quota
+from app.shared.services.quota import check_quota, record_bandwidth_bytes
 
 # Protobuf package imports
 from app.Protobuf.Service import (
@@ -75,8 +75,17 @@ _AUTH_EXEMPT = {
 _CC_BLOCK_METHODS = {"Register", "BeginHandshake", "CompleteHandshake"}
 _QUEUE_MAXSIZE = 256
 _MIN_PING_INTERVAL = 1.0
+_REDIS_HB_SYNC_INTERVAL = 20.0
 _STREAM_IDLE_TIMEOUT = 120
 _PAIRING_KEY = "pairing_enabled"
+_GRPC_SERVER_OPTIONS = [
+    ("grpc.max_concurrent_streams", 2048),
+    ("grpc.keepalive_time_ms", 30000),
+    ("grpc.keepalive_timeout_ms", 10000),
+    ("grpc.keepalive_permit_without_calls", 1),
+    ("grpc.http2.max_pings_without_data", 0),
+    ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+]
 
 
 # ---- Helper Functions ----
@@ -131,8 +140,7 @@ class TenantInterceptor(grpc.aio.ServerInterceptor):
 
         tenant_id = None
         if slug:
-            async with AsyncSessionLocal() as db:
-                account = await resolve_account(slug, db)
+            account = await resolve_account(slug)
             if account:
                 tenant_id = account.id
 
@@ -253,7 +261,9 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                 Retcode=Retcode_pb2.InvalidRequest
             )
 
-        decrypted = self._sm.decrypt_challenge(request.ChallengeTokenEncrypted)
+        decrypted = await asyncio.to_thread(
+            self._sm.decrypt_challenge, request.ChallengeTokenEncrypted
+        )
         if decrypted is None:
             return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
                 Retcode=Retcode_pb2.ServerInternalError
@@ -262,6 +272,7 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
         effective_tid = tid or (
             client.account_id if client.account_id != "default" else ""
         )
+        record_bandwidth_bytes(effective_tid, 2400)
         await self._sm.store_pending_handshake(effective_tid, cuid, decrypted)
         return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
             Retcode=Retcode_pb2.Success,
@@ -589,16 +600,20 @@ class ClientCommandDeliverServicer(
         )
 
         last_ping = 0.0
+        last_redis_hb = 0.0
 
         async def read_task():
-            nonlocal last_ping
+            nonlocal last_ping, last_redis_hb
             async for req in request_iterator:
                 if req.Type == CommandTypes_pb2.Ping:
                     now = time.monotonic()
                     if now - last_ping < _MIN_PING_INTERVAL:
                         continue
                     last_ping = now
-                    await self._sm.update_heartbeat(tid, real_cuid)
+                    if now - last_redis_hb >= _REDIS_HB_SYNC_INTERVAL:
+                        last_redis_hb = now
+                        await self._sm.update_heartbeat(tid, real_cuid)
+                    record_bandwidth_bytes(tid, 160)
                     pong = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
                         RetCode=Retcode_pb2.Success, Type=CommandTypes_pb2.Pong
                     )
@@ -793,7 +808,10 @@ async def serve_grpc(interceptors=None):
     mgr = SessionManager()
 
     final_interceptors = interceptors or [TenantInterceptor(mgr)]
-    srv = grpc.aio.server(interceptors=final_interceptors)
+    srv = grpc.aio.server(
+        interceptors=final_interceptors,
+        options=_GRPC_SERVER_OPTIONS,
+    )
 
     # Attach all Servicers
     Handshake_pb2_grpc.add_HandshakeServicer_to_server(HandshakeServicer(mgr), srv)

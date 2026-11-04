@@ -9,6 +9,7 @@ from app.shared.literals import DEFAULT_RESOURCES
 from app.shared.utils.tenant import set_search_path
 from app.shared.security.auth import resolve_token
 from app.shared.security.crypto import normalize_resource_payload
+from app.shared.services.quota import check_quota, record_bandwidth_bytes
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,6 +34,13 @@ async def get_resource_by_token(token: str, request: Request):
     effective_tid = tenant_id or "default"
     async with AsyncSessionLocal() as db:
         await set_search_path(db)
+        if effective_tid != "default" and not await check_quota(
+            effective_tid, "max_bandwidth_mb", db
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Account bandwidth quota (max_bandwidth_mb) exceeded",
+            )
         row = (
             await db.execute(
                 select(model).where(
@@ -58,7 +66,9 @@ async def get_resource_by_token(token: str, request: Request):
     if row is None:
         fallback = DEFAULT_RESOURCES.get(resource_type, {}).get(name)
         if fallback is not None:
-            return normalize_resource_payload(resource_type, fallback)
+            norm_fb = normalize_resource_payload(resource_type, fallback)
+            record_bandwidth_bytes(effective_tid, 1024)
+            return norm_fb
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found"
         )
@@ -70,4 +80,5 @@ async def get_resource_by_token(token: str, request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Corrupted resource content",
         )
+    record_bandwidth_bytes(effective_tid, len(row.content.encode("utf-8")) + 256)
     return normalize_resource_payload(resource_type, parsed)

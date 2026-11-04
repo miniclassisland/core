@@ -57,7 +57,7 @@ from app.shared.services.user import (
     validate_slug_format,
     is_name_reserved,
 )
-from app.shared.services.quota import get_quotas, set_quota
+from app.shared.services.quota import get_quotas, set_quota, get_bandwidth_mb
 from app.shared.schemas.schemas import QuotaOut, QuotaSetRequest
 from app.shared.literals import AUDIT_EVENT_NAMES, CONFIG_TYPE_NAMES, DEFAULT_RESOURCES
 from app.shared.runtime import get_session_manager, get_command_servicer
@@ -297,6 +297,8 @@ async def get_account_quotas_mgmt(
             cur = client_count
         elif r.quota_key == "max_grpc_connections":
             cur = grpc_conn_count
+        elif r.quota_key == "max_bandwidth_mb":
+            cur = get_bandwidth_mb(account_id, r.current_value)
         else:
             cur = r.current_value
         out.append(
