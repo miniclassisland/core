@@ -4,6 +4,7 @@ Manages multi-tenant state across asynchronous call chains via ContextVar, provi
 """
 
 import json
+import time
 from contextvars import ContextVar
 from typing import Optional
 from sqlalchemy import select
@@ -26,6 +27,9 @@ tenant_ctx: ContextVar[str] = ContextVar(TENANT_ID_KEY)
 schema_ctx: ContextVar[str] = ContextVar(SCHEMA_KEY, default=PUBLIC_SCHEMA)
 
 ACCOUNT_CACHE_TTL = 600
+_LOCAL_ACCOUNT_CACHE: dict[str, tuple[float, Account]] = {}
+_LOCAL_ACCOUNT_TTL = 30.0
+_MAX_LOCAL_ACCOUNT_CACHE = 4096
 
 
 def safe_identifier(name: str) -> str:
@@ -76,14 +80,18 @@ def extract_slug_from_host(host: str) -> Optional[str]:
 
 
 async def get_cached_account(slug: str) -> Optional[Account]:
-    """Retrieve and reconstruct lightweight Account entity from Redis cache."""
+    """Retrieve and reconstruct lightweight Account entity from L1 memory or Redis cache."""
+    now = time.monotonic()
+    hit = _LOCAL_ACCOUNT_CACHE.get(slug)
+    if hit is not None and now < hit[0]:
+        return hit[1]
     try:
         rd = get_redis(REDIS_DB_CACHE)
         cached = await rd.get(f"account:{slug}")
         if not cached:
             return None
         data = json.loads(cached)
-        return Account(
+        acct = Account(
             id=data["id"],
             name=data["name"],
             slug=data["slug"],
@@ -91,12 +99,29 @@ async def get_cached_account(slug: str) -> Optional[Account]:
             is_active=data["is_active"],
             registration_mode=data.get("registration_mode", "open"),
         )
+        if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:  # pragma: no cover
+            _LOCAL_ACCOUNT_CACHE.clear()
+        _LOCAL_ACCOUNT_CACHE[slug] = (now + _LOCAL_ACCOUNT_TTL, acct)
+        return acct
     except Exception:
         return None
 
 
 async def set_cached_account(slug: str, account: Account) -> None:
-    """Serialize and cache tenant account record into Redis."""
+    """Serialize and cache tenant account record into L1 memory and Redis."""
+    if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:  # pragma: no cover
+        _LOCAL_ACCOUNT_CACHE.clear()
+    _LOCAL_ACCOUNT_CACHE[slug] = (
+        time.monotonic() + _LOCAL_ACCOUNT_TTL,
+        Account(
+            id=account.id,
+            name=account.name,
+            slug=account.slug,
+            api_key=account.api_key,
+            is_active=account.is_active,
+            registration_mode=getattr(account, "registration_mode", "open") or "open",
+        ),
+    )
     try:
         rd = get_redis(REDIS_DB_CACHE)
         await rd.set(
@@ -119,7 +144,8 @@ async def set_cached_account(slug: str, account: Account) -> None:
 
 
 async def invalidate_cached_account(slug: str) -> None:
-    """Invalidate cached tenant account record in Redis."""
+    """Invalidate cached tenant account record in L1 memory and Redis."""
+    _LOCAL_ACCOUNT_CACHE.pop(slug, None)
     try:
         rd = get_redis(REDIS_DB_CACHE)
         await rd.delete(f"account:{slug}")

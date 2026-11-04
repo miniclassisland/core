@@ -1,6 +1,10 @@
+import asyncio
 import sys
 import os
 import pytest_asyncio
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Force tests to use dedicated test database miniclassisland_test to protect runtime database
 TEST_DB_URL = os.getenv(
@@ -42,11 +46,13 @@ async def db_cleaner():
     global _schema_reset_done
     from app.shared.db.models import Base
     from app.shared.security import crypto, middlewares
+    from app.client import get as client_get
     from sqlalchemy import text
 
     crypto.get_ip_failures_dict().clear()
     crypto.get_global_requests().clear()
     crypto.set_cc_state(False)
+    client_get._NORMALIZED_RESOURCE_CACHE.clear()
     middlewares.IP_FAILURE_LIMIT = 100000
     middlewares.GLOBAL_CC_LIMIT = 100000
 

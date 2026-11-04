@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 import click
 import typer
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import (
@@ -15,12 +15,12 @@ from app.shared.db.models import (
     AccountMember,
     AccountQuota,
     ClientRecord,
-    PreRegisteredClient,
     User,
 )
 from app.shared.db.schema_init import seed_account_defaults
 from app.shared.literals import DEFAULT_QUOTAS
 from app.shared.services.quota import get_bandwidth_mb, get_quotas, set_quota
+from app.shared.services.user import cleanup_account_data
 from app.shared.utils.config import BASE_DOMAIN
 from app.shared.utils.tenant import invalidate_cached_account
 
@@ -162,18 +162,7 @@ def delete_account_cmd(
             if not acct:
                 print(f"❌ Account {slug} does not exist")
                 return
-            await invalidate_cached_account(acct.slug)
-            await db.execute(
-                delete(AccountMember).where(AccountMember.account_id == acct.id)
-            )
-            await db.execute(
-                delete(AccountQuota).where(AccountQuota.account_id == acct.id)
-            )
-            await db.execute(
-                delete(PreRegisteredClient).where(
-                    PreRegisteredClient.account_id == acct.id
-                )
-            )
+            await cleanup_account_data(acct.id, acct.slug, db)
             await db.delete(acct)
             await db.commit()
             print(f"✅ Account {slug} deleted")

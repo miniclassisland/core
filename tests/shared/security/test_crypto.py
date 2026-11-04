@@ -4,13 +4,17 @@ import pytest
 from app.shared.security import crypto
 
 
-def test_password_hashing():
-    """Test Argon2id password hashing and verification."""
+@pytest.mark.asyncio
+async def test_password_hashing():
+    """Test Argon2id password hashing and verification (sync and async worker thread)."""
     pwd = "MySecretPassword123!"
     h = crypto.hash_password(pwd)
     assert h != pwd
     assert crypto.verify_password(pwd, h) is True
     assert crypto.verify_password("WrongPassword", h) is False
+    h_async = await crypto.hash_password_async(pwd)
+    assert await crypto.verify_password_async(pwd, h_async) is True
+    assert await crypto.verify_password_async("WrongPassword", h_async) is False
 
 
 def test_classisland_credential_encoding():
@@ -108,8 +112,11 @@ def test_resource_payload_normalization():
     ) == {"AllowExitManagement": True}
 
 
-def test_totp_lifecycle():
-    """Test TOTP secret generation, URI, and verification."""
+@pytest.mark.asyncio
+async def test_totp_lifecycle():
+    """Test TOTP secret generation, URI, verification, and replay protection."""
+    import pyotp
+
     secret = crypto.generate_totp_secret()
     assert len(secret) >= 16
     uri = crypto.get_totp_uri(secret, "user@school.com")
@@ -120,6 +127,10 @@ def test_totp_lifecycle():
     )
     assert "user" in uri
     assert crypto.verify_totp(secret, "000000") is False
+    assert await crypto.verify_totp_once("u-totp-1", secret, "000000") is False
+    code = pyotp.TOTP(secret).now()
+    assert await crypto.verify_totp_once("u-totp-1", secret, code) is True
+    assert await crypto.verify_totp_once("u-totp-1", secret, code) is False
 
 
 @pytest.mark.asyncio
@@ -137,6 +148,8 @@ async def test_recovery_codes():
     assert await crypto.get_remaining_recovery_count(user_id) == 2
     assert await crypto.use_recovery_code(user_id, "code1") is False
     assert await crypto.use_recovery_code(user_id, "INVALID") is False
+    await crypto.delete_recovery_codes(user_id)
+    assert await crypto.get_remaining_recovery_count(user_id) == 0
 
 
 def test_cc_protection_state():

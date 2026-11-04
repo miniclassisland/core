@@ -79,14 +79,18 @@ async def test_resolve_account():
         assert acc is not None
         assert acc.slug == "test-school"
 
-        # 命中缓存
+        # 命中缓存（含 L1 缓存与清理 L1 后命中 Redis 缓存）
         acc_cached = await tenant.resolve_account("test-school", db)
         assert acc_cached is not None
+        tenant._LOCAL_ACCOUNT_CACHE.clear()
+        acc_redis_cached = await tenant.resolve_account("test-school", db)
+        assert acc_redis_cached is not None
 
         not_exist = await tenant.resolve_account("non-existent", db)
         assert not_exist is None
 
         # 测试 Redis 异常容错分支
+        tenant._LOCAL_ACCOUNT_CACHE.clear()
         bad_redis = MagicMock()
         bad_redis.get.side_effect = RuntimeError("redis down")
         bad_redis.set.side_effect = RuntimeError("redis down")

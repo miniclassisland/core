@@ -101,6 +101,14 @@ async def test_session_manager_flows():
         assert await sm.validate_session(sid) == cuid
         assert await sm.get_session_tenant(sid) == tenant_id
 
+        # 测试 L1 缓存未命中时回退到 Redis 读取
+        from app.grpc import session as session_mod
+
+        session_mod._LOCAL_SESSION_CACHE.clear()
+        assert await sm.get_session_tenant(sid) == tenant_id
+        session_mod._LOCAL_SESSION_CACHE.clear()
+        assert await sm.validate_session(sid) == cuid
+
         assert await sm.validate_session("non-existent-sid") is None
         assert await sm.get_session_tenant("non-existent-sid") is None
         assert await sm.validate_session("") is None
@@ -125,8 +133,23 @@ async def test_session_manager_flows():
         status_list = await sm.get_all_clients_status(tenant_id)
         assert any(s["uid"] == cuid for s in status_list)
 
+        # 测试 online_set 中存在已过期成员时的自动清理与 fallback scan 分支
+        from app.shared.utils.redis import get_redis
+        from app.shared.utils.config import REDIS_DB_SESSION
+
+        rd = get_redis(REDIS_DB_SESSION)
+        await rd.sadd(f"online_set:{tenant_id}", "expired-cuid")
+        status_list_clean = await sm.get_all_clients_status(tenant_id)
+        assert all(s["uid"] != "expired-cuid" for s in status_list_clean)
+
+        await sm.set_client_online("", "notid-cuid", ip="127.0.0.1")
+        status_empty_tid = await sm.get_all_clients_status("")
+        assert any(s["uid"] == "notid-cuid" for s in status_empty_tid)
+        await sm.set_client_offline("", "notid-cuid")
+
         await sm.set_client_offline(tenant_id, cuid)
         assert await sm.is_client_online(tenant_id, cuid) is False
+        assert await sm.get_all_clients_status("never-used-tenant-id") == []
     finally:
         if os.path.exists(key_file):
             os.remove(key_file)

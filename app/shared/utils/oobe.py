@@ -355,9 +355,8 @@ async def init_database(config: dict) -> None:
     db_session.AsyncSessionLocal.configure(bind=new_engine)
 
     async with new_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    logger.info("Database tables re-created")
+    logger.info("Database tables ensured")
 
     await _init_system_config(config)
     await _init_default_data(config)
@@ -379,7 +378,7 @@ async def _init_system_config(config: dict) -> None:
     ]
     async with AsyncSessionLocal() as db:
         for key, val in entries:
-            db.add(SystemConfig(key=key, value=val, updated_at=now))
+            await db.merge(SystemConfig(key=key, value=val, updated_at=now))
         await db.commit()
 
 
@@ -392,7 +391,15 @@ async def _init_default_data(config: dict) -> None:
 
 
 async def _create_superadmin(config: dict, db) -> None:
-    """Create super administrator user and default account."""
+    """Create super administrator user and default account if not already present."""
+    from sqlalchemy import select
+
+    existing_u = (
+        await db.execute(select(User).where(User.username == config["username"]))
+    ).scalar_one_or_none()
+    if existing_u:
+        return
+
     now = datetime.now(timezone.utc)
     user = User(
         id=str(uuid.uuid4()),
@@ -448,24 +455,33 @@ async def _create_superadmin(config: dict, db) -> None:
 async def _init_reserved_names(db) -> None:
     """Initialize reserved name registry."""
     for name in RESERVED_NAMES:
-        db.add(ReservedName(name=name, reason="System Reserved"))
+        await db.merge(ReservedName(name=name, reason="System Reserved"))
     await db.commit()
 
 
 def generate_systemd_service() -> None:
     """Generate miniclassisland-backend.service file and attempt systemd installation."""
     import os
+    import re
     import subprocess
     import sys
 
     work_dir = str(Path(__file__).resolve().parents[3])
+    work_dir = work_dir.replace("\n", "").replace("\r", "")
     venv_python = Path(work_dir) / ".venv" / "bin" / "python"
     if venv_python.exists():
         exec_start = f"{venv_python} -m app.main sys daemon"
     else:
         exec_start = f"{sys.executable} -m app.main sys daemon"
 
-    user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "root"
+    raw_user = (
+        os.environ.get("SUDO_USER") or os.environ.get("USER") or "miniclassisland"
+    )
+    user = (
+        raw_user
+        if (raw_user != "root" and re.match(r"^[a-z_][a-z0-9_-]{0,31}$", raw_user))
+        else "miniclassisland"
+    )
 
     service_content = f"""[Unit]
 Description=MINI ClassIsland Backend Server
@@ -481,6 +497,10 @@ WorkingDirectory={work_dir}
 ExecStart={exec_start}
 Restart=on-failure
 RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=miniclassisland-backend

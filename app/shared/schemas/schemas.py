@@ -68,10 +68,12 @@ class UserRegisterRequest(BaseModel):
     @field_validator("username")
     @classmethod
     def _check_username(cls, v: Optional[str]) -> Optional[str]:
-        if v is not None and not _USERNAME_RE.match(v):
-            raise ValueError(
-                "Username must be 3-64 characters, starting with a letter, and containing only letters, numbers, and underscores"
-            )
+        if v is not None:
+            v = v.strip().lower()
+            if not _USERNAME_RE.match(v):
+                raise ValueError(
+                    "Username must be 3-64 lowercase alphanumeric characters and underscores"
+                )
         return v
 
 
@@ -128,6 +130,7 @@ class AccountCreate(BaseModel):
 class AccountUpdate(BaseModel):
     """Update tenant account request schema."""
 
+    new_id: Optional[str] = Field(default=None, min_length=3, max_length=64)
     name: Optional[str] = Field(default=None, max_length=128)
     slug: Optional[str] = Field(default=None, min_length=3, max_length=64)
     is_active: Optional[bool] = None
@@ -139,6 +142,12 @@ class AccountUpdate(BaseModel):
         if v is not None and not _SLUG_RE.match(v):
             raise ValueError("Slug format invalid")
         return v
+
+
+class AccountIdUpdate(BaseModel):
+    """Update tenant account ID request schema."""
+
+    new_id: str = Field(..., min_length=3, max_length=64)
 
 
 class AccountOut(BaseModel):
@@ -202,6 +211,7 @@ class BatchRequest(BaseModel):
     """Batch operation collection request."""
 
     operations: List[BatchOperation] = Field(..., max_length=100)
+    target_account_id: Optional[str] = Field(default=None, max_length=64)
 
 
 # ---- 6. Physical Client & Configuration Manifest ----
@@ -425,12 +435,22 @@ class PasswordReset(BaseModel):
 
     new_password: str = Field(..., min_length=12, max_length=128)
 
+    @field_validator("new_password")
+    @classmethod
+    def _check_new_password(cls, v: str) -> str:
+        return UserRegisterRequest._check_password(v)
+
 
 class PasswordChange(BaseModel):
     """Change password request schema."""
 
     old_password: str = Field(..., max_length=128)
     new_password: str = Field(..., min_length=12, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def _check_new_password(cls, v: str) -> str:
+        return UserRegisterRequest._check_password(v)
 
 
 class SlugUpdate(BaseModel):
@@ -443,3 +463,4 @@ class AccountNameUpdate(BaseModel):
     """Update tenant account name request schema."""
 
     name: str = Field(..., min_length=1, max_length=128)
+    registration_mode: Optional[str] = Field(default=None, max_length=32)

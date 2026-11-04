@@ -39,6 +39,11 @@ def get_mock_context(metadata: list | None = None, peer: str = "ipv4:127.0.0.1:1
     return ctx
 
 
+async def _empty_req_iter():
+    if False:  # pragma: no cover
+        yield None
+
+
 @pytest.mark.asyncio
 async def test_tenant_interceptor_all_branches(test_superadmin_user):
     """测试 gRPC 拦截器的白名单、CC 防御、租户解析及 4 种 RPC handler 包装分支。"""
@@ -362,6 +367,24 @@ async def test_client_register_servicer_all_modes():
         )
         assert res_quota_deny.Retcode == Retcode_pb2.InvalidRequest
         assert "max_clients" in res_quota_deny.Message
+
+        # 3c. Cross-tenant ClientUid hijacking rejected -> InvalidRequest
+        async with AsyncSessionLocal() as db:
+            db.add(
+                ClientRecord(
+                    uid="other-tenant-uid",
+                    account_id="another-account-id",
+                    registered_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+        res_cross_uid = await servicer.Register(
+            ClientRegisterCsReq_pb2.ClientRegisterCsReq(
+                ClientUid="other-tenant-uid", ClientId="Room-101", ClientMac="AA-11-22"
+            ),
+            ctx,
+        )
+        assert res_cross_uid.Retcode == Retcode_pb2.InvalidRequest
     finally:
         server.tenant_ctx.reset(tok)
 
@@ -402,6 +425,26 @@ async def test_client_register_servicer_all_modes():
     res_ok = await servicer.Register(req, ctx)
     assert res_ok.Retcode == Retcode_pb2.Registered
 
+    # 4b. 已完成配对注册的同一硬件设备重复调用 Register 免重复配对 -> Registered
+    res_re_ok = await servicer.Register(req, ctx)
+    assert res_re_ok.Retcode == Retcode_pb2.Registered
+
+    # 4c. 攻击者使用不同 MAC 尝试接管已注册设备的 ClientUid -> InvalidRequest
+    req_bad_mac = ClientRegisterCsReq_pb2.ClientRegisterCsReq(
+        ClientUid="new-client-uid-pairing",
+        ClientId="c2",
+        ClientMac="FF-FF-FF-FF-FF-FF",
+    )
+    res_bad_mac = await servicer.Register(req_bad_mac, ctx)
+    assert res_bad_mac.Retcode == Retcode_pb2.InvalidRequest
+    assert "MAC" in res_bad_mac.Message
+
+    # 4d. _REGISTER_LOCKS 超上限时自动清理未加锁条目
+    with patch.object(server, "_MAX_REGISTER_LOCKS", 0):
+        server._REGISTER_LOCKS["stale-tenant-lock"] = asyncio.Lock()
+        res_evict = await servicer.Register(req, ctx)
+        assert res_evict.Retcode == Retcode_pb2.Registered
+
 
 @pytest.mark.asyncio
 async def test_client_register_servicer_unregister():
@@ -431,6 +474,19 @@ async def test_client_register_servicer_unregister():
 
     sid = await sm.create_session("acct-unreg", "unreg-client-uid")
     ctx_ok = get_mock_context(metadata=[("session", sid)])
+
+    # 2a. 租户不匹配时拒绝解绑 (lines 533-537)
+    sid_wrong_tid = await sm.create_session("other-tenant-id", "unreg-client-uid")
+    ctx_wrong_tid = get_mock_context(metadata=[("session", sid_wrong_tid)])
+    await servicer.UnRegister(
+        ClientRegisterCsReq_pb2.ClientRegisterCsReq(ClientUid="unreg-client-uid"),
+        ctx_wrong_tid,
+    )
+    ctx_wrong_tid.abort.assert_called_with(
+        grpc.StatusCode.PERMISSION_DENIED,
+        "Device does not belong to this tenant",
+    )
+
     res_ok = await servicer.UnRegister(
         ClientRegisterCsReq_pb2.ClientRegisterCsReq(ClientUid="unreg-client-uid"),
         ctx_ok,
@@ -474,15 +530,32 @@ async def test_command_deliver_servicer():
 
     sid_dis = await sm.create_session("acct-cmd", "cmd-disabled-uid")
     ctx_dis = get_mock_context(metadata=[("session", sid_dis)])
-    async for _ in servicer.ListenCommand(None, ctx_dis):
+    async for _ in servicer.ListenCommand(_empty_req_iter(), ctx_dis):
         pass
     ctx_dis.abort.assert_called_with(
         grpc.StatusCode.PERMISSION_DENIED, "Device is disabled by administrator"
     )
 
-    # 3. ListenCommand 双向流正常逻辑（含连续 Ping 节流、非 Ping 上行指令及 disconnect_client 退出）
+    # 2b. ListenCommand 租户不匹配分支 (lines 593-597)
+    sid_mismatch = await sm.create_session("wrong-tenant-id", "client-uid-test")
+    ctx_mismatch = get_mock_context(metadata=[("session", sid_mismatch)])
+    async for _ in servicer.ListenCommand(_empty_req_iter(), ctx_mismatch):
+        pass
+    ctx_mismatch.abort.assert_called_with(
+        grpc.StatusCode.PERMISSION_DENIED, "Device does not belong to this tenant"
+    )
+
+    # 3. ListenCommand 双向流正常逻辑（含重连旧队列未下发指令迁移、连续 Ping 节流、QueueFull 容错、非 Ping 上行指令及 disconnect_client 退出）
     sid = await sm.create_session("", "client-uid-test")
     ctx_ok = get_mock_context(metadata=[("session", sid)])
+    stale_q: asyncio.Queue = asyncio.Queue()
+    from app.Protobuf.Server import ClientCommandDeliverScRsp_pb2
+
+    pending_restart = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
+        RetCode=Retcode_pb2.Success, Type=CommandTypes_pb2.RestartApp
+    )
+    stale_q.put_nowait(pending_restart)
+    servicer.client_queues["test-account-00000000:client-uid-test"] = stale_q
 
     async def request_generator():
         yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
@@ -496,6 +569,17 @@ async def test_command_deliver_servicer():
         yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
             Type=CommandTypes_pb2.Pong
         )
+        # 测试 read_task 中 queue.put_nowait QueueFull 分支 (lines 662-663)
+        q_stream = servicer.client_queues.get("test-account-00000000:client-uid-test")
+        if q_stream is not None:
+            with (
+                patch.object(server, "_MIN_PING_INTERVAL", 0.0),
+                patch.object(server, "_REDIS_HB_SYNC_INTERVAL", 0.0),
+                patch.object(q_stream, "put_nowait", side_effect=asyncio.QueueFull),
+            ):
+                yield ClientCommandDeliverScReq_pb2.ClientCommandDeliverScReq(
+                    Type=CommandTypes_pb2.Ping
+                )
         await asyncio.sleep(0.05)
         await servicer.disconnect_client("test-account-00000000", "client-uid-test")
 
@@ -503,20 +587,29 @@ async def test_command_deliver_servicer():
     received = []
     async for resp in stream:
         received.append(resp)
-    assert len(received) == 1
-    assert received[0].Type == CommandTypes_pb2.Pong
+    assert len(received) == 2
+    assert received[0].Type == CommandTypes_pb2.RestartApp
+    assert received[1].Type == CommandTypes_pb2.Pong
+    assert await stale_q.get() is None
 
-    # 4. send_command 在队列存在与不存在时的分支
+    # 4. send_command 与 disconnect_client 在队列存在、不存在及 QueueFull 时的分支
     assert (
         await servicer.send_command("test-account-00000000", "no-client", "msg")
         is False
     )
-    q = asyncio.Queue()
+    q = asyncio.Queue(maxsize=1)
     servicer.client_queues["test-account-00000000:c-queued"] = q
     assert (
         await servicer.send_command("test-account-00000000", "c-queued", "msg") is True
     )
-    assert await q.get() == "msg"
+    # 队列已满时 send_command 返回 False (lines 699-700)
+    assert (
+        await servicer.send_command("test-account-00000000", "c-queued", "msg2")
+        is False
+    )
+    # 队列已满时 disconnect_client 自动丢弃旧项并压入 None (lines 711-715)
+    assert await servicer.disconnect_client("test-account-00000000", "c-queued") is True
+    assert await q.get() is None
     assert (
         await servicer.disconnect_client("test-account-00000000", "no-client") is False
     )
@@ -526,15 +619,17 @@ async def test_command_deliver_servicer():
 
     async with AsyncSessionLocal() as db:
         await set_quota("test-account-00000000", "max_grpc_connections", 1, db)
+    servicer.tenant_clients.setdefault("test-account-00000000", set()).add("c-queued")
     sid_q = await sm.create_session("test-account-00000000", "client-uid-test")
     ctx_q = get_mock_context(metadata=[("session", sid_q)])
-    async for _ in servicer.ListenCommand(None, ctx_q):
+    async for _ in servicer.ListenCommand(_empty_req_iter(), ctx_q):
         pass
     ctx_q.abort.assert_called_with(
         grpc.StatusCode.RESOURCE_EXHAUSTED,
         "Account gRPC connection quota (max_grpc_connections) exceeded",
     )
     servicer.client_queues.pop("test-account-00000000:c-queued", None)
+    servicer.tenant_clients.pop("test-account-00000000", None)
 
 
 @pytest.mark.asyncio
@@ -544,21 +639,26 @@ async def test_config_upload_and_audit():
     config_servicer = server.ConfigUploadServicer(sm)
     audit_servicer = server.AuditServicer(sm)
 
-    # 1. 未授权会话且无有效 RequestGuidId -> InvalidRequest
+    # 1. 未授权会话且无有效 RequestGuidId 或超大 Payload -> InvalidRequest
     ctx_fail = get_mock_context(metadata=[("session", "invalid-sid")])
     res_cfg = await config_servicer.UploadConfig(MagicMock(RequestGuidId=""), ctx_fail)
     assert res_cfg.Retcode == Retcode_pb2.InvalidRequest
 
+    res_cfg_big = await config_servicer.UploadConfig(
+        MagicMock(RequestGuidId="", Payload="x" * (2100 * 1024)), ctx_fail
+    )
+    assert res_cfg_big.Retcode == Retcode_pb2.InvalidRequest
+
     res_audit = await audit_servicer.LogEvent(MagicMock(), ctx_fail)
     assert res_audit.Retcode == Retcode_pb2.InvalidRequest
 
-    # 2. 预创建 ConfigUploadRecord，测试更新已存在记录分支 (lines 646-652)
+    # 2. 预创建 ConfigUploadRecord，测试更新已存在记录分支及租户/设备校验分支
     async with AsyncSessionLocal() as db:
         db.add(
             ConfigUploadRecord(
                 request_guid="pre-guid-123",
                 account_id="test-account-00000000",
-                client_uid="client-uid-test",
+                client_uid="client-uid-audit",
                 status="pending",
                 payload="",
                 uploaded_at=datetime.now(timezone.utc),
@@ -568,6 +668,15 @@ async def test_config_upload_and_audit():
             ClientRecord(
                 uid="client-uid-audit",
                 account_id="test-account-00000000",
+                ip="127.0.0.1",
+                registered_at=datetime.now(timezone.utc),
+            )
+        )
+        db.add(
+            ClientRecord(
+                uid="client-uid-disabled-audit",
+                account_id="test-account-00000000",
+                is_disabled=True,
                 registered_at=datetime.now(timezone.utc),
             )
         )
@@ -579,6 +688,27 @@ async def test_config_upload_and_audit():
     req_cfg_existing = ConfigUploadScReq_pb2.ConfigUploadScReq(
         RequestGuidId="pre-guid-123", Payload='{"updated": true}'
     )
+    # 2a. 租户不匹配时拒绝更新 (line 767)
+    sid_other_tid = await sm.create_session("other-tenant-id", "client-uid-audit")
+    ctx_other_tid = get_mock_context(metadata=[("session", sid_other_tid)])
+    assert (
+        await config_servicer.UploadConfig(req_cfg_existing, ctx_other_tid)
+    ).Retcode == Retcode_pb2.InvalidRequest
+
+    # 2b. 客户端 UID 不匹配时拒绝更新 (line 776)
+    sid_other_uid = await sm.create_session("test-account-00000000", "other-client-uid")
+    ctx_other_uid = get_mock_context(metadata=[("session", sid_other_uid)])
+    assert (
+        await config_servicer.UploadConfig(req_cfg_existing, ctx_other_uid)
+    ).Retcode == Retcode_pb2.InvalidRequest
+
+    # 2b-2. 无 session 时（上游客户端模式）对端 IP 与 ClientRecord.ip 不匹配则拒绝更新，匹配则放行
+    ctx_no_sid_bad_ip = get_mock_context(metadata=[], peer="ipv4:203.0.113.99:54321")
+    assert (
+        await config_servicer.UploadConfig(req_cfg_existing, ctx_no_sid_bad_ip)
+    ).Retcode == Retcode_pb2.InvalidRequest
+
+    # 2c. 匹配的会话成功更新
     res_cfg_ex = await config_servicer.UploadConfig(req_cfg_existing, ctx_ok)
     assert res_cfg_ex.Retcode == Retcode_pb2.Success
 
@@ -589,14 +719,28 @@ async def test_config_upload_and_audit():
     res_cfg_ok = await config_servicer.UploadConfig(req_cfg_new, ctx_ok)
     assert res_cfg_ok.Retcode == Retcode_pb2.Success
 
-    # 4. 审计日志上报（含无 tid 时从 ClientRecord 回查 account_id、cuid header fallback 及 str Payload 分支）
+    # 4. 审计日志上报（含无 tid 时从 ClientRecord 回查 account_id、未授权拦截、禁用/跨租户拦截及 str Payload 分支）
     req_audit = AuditScReq_pb2.AuditScReq(Event=1, Payload=b"", TimestampUtc=1700000000)
     res_audit_ok = await audit_servicer.LogEvent(req_audit, ctx_ok)
     assert res_audit_ok.Retcode == Retcode_pb2.Success
 
     ctx_cuid_only = get_mock_context(metadata=[("cuid", "client-uid-audit")])
     res_audit_cuid = await audit_servicer.LogEvent(req_audit, ctx_cuid_only)
-    assert res_audit_cuid.Retcode == Retcode_pb2.Success
+    assert res_audit_cuid.Retcode == Retcode_pb2.InvalidRequest
+
+    # 禁用设备上报审计日志被拒绝 (line 849)
+    sid_dis_audit = await sm.create_session(
+        "test-account-00000000", "client-uid-disabled-audit"
+    )
+    ctx_dis_audit = get_mock_context(metadata=[("session", sid_dis_audit)])
+    assert (
+        await audit_servicer.LogEvent(req_audit, ctx_dis_audit)
+    ).Retcode == Retcode_pb2.InvalidRequest
+
+    # 跨租户会话上报审计日志被拒绝 (line 855)
+    assert (
+        await audit_servicer.LogEvent(req_audit, ctx_other_tid)
+    ).Retcode == Retcode_pb2.InvalidRequest
 
     mock_str_audit = MagicMock()
     mock_str_audit.Payload = "string-payload"
@@ -605,6 +749,12 @@ async def test_config_upload_and_audit():
     assert (
         await audit_servicer.LogEvent(mock_str_audit, ctx_ok)
     ).Retcode == Retcode_pb2.Success
+
+    mock_big_audit = MagicMock()
+    mock_big_audit.Payload = b"x" * (2100 * 1024)
+    assert (
+        await audit_servicer.LogEvent(mock_big_audit, ctx_ok)
+    ).Retcode == Retcode_pb2.InvalidRequest
 
     # 5. feature.audit 配额关闭 (0) 时拒绝上报
     from app.shared.services.quota import set_quota

@@ -26,6 +26,15 @@ IP_FAILURE_LIMIT = 20
 IP_BLOCK_DURATION = 300
 GLOBAL_CC_LIMIT = 25000
 GLOBAL_CC_WINDOW = 1.0
+MAX_TRACKED_IPS = 10000
+_CC_PROTECTED_KEYWORDS = (
+    "login",
+    "register",
+    "/user/auth",
+    "/user/apply",
+    "/user/2fa/",
+    "/oobe/",
+)
 
 
 def check_ip_blocked(ip: str) -> bool:
@@ -37,6 +46,9 @@ def check_ip_blocked(ip: str) -> bool:
         now = time.time()
         while fails and fails[0] < now - IP_BLOCK_DURATION:
             fails.pop(0)
+        if not fails:
+            ip_failures.pop(ip, None)
+            return False
         return len(fails) >= IP_FAILURE_LIMIT
 
     count, last_time = fails
@@ -44,16 +56,25 @@ def check_ip_blocked(ip: str) -> bool:
         if time.time() - last_time < IP_BLOCK_DURATION:
             return True
         else:
-            try:
-                del ip_failures[ip]
-            except KeyError:
-                pass
+            ip_failures.pop(ip, None)
     return False
 
 
 def record_ip_failure(ip: str) -> None:
     now = time.time()
     ip_failures = get_ip_failures_dict()
+    if len(ip_failures) >= MAX_TRACKED_IPS and ip not in ip_failures:
+        cutoff = now - IP_BLOCK_DURATION
+        expired = [
+            k
+            for k, v in list(ip_failures.items())
+            if (isinstance(v, list) and (not v or v[-1] < cutoff))
+            or (not isinstance(v, list) and v[1] < cutoff)
+        ]
+        for k in expired:
+            ip_failures.pop(k, None)
+        if len(ip_failures) >= MAX_TRACKED_IPS:
+            ip_failures.pop(next(iter(ip_failures)), None)
     if ip not in ip_failures:
         ip_failures[ip] = [now]
     else:
@@ -65,12 +86,47 @@ def record_ip_failure(ip: str) -> None:
             ip_failures[ip] = (count + 1, now)
 
 
+async def check_ip_blocked_async(ip: str) -> bool:
+    """Check IP block state across local memory and shared Redis sliding window."""
+    if check_ip_blocked(ip):
+        return True
+    try:
+        from app.shared.utils.config import REDIS_DB_AUTH, is_initialized
+        from app.shared.utils.redis import get_redis
+
+        if is_initialized():
+            r = get_redis(REDIS_DB_AUTH)
+            val = await r.get(f"cc:ip_fail:{ip}")
+            if val is not None and int(val) >= IP_FAILURE_LIMIT:
+                return True
+    except Exception:  # pragma: no cover
+        pass
+    return False
+
+
+async def record_ip_failure_async(ip: str) -> None:
+    """Record IP authentication failure in local memory and shared Redis."""
+    record_ip_failure(ip)
+    try:
+        from app.shared.utils.config import REDIS_DB_AUTH, is_initialized
+        from app.shared.utils.redis import get_redis
+
+        if is_initialized():
+            r = get_redis(REDIS_DB_AUTH)
+            key = f"cc:ip_fail:{ip}"
+            await r.incr(key)
+            await r.expire(key, IP_BLOCK_DURATION)
+    except Exception:  # pragma: no cover
+        pass
+
+
 def monitor_global_frequency() -> None:
     now = time.time()
     global_reqs = get_global_requests()
     global_reqs.append(now)
-    while global_reqs and global_reqs[0] < now - GLOBAL_CC_WINDOW:
-        global_reqs.pop(0)
+    cutoff = now - GLOBAL_CC_WINDOW
+    while global_reqs and global_reqs[0] < cutoff:
+        global_reqs.popleft()
     if len(global_reqs) > GLOBAL_CC_LIMIT:
         set_cc_state(True)
     else:
@@ -84,7 +140,7 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         ip = get_client_ip_from_request(request) or "unknown"
-        if check_ip_blocked(ip):
+        if await check_ip_blocked_async(ip):
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
@@ -96,19 +152,20 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
         monitor_global_frequency()
 
         path = request.url.path.lower()
-        if get_cc_state() and any(k in path for k in ["login", "register"]):
-            if "authorization" not in request.headers:
-                return JSONResponse(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    content={
-                        "code": "ERR_CC_ACTIVE",
-                        "msg": "Channel busy, try again later",
-                    },
-                )
+        if get_cc_state() and any(k in path for k in _CC_PROTECTED_KEYWORDS):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "code": "ERR_CC_ACTIVE",
+                    "msg": "Channel busy, try again later",
+                },
+            )
 
         resp = await call_next(request)
-        if resp.status_code >= 400 and resp.status_code != 429:
-            record_ip_failure(ip)
+        if resp.status_code in (401, 403) and not path.startswith(
+            ("/api/v1/client/", "/get")
+        ):
+            await record_ip_failure_async(ip)
 
         return resp
 
@@ -122,6 +179,7 @@ _EXEMPT = {
     "/user/apply",
     "/user/2fa/totp/verify",
     "/user/2fa/totp/recover",
+    "/token/redeem",
     "/oobe/verify",
     "/oobe/configure",
     "/api/oobe/verify",
@@ -132,6 +190,10 @@ _EXEMPT_PREFIXES = ("/user/availability/", "/fonts/", "/api/v1/fonts/")
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
     """Session token and API credential authentication middleware."""
+
+    def __init__(self, app, require_superadmin: bool = False):
+        super().__init__(app)
+        self._require_superadmin = require_superadmin
 
     async def dispatch(
         self, request: Request, call_next: RequestResponseEndpoint
@@ -154,6 +216,30 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
         user_id = await resolve_user_from_token(token)
         if user_id:
+            from app.shared.db.session import AsyncSessionLocal
+            from app.shared.db.models import User
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as db:
+                u = (
+                    await db.execute(select(User).where(User.id == user_id))
+                ).scalar_one_or_none()
+                if not u or not u.is_active or u.role_code in ("banned", "pending"):
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={
+                            "code": "ERR_PERMISSION_DENIED",
+                            "msg": "User account is inactive or banned",
+                        },
+                    )
+                if self._require_superadmin and u.role_code != "superadmin":
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={
+                            "code": "ERR_PERMISSION_DENIED",
+                            "msg": "Super Administrator privilege required",
+                        },
+                    )
             request.state.current_user_id = user_id
             return await call_next(request)
 
@@ -168,7 +254,15 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 # ---- 3. Multi-Tenant Context Middleware ----
 
 _ACCOUNT_PATH_RE = re.compile(r"^/accounts?/([^/]+)(?:/|$)")
-_ACCOUNT_RESERVED_SUBPATHS = {"list", "search", "apply", "availability", "create"}
+_ACCOUNT_RESERVED_SUBPATHS = {
+    "list",
+    "search",
+    "apply",
+    "availability",
+    "create",
+    "invitation",
+    "bulk",
+}
 
 
 class AccountContextMiddleware(BaseHTTPMiddleware):
@@ -210,10 +304,9 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                 },
             )
 
-        # Member validation (skip /command subpaths)
-        remaining_path = path[match.end() - 1 :]
-        needs_membership = self._require_membership and "/command" not in remaining_path
-        if needs_membership:
+        # Member validation and role assignment
+        role_in_account = "owner"
+        if self._require_membership:
             user_id = getattr(request.state, "current_user_id", None)
             if not user_id:
                 return JSONResponse(
@@ -230,7 +323,9 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                     )
                 )
                 member = result.scalar_one_or_none()
-                if not member:
+                if member:
+                    role_in_account = member.role_in_account or "member"
+                else:
                     # Allow superadmin to inspect/manage accounts if needed
                     u = (
                         await db.execute(select(User).where(User.id == user_id))
@@ -243,12 +338,14 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                                 "msg": "Access denied for tenant",
                             },
                         )
+                    role_in_account = "owner"
 
         t_tok = tenant_ctx.set(account.id)
         s_tok = schema_ctx.set(f"tenant_{account.slug}")
         try:
             request.state.tenant_id = account.id
             request.state.account_slug = account.slug
+            request.state.role_in_account = role_in_account
             return await call_next(request)
         finally:
             schema_ctx.reset(s_tok)

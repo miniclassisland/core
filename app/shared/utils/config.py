@@ -60,7 +60,8 @@ class AppSettings(BaseSettings):
     # Multi-tenant base domain
     miniclassisland_base_domain: str = DEFAULT_BASE_DOMAIN
 
-    # Service port allocations
+    # Service port allocations & listen host
+    miniclassisland_listen_host: str = "127.0.0.1"
     miniclassisland_client_port: int = DEFAULT_CLIENT_PORT
     miniclassisland_management_port: int = DEFAULT_MGMT_PORT
     miniclassisland_admin_port: int = DEFAULT_ADMIN_PORT
@@ -115,7 +116,8 @@ BASE_DOMAIN: str = (
 )
 DEFAULT_SCHEMA: str = PUBLIC_SCHEMA
 
-# Four port allocation constants
+# Listen host and four port allocation constants
+LISTEN_HOST: str = _file_cfg.get("listen_host") or _settings.miniclassisland_listen_host
 CLIENT_PORT: int = _settings.miniclassisland_client_port
 MANAGEMENT_PORT: int = _settings.miniclassisland_management_port
 ADMIN_PORT: int = _settings.miniclassisland_admin_port
@@ -123,6 +125,25 @@ GRPC_PORT: int = _settings.miniclassisland_grpc_port
 
 # GPG key file name
 KEY_FILE: str = _settings.miniclassisland_key_file
+
+
+def get_allowed_origins() -> list[str]:
+    """Return allowed CORS origins for BASE_DOMAIN and local development."""
+    domain = BASE_DOMAIN.strip().lower()
+    return [
+        f"https://{domain}",
+        f"https://dash.{domain}",
+        f"https://dashboard.{domain}",
+        f"https://admin.{domain}",
+        f"https://api.{domain}",
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+    ]
+
+
+ALLOWED_ORIGINS: list[str] = get_allowed_origins()
 
 
 def validate_config() -> None:

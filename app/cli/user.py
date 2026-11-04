@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import Account, AccountMember, User
+from app.shared.security.auth import revoke_all_user_sessions
 from app.shared.security.crypto import hash_password
 from app.shared.services.user import (
     approve_user,
@@ -204,8 +205,10 @@ def delete_user_cmd(
             if not user:
                 print(f"❌ User {username} does not exist")
                 return
+            uid = user.id
             await db.delete(user)
             await db.commit()
+            await revoke_all_user_sessions(uid)
             print(f"✅ User {username} deleted")
 
     asyncio.run(_run())
@@ -228,6 +231,7 @@ def ban_user_cmd(
                 return
             user.role_code = "banned"
             await db.commit()
+            await revoke_all_user_sessions(user.id)
             print(f"✅ User {username} banned")
 
     asyncio.run(_run())
@@ -274,6 +278,7 @@ def reset_password_cmd(
                 return
             user.hashed_password = hash_password(password or "")
             await db.commit()
+            await revoke_all_user_sessions(user.id)
             print(f"✅ User {username} password reset")
 
     asyncio.run(_run())
@@ -348,6 +353,7 @@ def set_role_cmd(
                 return
             user.role_code = role or "normal"
             await db.commit()
+            await revoke_all_user_sessions(user.id)
             print(f"✅ User {username} role set to {role}")
 
     asyncio.run(_run())

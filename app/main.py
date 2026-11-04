@@ -19,6 +19,7 @@ if _ROOT_DIR not in sys.path:
 import uvicorn  # noqa: E402
 
 from app.shared.utils.config import (  # noqa: E402
+    LISTEN_HOST,
     CLIENT_PORT,
     MANAGEMENT_PORT,
     ADMIN_PORT,
@@ -56,21 +57,21 @@ async def start_servers():
 
     c_cfg = uvicorn.Config(
         c_app,
-        host="0.0.0.0",
+        host=LISTEN_HOST,
         port=CLIENT_PORT,
         log_config=uv_log_config,
         access_log=False,
     )
     m_cfg = uvicorn.Config(
         m_app,
-        host="0.0.0.0",
+        host=LISTEN_HOST,
         port=MANAGEMENT_PORT,
         log_config=uv_log_config,
         access_log=False,
     )
     a_cfg = uvicorn.Config(
         a_app,
-        host="0.0.0.0",
+        host=LISTEN_HOST,
         port=ADMIN_PORT,
         log_config=uv_log_config,
         access_log=False,
@@ -104,6 +105,8 @@ __all__ = ["start_servers", "main", "cli"]
 
 def main():
     """Main application entry point (unified CLI)."""
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     from app.cli.main import main as cli_main
 
     cli_main()

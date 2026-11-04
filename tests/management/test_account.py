@@ -214,6 +214,28 @@ async def test_management_account_full_suite(test_superadmin_user):
         assert r_name.status_code == 200
         assert r_name.json()["name"] == "Main School V2"
 
+        r_info_upd = await client.post(
+            f"/account/{acct_id}/info",
+            json={"name": "Main School V3", "registration_mode": "open"},
+            headers=sa_headers,
+        )
+        assert r_info_upd.status_code == 200
+        assert r_info_upd.json()["name"] == "Main School V3"
+
+        r_id_bad = await client.post(
+            f"/account/{acct_id}/info/id",
+            json={"new_id": "list"},
+            headers=sa_headers,
+        )
+        assert r_id_bad.status_code == 400
+
+        r_id_ok = await client.post(
+            f"/account/{acct_id}/info/id",
+            json={"new_id": acct_id},
+            headers=sa_headers,
+        )
+        assert r_id_ok.status_code == 200
+
         r_regen = await client.post(
             f"/account/{acct_id}/info/api-key/regenerate", headers=sa_headers
         )
@@ -233,6 +255,198 @@ async def test_management_account_full_suite(test_superadmin_user):
         )
         assert r_preset_ci.status_code == 200
         assert r_preset_ci.json()["ClassIdentity"] == "Room-101"
+
+        # 1b. RBAC, max_accounts_per_user, get_account_info non-member, viewer read-only, and last owner protection
+        from app.shared.db.models import SystemConfig
+
+        async with AsyncSessionLocal() as db:
+            db.add_all(
+                [
+                    SystemConfig(
+                        key="max_accounts_per_user",
+                        value="invalid_int",
+                        updated_at=datetime.now(timezone.utc),
+                    ),
+                ]
+            )
+            await db.commit()
+        assert (
+            await client.post(
+                "/account/apply",
+                json={"name": "Outsider School 1", "slug": "outsider-school-1"},
+                headers=outsider_headers,
+            )
+        ).status_code == 201
+
+        async with AsyncSessionLocal() as db:
+            from sqlalchemy import delete
+
+            await db.execute(
+                delete(SystemConfig).where(SystemConfig.key == "max_accounts_per_user")
+            )
+            db.add(
+                SystemConfig(
+                    key="max_accounts_per_user",
+                    value="1",
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+        assert (
+            await client.post(
+                "/account/apply",
+                json={"name": "Outsider School 2", "slug": "outsider-school-2"},
+                headers=outsider_headers,
+            )
+        ).status_code == 400
+
+        # Outsider is not a member of acct_id -> get_account_info returns 403
+        assert (
+            await client.get(f"/account/{acct_id}/info", headers=outsider_headers)
+        ).status_code == 403
+
+        # Add norm_uid as viewer first to test viewer read-only and member/admin RBAC
+        async with AsyncSessionLocal() as db:
+            db.add(
+                account.AccountMember(
+                    id="mem-viewer-test",
+                    account_id=acct_id,
+                    user_id=norm_uid,
+                    role_in_account="viewer",
+                    joined_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+
+        # Viewer can GET info/list, but cannot POST/DELETE or call GET /create
+        assert (
+            await client.get(f"/account/{acct_id}/info", headers=norm_headers)
+        ).status_code == 200
+        assert (
+            await client.post(
+                f"/account/{acct_id}/Subjects/write",
+                params={"name": "default"},
+                json={},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.get(
+                f"/account/{acct_id}/Subjects/create",
+                params={"name": "v_sub"},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+
+        # Promote norm_uid to member: can read, but cannot access Credentials or manage access/invitations/api-key/audit-clear
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "member"},
+                headers=sa_headers,
+            )
+        ).status_code == 200
+        assert (
+            await client.get(
+                f"/account/{acct_id}/Credentials/default", headers=norm_headers
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                f"/account/{acct_id}/info/api-key/regenerate", headers=norm_headers
+            )
+        ).status_code == 403
+
+        # Promote norm_uid to admin: cannot rename superadmin, cannot delete/demote/grant owner, cannot create/rename owner invitation
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "admin"},
+                headers=sa_headers,
+            )
+        ).status_code == 200
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{test_superadmin_user}/rename",
+                json={"name": "Hack SA"},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.delete(
+                f"/account/{acct_id}/access/{test_superadmin_user}",
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "owner"},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "invalid_role"},
+                headers=sa_headers,
+            )
+        ).status_code == 400
+
+        # Cannot remove or demote the last owner of the account
+        assert (
+            await client.delete(
+                f"/account/{acct_id}/access/{test_superadmin_user}",
+                headers=sa_headers,
+            )
+        ).status_code == 400
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{test_superadmin_user}",
+                json={"role_in_account": "admin"},
+                headers=sa_headers,
+            )
+        ).status_code == 400
+
+        # Add a second owner and remove them as owner -> 204
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "owner"},
+                headers=sa_headers,
+            )
+        ).status_code == 200
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "admin"},
+                headers=sa_headers,
+            )
+        ).status_code == 200
+
+        # Invitation role validation & admin trying to create/rename owner invitation
+        assert (
+            await client.post(
+                f"/account/{acct_id}/invitation/create",
+                json={"role_in_account": "invalid_role", "max_uses": 1},
+                headers=sa_headers,
+            )
+        ).status_code == 400
+        assert (
+            await client.post(
+                f"/account/{acct_id}/invitation/create",
+                json={"role_in_account": "owner", "max_uses": 1},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+
+        # Remove norm_uid temporarily so the existing invitation acceptance test below can re-join norm_uid
+        assert (
+            await client.delete(
+                f"/account/{acct_id}/access/{norm_uid}",
+                headers=sa_headers,
+            )
+        ).status_code == 204
 
         # 3. Invitations & Access Members
         r_inv_create = await client.post(
@@ -276,6 +490,35 @@ async def test_management_account_full_suite(test_superadmin_user):
             headers=sa_headers,
         )
         assert r_inv_ren.status_code == 200
+        assert (
+            await client.post(
+                f"/account/{acct_id}/invitation/{inv_id}/rename",
+                json={"role_in_account": "invalid_role"},
+                headers=sa_headers,
+            )
+        ).status_code == 400
+        # Temporarily add outsider_uid as admin to test non-owner renaming invitation to owner
+        async with AsyncSessionLocal() as db:
+            db.add(
+                account.AccountMember(
+                    id="mem-out-adm",
+                    account_id=acct_id,
+                    user_id=outsider_uid,
+                    role_in_account="admin",
+                    joined_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+        assert (
+            await client.post(
+                f"/account/{acct_id}/invitation/{inv_id}/rename",
+                json={"role_in_account": "owner"},
+                headers=outsider_headers,
+            )
+        ).status_code == 403
+        await client.delete(
+            f"/account/{acct_id}/access/{outsider_uid}", headers=sa_headers
+        )
         assert (
             await client.post(
                 f"/account/{acct_id}/invitation/non-existent/rename",
@@ -1225,6 +1468,39 @@ async def test_management_account_full_suite(test_superadmin_user):
             )
         ).status_code == 200
 
+        # Member role RBAC restrictions: cannot mutate pairing/Policy/Credentials or batch-modify Policy (lines 180, 3100-3102)
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "member"},
+                headers=sa_headers,
+            )
+        ).status_code == 200
+        assert (
+            await client.post(
+                f"/account/{acct_id}/Policy/write",
+                params={"name": "default"},
+                json={},
+                headers=norm_headers,
+            )
+        ).status_code == 403
+        assert (
+            await client.post(
+                f"/account/{acct_id}/batch",
+                json={
+                    "operations": [
+                        {
+                            "action": "write",
+                            "resource_type": "Policy",
+                            "name": "default",
+                            "payload": {},
+                        }
+                    ]
+                },
+                headers=norm_headers,
+            )
+        ).status_code == 403
+
         # Delete resource
         assert (
             await client.delete(
@@ -1249,9 +1525,23 @@ async def test_management_account_full_suite(test_superadmin_user):
         ).json()["status"] == "success"
 
         # 8. Delete (deactivate) account: non-owner -> 403, owner -> 200
+        # Put norm_uid back as viewer so norm_headers reaches delete_account or test delete_account directly
         assert (
             await client.delete(f"/account/{acct_id}", headers=norm_headers)
         ).status_code == 403
+        # Add second owner to test deleting an owner when >1 owners exist
+        assert (
+            await client.post(
+                f"/account/{acct_id}/access/{norm_uid}",
+                json={"role_in_account": "owner"},
+                headers=sa_headers,
+            )
+        ).status_code == 200
+        assert (
+            await client.delete(
+                f"/account/{acct_id}/access/{norm_uid}", headers=sa_headers
+            )
+        ).status_code == 204
         assert (
             await client.delete(f"/account/{acct_id}", headers=sa_headers)
         ).status_code == 200
@@ -1320,10 +1610,92 @@ async def test_management_account_direct_helpers_and_edge_branches(
                 db,
                 test_superadmin_user,
             )
-        with pytest.raises(HTTPException):
+        with pytest.raises(HTTPException) as exc_name_403:
             await account.change_account_name(
-                "missing-id", account.AccountNameUpdate(name="Name"), db
+                "missing-id",
+                account.AccountNameUpdate(name="Name"),
+                db,
+                "non-existent-user",
             )
+        assert exc_name_403.value.status_code == 403
+        with pytest.raises(HTTPException) as exc_name_404:
+            await account.change_account_name(
+                "missing-id",
+                account.AccountNameUpdate(name="Name"),
+                db,
+                test_superadmin_user,
+            )
+        assert exc_name_404.value.status_code == 404
+
+        with pytest.raises(HTTPException) as exc_info_403:
+            await account.update_account_basic_info(
+                "missing-id",
+                account.AccountUpdate(name="Name"),
+                db,
+                "non-existent-user",
+            )
+        assert exc_info_403.value.status_code == 403
+        with pytest.raises(HTTPException) as exc_info_404:
+            await account.update_account_basic_info(
+                "missing-id",
+                account.AccountUpdate(name="Name"),
+                db,
+                test_superadmin_user,
+            )
+        assert exc_info_404.value.status_code == 404
+
+        with pytest.raises(HTTPException) as exc_id_403:
+            await account.change_account_id(
+                "missing-id",
+                account.AccountIdUpdate(new_id="valid-id"),
+                db,
+                "non-existent-user",
+            )
+        assert exc_id_403.value.status_code == 403
+        with pytest.raises(HTTPException) as exc_id_404:
+            await account.change_account_id(
+                "missing-id",
+                account.AccountIdUpdate(new_id="valid-id"),
+                db,
+                test_superadmin_user,
+            )
+        assert exc_id_404.value.status_code == 404
+
+        # Create a real account to test 400 validation errors on change_account_name & update_account_basic_info
+        real_acct = Account(
+            id="real-err-test-acct",
+            name="Real Test",
+            slug="real-err-test-slug",
+            api_key="k",
+            is_active=True,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(real_acct)
+        await db.commit()
+
+        with pytest.raises(HTTPException) as exc_get_info_403:
+            await account.get_account_info(
+                "real-err-test-acct", db, "non-existent-user"
+            )
+        assert exc_get_info_403.value.status_code == 403
+
+        with pytest.raises(HTTPException) as exc_name_400:
+            await account.change_account_name(
+                "real-err-test-acct",
+                account.AccountNameUpdate(name="   "),
+                db,
+                test_superadmin_user,
+            )
+        assert exc_name_400.value.status_code == 400
+
+        with pytest.raises(HTTPException) as exc_info_400:
+            await account.update_account_basic_info(
+                "real-err-test-acct",
+                account.AccountUpdate(name="   "),
+                db,
+                test_superadmin_user,
+            )
+        assert exc_info_400.value.status_code == 400
         with pytest.raises(HTTPException):
             await account.regenerate_account_api_key("missing-id", db)
         with pytest.raises(HTTPException):

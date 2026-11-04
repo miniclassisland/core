@@ -18,7 +18,7 @@ def test_import():
 
 
 @pytest.mark.asyncio
-async def test_management_user_endpoints():
+async def test_management_user_endpoints(test_superadmin_user):
     """Test user self-registration, availability checks, login, profile updates, and 2FA flows."""
     async with AsyncSessionLocal() as db:
         db.add(ReservedName(name="reserved_name"))
@@ -26,7 +26,69 @@ async def test_management_user_endpoints():
 
     transport = ASGITransport(app=management_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 1. Self-registration (/user/apply)
+        # 1. Self-registration (/user/apply): closed, open with approval, open without approval
+        from datetime import datetime, timezone
+        from sqlalchemy import delete
+        from app.shared.db.models import SystemConfig
+
+        async with AsyncSessionLocal() as db:
+            db.add(
+                SystemConfig(
+                    key="registration_open",
+                    value="false",
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+            await db.commit()
+
+        r_apply_closed = await client.post(
+            "/user/apply",
+            json={
+                "username": "mgmt_user",
+                "email": "mgmt@school.com",
+                "password": "MgmtPassword123!",
+                "display_name": "Mgmt User",
+            },
+        )
+        assert r_apply_closed.status_code == 403
+
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                delete(SystemConfig).where(SystemConfig.key == "registration_open")
+            )
+            db.add_all(
+                [
+                    SystemConfig(
+                        key="registration_open",
+                        value="true",
+                        updated_at=datetime.now(timezone.utc),
+                    ),
+                    SystemConfig(
+                        key="require_approval",
+                        value="false",
+                        updated_at=datetime.now(timezone.utc),
+                    ),
+                ]
+            )
+            await db.commit()
+
+        r_apply_auto = await client.post(
+            "/user/apply",
+            json={
+                "username": "auto_user",
+                "email": "auto@school.com",
+                "password": "AutoPassword123!",
+                "display_name": "Auto User",
+            },
+        )
+        assert r_apply_auto.status_code == 200
+
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                delete(SystemConfig).where(SystemConfig.key == "require_approval")
+            )
+            await db.commit()
+
         r_apply = await client.post(
             "/user/apply",
             json={
@@ -135,11 +197,16 @@ async def test_management_user_endpoints():
         )
         assert r_em_ok.status_code == 200
 
-        # Username update (invalid format, conflict, success)
+        # Username update (invalid format, reserved, conflict, success)
         r_un_bad = await client.post(
             "/user/info/username", json={"username": "INVALID!"}, headers=headers
         )
         assert r_un_bad.status_code == 400
+
+        r_un_res = await client.post(
+            "/user/info/username", json={"username": "reserved_name"}, headers=headers
+        )
+        assert r_un_res.status_code == 400
 
         r_un_dup = await client.post(
             "/user/info/username", json={"username": "other_user"}, headers=headers
@@ -177,10 +244,32 @@ async def test_management_user_endpoints():
         )
         assert r_pw_ok.status_code == 200
 
-        r_pw_rst = await client.post(
+        # Regular user calling /user/info/password/reset -> 403
+        r_pw_rst_403 = await client.post(
             "/user/info/password/reset",
             json={"new_password": "MgmtPassword123!"},
             headers=headers,
+        )
+        assert r_pw_rst_403.status_code == 403
+
+        # Change back using /user/info/password/change
+        r_pw_back = await client.post(
+            "/user/info/password/change",
+            json={
+                "old_password": "NewMgmtPassword1!",
+                "new_password": "MgmtPassword123!",
+            },
+            headers=headers,
+        )
+        assert r_pw_back.status_code == 200
+
+        # Superadmin calling /user/info/password/reset -> 200
+        sa_sid = await create_session_token(test_superadmin_user)
+        sa_headers = {"Authorization": f"Bearer {sa_sid}"}
+        r_pw_rst = await client.post(
+            "/user/info/password/reset",
+            json={"new_password": "SuperAdmin123!"},
+            headers=sa_headers,
         )
         assert r_pw_rst.status_code == 200
 
@@ -204,11 +293,16 @@ async def test_management_user_endpoints():
         assert r_conf_bad.status_code == 400
 
         # Confirm with valid TOTP code -> 200
+        from app.shared.utils.redis import get_redis
+        from app.shared.utils.config import REDIS_DB_AUTH
+
         valid_code = pyotp.TOTP(secret).now()
         r_conf_ok = await client.post(
             "/user/2fa/totp/confirm", json={"code": valid_code}, headers=headers
         )
         assert r_conf_ok.status_code == 200
+        # Clear replay key in test so we can immediately test login verification in the same 30s window
+        await get_redis(REDIS_DB_AUTH).delete(f"totp_used:{uid}:{valid_code}")
 
         # Calling enable again when already enabled -> 400
         r_en_again = await client.post("/user/2fa/totp/enable", headers=headers)
@@ -283,44 +377,49 @@ async def test_management_user_endpoints():
         )
         assert r_dis_ok.status_code == 200
 
-        # 7. Ghost user (valid session token for deleted user) -> 404 branches
+        # 7. Ghost user (valid session token for deleted user) -> Middleware returns 403, direct endpoints raise 404
         ghost_sid = await create_session_token("ghost-user-id")
         ghost_headers = {"Authorization": f"Bearer {ghost_sid}"}
         assert (
             await client.get("/user/info", headers=ghost_headers)
-        ).status_code == 404
-        assert (
-            await client.post(
-                "/user/info/email",
-                json={"email": "ghost@school.com"},
-                headers=ghost_headers,
-            )
-        ).status_code == 404
-        assert (
-            await client.post(
-                "/user/info/username",
-                json={"username": "ghost_user"},
-                headers=ghost_headers,
-            )
-        ).status_code == 404
-        assert (
-            await client.post(
-                "/user/info/display-name",
-                json={"display_name": "Ghost"},
-                headers=ghost_headers,
-            )
-        ).status_code == 404
-        assert (
-            await client.post(
-                "/user/info/password/change",
-                json={"old_password": "a", "new_password": "NewPassword123!"},
-                headers=ghost_headers,
-            )
-        ).status_code == 404
-        assert (
-            await client.post(
-                "/user/info/password/reset",
-                json={"new_password": "NewPassword123!"},
-                headers=ghost_headers,
-            )
-        ).status_code == 404
+        ).status_code == 403
+
+        from unittest.mock import MagicMock
+        from fastapi import HTTPException
+
+        async with AsyncSessionLocal() as db:
+            for coro in (
+                user.get_user_info(db=db, user_id="ghost-user-id"),
+                user.change_email(
+                    body=user.EmailUpdate(email="ghost@school.com"),
+                    db=db,
+                    uid="ghost-user-id",
+                ),
+                user.change_username(
+                    body=user.UsernameUpdate(username="ghost_user"),
+                    db=db,
+                    uid="ghost-user-id",
+                ),
+                user.change_display_name(
+                    body=user.DisplayNameUpdate(display_name="Ghost"),
+                    db=db,
+                    uid="ghost-user-id",
+                ),
+                user.change_password(
+                    body=user.PasswordChange(
+                        old_password="a", new_password="NewPassword123!"
+                    ),
+                    request=MagicMock(),
+                    db=db,
+                    uid="ghost-user-id",
+                ),
+                user.reset_password(
+                    request=MagicMock(),
+                    body=user.PasswordReset(new_password="NewPassword123!"),
+                    db=db,
+                    uid="ghost-user-id",
+                ),
+            ):
+                with pytest.raises(HTTPException) as exc_404:
+                    await coro
+                assert exc_404.value.status_code == 404

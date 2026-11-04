@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
-from app.shared.db.models import User
+from app.shared.db.models import User, CustomRole
 from app.shared.schemas.schemas import (
     UserOut,
     UserRegisterRequest,
@@ -12,18 +12,25 @@ from app.shared.schemas.schemas import (
     PasswordReset,
     PasswordChange,
 )
-from app.shared.security.auth import require_role
-from app.shared.security.crypto import hash_password, verify_password
+from app.shared.security.auth import require_role, revoke_all_user_sessions
+from app.shared.security.crypto import (
+    hash_password_async,
+    verify_password_async,
+    delete_recovery_codes,
+)
 from app.shared.services.user import (
     list_users,
     get_user_by_id,
     update_user,
     register_user,
+    validate_username_format,
+    is_name_reserved,
 )
-from app.shared.literals import MSG_USER_NOT_FOUND
+from app.shared.literals import MSG_USER_NOT_FOUND, SYSTEM_ROLES
 
 router = APIRouter(prefix="/user", tags=["User"])
 _sa = require_role(100)
+_BUILTIN_ROLE_CODES = {code for code, _, _ in SYSTEM_ROLES}
 
 
 class RenameRequest(BaseModel):
@@ -53,8 +60,8 @@ def _to_out(user: User) -> UserOut:
 
 @router.get("/list", response_model=list[UserOut])
 async def list_all_users(
-    offset: int = 0,
-    limit: int = 100,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
@@ -124,14 +131,35 @@ async def update_user_info(
     user_id: str,
     body: UserUpdateRequest,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(_sa),
+    admin_user: User = Depends(_sa),
 ):
     """Update user information."""
+    admin_uid = getattr(admin_user, "id", "")
+    if admin_uid and user_id == admin_uid:
+        if body.is_active is False or (
+            body.role_code is not None and body.role_code != "superadmin"
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot deactivate or demote your own Super Admin account",
+            )
+    if body.role_code is not None and body.role_code not in _BUILTIN_ROLE_CODES:
+        role_exists = (
+            await db.execute(
+                select(CustomRole.id).where(CustomRole.code == body.role_code)
+            )
+        ).scalar_one_or_none()
+        if not role_exists:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role_code"
+            )
     updated = await update_user(user_id, db, **body.model_dump(exclude_none=True))
     if not updated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
+    if not updated.is_active or updated.role_code in ("banned", "pending"):
+        await revoke_all_user_sessions(user_id)
     return _to_out(updated)
 
 
@@ -139,9 +167,14 @@ async def update_user_info(
 async def delete_user(
     user_id: str,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(_sa),
+    admin_user: User = Depends(_sa),
 ):
     """Delete a user."""
+    if getattr(admin_user, "id", "") == user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot delete your own Super Admin account",
+        )
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
@@ -151,6 +184,8 @@ async def delete_user(
         )
     await db.delete(user)
     await db.commit()
+    await revoke_all_user_sessions(user_id)
+    await delete_recovery_codes(user_id)
     return {"status": "deleted"}
 
 
@@ -169,7 +204,25 @@ async def rename_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
-    user.username = body.name
+    new_name = body.name.strip()
+    if not validate_username_format(new_name):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid"
+        )
+    if await is_name_reserved(new_name, db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Name is reserved by system"
+        )
+    dup = (
+        await db.execute(
+            select(User.id).where(User.username == new_name, User.id != user_id)
+        )
+    ).scalar_one_or_none()
+    if dup:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Username is already taken"
+        )
+    user.username = new_name
     await db.commit()
     return {"status": "renamed"}
 
@@ -189,8 +242,9 @@ async def reset_password(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
-    user.hashed_password = hash_password(body.new_password)
+    user.hashed_password = await hash_password_async(body.new_password)
     await db.commit()
+    await revoke_all_user_sessions(user_id)
     return {"status": "password_reset"}
 
 
@@ -209,10 +263,11 @@ async def change_password(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
-    if not verify_password(body.old_password, user.hashed_password):
+    if not await verify_password_async(body.old_password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password"
         )
-    user.hashed_password = hash_password(body.new_password)
+    user.hashed_password = await hash_password_async(body.new_password)
     await db.commit()
+    await revoke_all_user_sessions(user_id)
     return {"status": "password_changed"}

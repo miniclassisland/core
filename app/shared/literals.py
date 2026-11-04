@@ -38,7 +38,7 @@ GRACE_TTL = 30
 
 RECOVERY_KEY_PREFIX = "recovery_codes"
 RECOVERY_CODE_COUNT = 8
-RECOVERY_CODE_LENGTH = 8
+RECOVERY_CODE_LENGTH = 16
 
 # Argon2id cost parameters (OWASP recommendations)
 ARGON2_TIME_COST = 3
@@ -80,7 +80,7 @@ ROLE_SUPERADMIN = "superadmin"
 
 
 # ---- 4. Schemas ----
-SCHEMA_USERNAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{2,63}$")
+SCHEMA_USERNAME_RE = re.compile(r"^[a-z0-9_]{3,64}$")
 SCHEMA_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,62}[a-z0-9]$")
 PWD_UPPER = re.compile(r"[A-Z]")
 PWD_LOWER = re.compile(r"[a-z]")

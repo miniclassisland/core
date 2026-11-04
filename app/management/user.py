@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from pydantic import EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db, AsyncSessionLocal
-from app.shared.db.models import User
+from app.shared.db.models import User, SystemConfig
 from app.shared.schemas.schemas import (
     UserOut,
     UserLoginRequest,
@@ -26,15 +26,17 @@ from app.shared.security.auth import (
     create_session_token,
     create_2fa_temp_token,
     pop_2fa_temp_token,
+    revoke_all_user_sessions,
 )
 from app.shared.security.crypto import (
-    hash_password,
-    verify_password,
+    hash_password_async,
+    verify_password_async,
     generate_totp_secret,
     get_totp_uri,
-    verify_totp,
+    verify_totp_once,
     generate_recovery_codes,
     store_recovery_codes,
+    delete_recovery_codes,
     use_recovery_code,
 )
 from app.shared.services.user import (
@@ -43,6 +45,8 @@ from app.shared.services.user import (
     is_name_reserved,
     login_user,
 )
+from app.shared.security.middlewares import record_ip_failure
+from app.shared.utils.logging import get_client_ip_from_request
 
 router = APIRouter(prefix="/user")
 
@@ -55,19 +59,67 @@ async def apply_user(
     payload: UserRegisterRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """User submits registration application (enters Pending status awaiting approval)."""
-    try:
-        await register_user(
-            payload.email,
-            payload.password,
-            payload.display_name,
-            db,
-            username=payload.username,
+    """User submits registration application (respects registration_open, require_approval, default_role)."""
+    cfg_rows = (
+        (
+            await db.execute(
+                select(SystemConfig).where(
+                    SystemConfig.key.in_(
+                        ("registration_open", "require_approval", "default_role")
+                    )
+                )
+            )
         )
+        .scalars()
+        .all()
+    )
+    cfg_map = {r.key: r.value for r in cfg_rows}
+
+    if cfg_map.get("registration_open", "true").lower() == "false":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public user registration is currently disabled",
+        )
+
+    require_approval = cfg_map.get("require_approval", "true").lower() != "false"
+    raw_default_role = cfg_map.get("default_role", "normal").strip()
+    safe_default_role = (
+        raw_default_role
+        if raw_default_role not in ("superadmin", "admin", "banned", "pending", "")
+        else "normal"
+    )
+
+    try:
+        if require_approval:
+            await register_user(
+                payload.email,
+                payload.password,
+                payload.display_name,
+                db,
+                username=payload.username,
+                role_code="pending",
+                is_active=False,
+            )
+        else:
+            await register_user(
+                payload.email,
+                payload.password,
+                payload.display_name,
+                db,
+                username=payload.username,
+                role_code=safe_default_role,
+                is_active=True,
+                can_create_account=False,
+                create_default_account=True,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     return MessageResponse(
-        message="Registration successful, awaiting administrator approval"
+        message=(
+            "Registration successful, awaiting administrator approval"
+            if require_approval
+            else "Registration successful"
+        )
     )
 
 
@@ -186,6 +238,10 @@ async def change_username(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid"
         )
+    if await is_name_reserved(body.username, db):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Name is reserved by system"
+        )
     dup = await db.execute(
         select(User).where(User.username == body.username, User.id != uid)
     )
@@ -223,6 +279,7 @@ async def change_display_name(
 @router.post("/info/password/change", tags=["UserInfo"])
 async def change_password(
     body: PasswordChange,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
@@ -232,30 +289,42 @@ async def change_password(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
-    if not verify_password(body.old_password, user.hashed_password):
+    if not await verify_password_async(body.old_password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Incorrect old password"
         )
-    user.hashed_password = hash_password(body.new_password)
+    user.hashed_password = await hash_password_async(body.new_password)
     await db.commit()
+    auth_hdr = request.headers.get("authorization", "")
+    cur_tok = auth_hdr[7:] if auth_hdr.startswith("Bearer ") else None
+    await revoke_all_user_sessions(uid, except_token=cur_tok)
     return {"status": "ok", "message": "Password updated"}
 
 
 @router.post("/info/password/reset", tags=["UserInfo"])
 async def reset_password(
+    request: Request,
     body: PasswordReset = Body(default=None),
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """Reset user password."""
+    """Reset user password (requires Super Admin privilege; regular users must use /password/change)."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
+    if user.role_code != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Direct password reset without old password is restricted to Super Admin",
+        )
     if body and body.new_password:
-        user.hashed_password = hash_password(body.new_password)
+        user.hashed_password = await hash_password_async(body.new_password)
         await db.commit()
+        auth_hdr = request.headers.get("authorization", "")
+        cur_tok = auth_hdr[7:] if auth_hdr.startswith("Bearer ") else None
+        await revoke_all_user_sessions(uid, except_token=cur_tok)
     return {"status": "ok", "message": "Password reset"}
 
 
@@ -288,6 +357,7 @@ async def enable_2fa(
 @router.post("/2fa/totp/confirm", tags=["2FA"])
 async def confirm_2fa(
     body: TotpConfirmRequest,
+    request: Request = None,  # type: ignore[assignment]
     uid: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
@@ -297,7 +367,9 @@ async def confirm_2fa(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Please call /enable first"
         )
-    if not verify_totp(user.totp_secret or "", body.code):
+    if not await verify_totp_once(uid, user.totp_secret or "", body.code):
+        if isinstance(request, Request):
+            record_ip_failure(get_client_ip_from_request(request) or "unknown")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid TOTP code"
         )
@@ -314,13 +386,14 @@ async def disable_2fa(
 ):
     """Disable TOTP 2FA for current user (requires password verification)."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if not verify_password(body.password, user.hashed_password):
+    if not await verify_password_async(body.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password"
         )
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
+    await delete_recovery_codes(uid)
     return {"status": "2fa_disabled"}
 
 
@@ -330,7 +403,7 @@ async def verify_2fa_login(body: TotpVerifyRequest):
     uid = await pop_2fa_temp_token(body.temp_token)
     async with AsyncSessionLocal() as db:
         user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if not verify_totp(user.totp_secret or "", body.code):
+    if not await verify_totp_once(uid, user.totp_secret or "", body.code):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code"
         )

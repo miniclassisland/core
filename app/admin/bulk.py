@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.db.session import get_db
 from app.shared.db.models import MODEL_MAP
 from app.shared.schemas.schemas import BatchRequest, BatchOpType
+from app.shared.security.auth import require_role
 from app.shared.security.crypto import normalize_resource_payload
 from app.shared.utils.tenant import get_tenant_id_or_default
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/bulk", tags=["Bulk"])
+_sa = require_role(100)
 
 
 def dict_deep_merge(base: dict, merge: dict) -> dict:
@@ -34,7 +36,9 @@ async def process_batch(
     account_id: Optional[str] = None,
 ):
     """Execute a batch of resource operations sequentially and return results."""
-    acct_id = account_id or get_tenant_id_or_default()
+    from app.management.account import validate_payload
+
+    acct_id = account_id or req.target_account_id or get_tenant_id_or_default()
     res = []
     try:
         for op in req.operations:
@@ -52,6 +56,7 @@ async def process_batch(
             ).scalar_one_or_none()
             payload = op.payload or {}
             if isinstance(payload, dict):
+                validate_payload(payload)
                 payload = normalize_resource_payload(op.resource_type, payload)
             if op.action == BatchOpType.delete and record:
                 await db.delete(record)
@@ -66,12 +71,16 @@ async def process_batch(
                 merged = normalize_resource_payload(
                     op.resource_type, dict_deep_merge(cur, payload)
                 )
+                validate_payload(merged)
                 record.content = json.dumps(merged, ensure_ascii=False)
                 record.version = (record.version or 0) + 1
                 record.updated_at = datetime.now(timezone.utc)
             res.append({"action": op.action, "name": op.name, "status": "success"})
         await db.commit()
         return {"status": "success", "results": res}
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception as exc:
         await db.rollback()
         logger.exception("Batch operation exception: %s", exc)
@@ -85,6 +94,7 @@ async def process_batch(
 async def admin_bulk(
     req: BatchRequest,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(_sa),
 ):
     """Execute batch operations as Super Admin."""
     return await process_batch(req, db)

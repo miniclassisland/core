@@ -4,7 +4,8 @@ Contains key pair management (PGPy), handshake challenge state, heartbeat online
 """
 
 import os
-import uuid
+import secrets
+import time
 import logging
 from typing import Any
 import pgpy
@@ -24,6 +25,9 @@ logger = logging.getLogger(__name__)
 SESSION_TTL = 86400  # 24 hours
 HANDSHAKE_TTL = 120  # 2 minutes
 ONLINE_TTL = 60  # 60 seconds
+_LOCAL_SESSION_CACHE: dict[str, tuple[float, str, str]] = {}
+_LOCAL_SESSION_TTL = 30.0
+_MAX_LOCAL_SESSION_CACHE = 16384
 
 
 # ---- GPG Key Generation & Decryption ----
@@ -129,37 +133,70 @@ class SessionManager:
     async def create_session(self, tenant_id: str, cuid: str) -> str:
         """Generate session token for device and bind identity."""
         rd = get_redis(REDIS_DB_SESSION)
-        sid = str(uuid.uuid4())
+        sid = secrets.token_urlsafe(32)
         key = f"session:{sid}"
         await rd.hset(key, mapping={"cuid": cuid, "tenant_id": tenant_id})
         await rd.expire(key, SESSION_TTL)
+        if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:  # pragma: no cover
+            _LOCAL_SESSION_CACHE.clear()
+        _LOCAL_SESSION_CACHE[sid] = (
+            time.monotonic() + _LOCAL_SESSION_TTL,
+            cuid,
+            tenant_id,
+        )
         return sid
 
     async def validate_session(self, sid: str) -> str | None:
         """Retrieve corresponding client cuid from session ID."""
         if not sid:
             return None
+        now = time.monotonic()
+        hit = _LOCAL_SESSION_CACHE.get(sid)
+        if hit is not None and now < hit[0]:
+            return hit[1]
         rd = get_redis(REDIS_DB_SESSION)
-        return await rd.hget(f"session:{sid}", "cuid")
+        data = await rd.hgetall(f"session:{sid}")
+        if not data or "cuid" not in data:
+            return None
+        cuid = data["cuid"]
+        tid = data.get("tenant_id", "")
+        if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:  # pragma: no cover
+            _LOCAL_SESSION_CACHE.clear()
+        _LOCAL_SESSION_CACHE[sid] = (now + _LOCAL_SESSION_TTL, cuid, tid)
+        return cuid
 
     async def get_session_tenant(self, sid: str) -> str | None:
         """Retrieve corresponding tenant ID from session ID."""
         if not sid:
             return None
+        now = time.monotonic()
+        hit = _LOCAL_SESSION_CACHE.get(sid)
+        if hit is not None and now < hit[0]:
+            return hit[2]
         rd = get_redis(REDIS_DB_SESSION)
         return await rd.hget(f"session:{sid}", "tenant_id")
 
     async def set_client_online(self, tid: str, cuid: str, ip: str = ""):
-        """Record device online heartbeat and bind IP."""
+        """Record device online heartbeat and bind IP via single Redis pipeline."""
         rd = get_redis(REDIS_DB_SESSION)
         key = f"online:{tid}:{cuid}"
-        await rd.hset(key, mapping={"status": "online", "ip": ip})
-        await rd.expire(key, ONLINE_TTL)
+        pipe = rd.pipeline(transaction=False)
+        pipe.hset(key, mapping={"status": "online", "ip": ip})
+        pipe.expire(key, ONLINE_TTL)
+        if tid:
+            idx_key = f"online_set:{tid}"
+            pipe.sadd(idx_key, cuid)
+            pipe.expire(idx_key, SESSION_TTL)
+        await pipe.execute()
 
     async def set_client_offline(self, tid: str, cuid: str):
-        """Explicitly set device offline."""
+        """Explicitly set device offline via single Redis pipeline."""
         rd = get_redis(REDIS_DB_SESSION)
-        await rd.delete(f"online:{tid}:{cuid}")
+        pipe = rd.pipeline(transaction=False)
+        pipe.delete(f"online:{tid}:{cuid}")
+        if tid:
+            pipe.srem(f"online_set:{tid}", cuid)
+        await pipe.execute()
 
     async def is_client_online(self, tid: str, cuid: str) -> bool:
         """Check if device is online."""
@@ -176,21 +213,52 @@ class SessionManager:
         key = f"online:{tid}:{cuid}"
         if await rd.exists(key):
             await rd.expire(key, ONLINE_TTL)
+            if tid:
+                await rd.expire(f"online_set:{tid}", SESSION_TTL)
         else:
             await self.set_client_online(tid, cuid, "")
 
     async def get_all_clients_status(self, tid: str) -> list[dict]:
-        """Get all online devices status list under tenant."""
+        """Get all online devices status list under tenant via O(K_tenant) set index and pipeline."""
         rd = get_redis(REDIS_DB_SESSION)
-        prefix = f"online:{tid}:"
         res = []
+        seen: set[str] = set()
+        if tid:
+            idx_key = f"online_set:{tid}"
+            members = list(await rd.smembers(idx_key))
+            if not members:
+                return res
+            pipe = rd.pipeline(transaction=False)
+            for cuid in members:
+                pipe.hgetall(f"online:{tid}:{cuid}")
+            results = await pipe.execute()
+            stale: list[str] = []
+            for cuid, data in zip(members, results):
+                if data:
+                    seen.add(cuid)
+                    res.append(
+                        {
+                            "uid": cuid,
+                            "status": "online",
+                            "ip": data.get("ip", ""),
+                        }
+                    )
+                else:
+                    stale.append(cuid)
+            if stale:
+                await rd.srem(idx_key, *stale)
+            return res
+
+        prefix = "online::"
         async for key in rd.scan_iter(match=f"{prefix}*"):
-            data = await rd.hgetall(key)
-            res.append(
-                {
-                    "uid": key[len(prefix) :],
-                    "status": "online",
-                    "ip": data.get("ip", ""),
-                }
-            )
+            uid = key[len(prefix) :]
+            if uid not in seen:
+                data = await rd.hgetall(key)
+                res.append(
+                    {
+                        "uid": uid,
+                        "status": "online",
+                        "ip": data.get("ip", ""),
+                    }
+                )
         return res

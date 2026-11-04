@@ -1,18 +1,23 @@
 import json
 import logging
-from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select, or_
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from sqlalchemy import select
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import MODEL_MAP
 from app.shared.literals import DEFAULT_RESOURCES
 from app.shared.utils.tenant import set_search_path
+from app.shared.utils.logging import get_client_ip_from_request
 from app.shared.security.auth import resolve_token
 from app.shared.security.crypto import normalize_resource_payload
 from app.shared.services.quota import check_quota, record_bandwidth_bytes
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+# Fast in-process cache of normalized JSON strings keyed by (account_id, resource_type, name, version)
+_NORMALIZED_RESOURCE_CACHE: dict[tuple[str, str, str, int], str] = {}
+_MAX_RESOURCE_CACHE_SIZE = 2048
 
 
 @router.get("/get", tags=["TokenGet"])
@@ -24,7 +29,19 @@ async def get_resource_by_token(token: str, request: Request):
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid or expired token"
         )
 
-    tenant_id, resource_type, name, _token_ip = result
+    tenant_id, resource_type, name, token_ip = result
+    req_ip = get_client_ip_from_request(request)
+    if (
+        token_ip
+        and req_ip
+        and token_ip not in ("127.0.0.1", "::1", "testclient")
+        and req_ip not in ("127.0.0.1", "::1", "testclient")
+        and token_ip != req_ip
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Token IP address mismatch",
+        )
     model = MODEL_MAP.get(resource_type)
     if model is None:  # pragma: no cover
         raise HTTPException(
@@ -49,12 +66,16 @@ async def get_resource_by_token(token: str, request: Request):
                 )
             )
         ).scalar_one_or_none()
-        if row is None:
+        if (
+            row is None
+            and effective_tid != "default"
+            and resource_type != "Credentials"
+        ):
             row = (
                 (
                     await db.execute(
                         select(model).where(
-                            or_(model.account_id == "default", model.name == name),
+                            model.account_id == "default",
                             model.name == name,
                         )
                     )
@@ -73,6 +94,17 @@ async def get_resource_by_token(token: str, request: Request):
             status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found"
         )
 
+    cache_key = (
+        row.account_id,
+        resource_type,
+        row.name,
+        int(row.version or 1),
+    )
+    cached_json = _NORMALIZED_RESOURCE_CACHE.get(cache_key)
+    if cached_json is not None:
+        record_bandwidth_bytes(effective_tid, len(cached_json.encode("utf-8")) + 256)
+        return Response(content=cached_json, media_type="application/json")
+
     try:
         parsed = json.loads(row.content)
     except (json.JSONDecodeError, TypeError):
@@ -80,5 +112,10 @@ async def get_resource_by_token(token: str, request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Corrupted resource content",
         )
-    record_bandwidth_bytes(effective_tid, len(row.content.encode("utf-8")) + 256)
-    return normalize_resource_payload(resource_type, parsed)
+    norm_obj = normalize_resource_payload(resource_type, parsed)
+    norm_json = json.dumps(norm_obj, ensure_ascii=False)
+    if len(_NORMALIZED_RESOURCE_CACHE) >= _MAX_RESOURCE_CACHE_SIZE:  # pragma: no cover
+        _NORMALIZED_RESOURCE_CACHE.clear()
+    _NORMALIZED_RESOURCE_CACHE[cache_key] = norm_json
+    record_bandwidth_bytes(effective_tid, len(norm_json.encode("utf-8")) + 256)
+    return Response(content=norm_json, media_type="application/json")

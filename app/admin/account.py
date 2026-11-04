@@ -1,18 +1,17 @@
+import asyncio
 import os
+import re
 import sys
 import threading
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request, status
-from sqlalchemy import select, func, delete, or_
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
 from app.shared.db.models import (
     Account,
-    AccountMember,
-    AccountQuota,
     User,
     ClientRecord,
-    PreRegisteredClient,
     AuditLog,
 )
 from app.shared.schemas.schemas import (
@@ -23,26 +22,29 @@ from app.shared.schemas.schemas import (
     QuotaSetRequest,
     UserOut,
 )
+from app.shared.security import auth as auth_sec
 from app.shared.security.auth import (
     require_role,
     verify_oobe_passcode,
     verify_oobe_token,
     get_oobe_token,
+    clear_oobe_codes,
 )
 from app.shared.services.user import (
     list_pending_users,
     reject_user,
     approve_user,
     create_account,
-    validate_slug_format,
+    update_account_info,
+    cleanup_account_data,
 )
 from app.shared.services.quota import get_quotas, set_quota, get_bandwidth_mb
-from app.shared.runtime import get_session_manager
+from app.shared.runtime import get_command_servicer, get_session_manager
 from app.shared.utils.oobe import write_config_file, init_database
-from app.shared.utils.tenant import invalidate_cached_account
 
 router = APIRouter()
 _sa = require_role(100)
+_oobe_lock = asyncio.Lock()
 
 
 def _to_out(user: User) -> UserOut:
@@ -105,9 +107,12 @@ async def get_platform_stats(
     total_clients = await db.scalar(select(func.count(ClientRecord.uid))) or 0
     total_audit_logs = await db.scalar(select(func.count(AuditLog.id))) or 0
 
+    cs = get_command_servicer(request)
     sm = get_session_manager(request)
     online_clients = 0
-    if sm:
+    if cs and getattr(cs, "client_queues", None):
+        online_clients = len(cs.client_queues)
+    elif sm:
         accts = (await db.execute(select(Account.id))).scalars().all()
         seen_uids: set[str] = set()
         for aid in list(accts) + [""]:
@@ -149,8 +154,14 @@ async def search_accounts(
     """Search accounts by name or slug."""
     stmt = select(Account).order_by(Account.created_at.desc())
     if q:
-        pattern = f"%{q}%"
-        stmt = stmt.where(or_(Account.name.ilike(pattern), Account.slug.ilike(pattern)))
+        escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        stmt = stmt.where(
+            or_(
+                Account.name.ilike(pattern, escape="\\"),
+                Account.slug.ilike(pattern, escape="\\"),
+            )
+        )
     res = await db.execute(stmt)
     return [_acct_out(a) for a in res.scalars().all()]
 
@@ -197,47 +208,34 @@ async def admin_update_account(
     account_id: str,
     body: AccountUpdate,
     db: AsyncSession = Depends(get_db),
-    _user=Depends(_sa),
+    admin_user: User = Depends(_sa),
 ):
-    """Update account properties (name, slug, is_active, registration_mode)."""
-    acct = (
-        await db.execute(select(Account).where(Account.id == account_id))
-    ).scalar_one_or_none()
+    """Update account properties (new_id, name, slug, is_active, registration_mode)."""
+    uid = getattr(admin_user, "id", "")
+    if not uid:
+        u = (
+            (await db.execute(select(User).where(User.role_code == "superadmin")))
+            .scalars()
+            .first()
+        )
+        uid = u.id if u else ""
+    try:
+        acct = await update_account_info(
+            account_id,
+            uid,
+            db,
+            new_id=body.new_id,
+            name=body.name,
+            slug=body.slug,
+            is_active=body.is_active,
+            registration_mode=body.registration_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     if not acct:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
         )
-    old_slug = acct.slug
-    if body.name is not None:
-        acct.name = body.name.strip()
-    if body.slug is not None and body.slug != acct.slug:
-        if not validate_slug_format(body.slug):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Slug format invalid"
-            )
-        dup = (
-            await db.execute(
-                select(Account).where(
-                    Account.slug == body.slug, Account.id != account_id
-                )
-            )
-        ).scalar_one_or_none()
-        if dup:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail="Slug is already taken"
-            )
-        acct.slug = body.slug
-    if body.is_active is not None:
-        acct.is_active = body.is_active
-    if body.registration_mode is not None and body.registration_mode in (
-        "open",
-        "pairing",
-        "pre_reg",
-    ):
-        acct.registration_mode = body.registration_mode
-    await db.commit()
-    await invalidate_cached_account(old_slug)
-    await invalidate_cached_account(acct.slug)
     return _acct_out(acct)
 
 
@@ -255,14 +253,7 @@ async def admin_delete_account(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
         )
-    await invalidate_cached_account(acct.slug)
-    await db.execute(
-        delete(AccountMember).where(AccountMember.account_id == account_id)
-    )
-    await db.execute(delete(AccountQuota).where(AccountQuota.account_id == account_id))
-    await db.execute(
-        delete(PreRegisteredClient).where(PreRegisteredClient.account_id == account_id)
-    )
+    await cleanup_account_data(account_id, acct.slug, db)
     await db.delete(acct)
     await db.commit()
     return {"status": "deleted"}
@@ -287,8 +278,12 @@ async def admin_get_account_quotas(
         )
         or 0
     )
+    cs = get_command_servicer(request)
     sm = get_session_manager(request)
-    grpc_conn_count = len(await sm.get_all_clients_status(account_id)) if sm else 0
+    if cs and getattr(cs, "tenant_clients", None) and account_id in cs.tenant_clients:
+        grpc_conn_count = len(cs.tenant_clients[account_id])
+    else:
+        grpc_conn_count = len(await sm.get_all_clients_status(account_id)) if sm else 0
     out = []
     for r in rows:
         if r.quota_key == "max_clients":
@@ -390,13 +385,61 @@ async def reject_pending(
 
 @router.post("/oobe/verify", tags=["OOBE"])
 @router.post("/api/oobe/verify", tags=["OOBE"])
-async def verify_passcode(passcode: str = Form(...)):
-    """Verify pairing passcode and issue elevated execution token."""
-    if not verify_oobe_passcode(passcode):
+async def verify_passcode(request: Request, passcode: str = Form(...)):
+    """Verify pairing passcode and issue elevated execution token (rate-limited per source IP)."""
+    from app.shared.utils.logging import get_client_ip_from_request
+
+    client_ip = get_client_ip_from_request(request) or "unknown"
+    if auth_sec.is_oobe_locked_out(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed OOBE attempts, please wait 60 seconds",
+        )
+    if not verify_oobe_passcode(passcode, client_ip=client_ip):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid passcode or expired"
         )
     return {"token": get_oobe_token()}
+
+
+def _validate_oobe_inputs(
+    db_url: str,
+    redis_url: str,
+    username: str,
+    email: str,
+    password: str,
+) -> dict[str, str]:
+    """Validate OOBE form parameters against security & format requirements."""
+    db_u = db_url.strip()
+    if not db_u.startswith(("postgresql", "postgres")):
+        raise ValueError("Database URL must start with postgresql")
+    rd_u = redis_url.strip()
+    if not rd_u.startswith(("redis://", "rediss://")):
+        raise ValueError("Redis URL must start with redis:// or rediss://")
+    uname = username.strip().lower()
+    if not re.match(r"^[a-z0-9_]{3,64}$", uname):
+        raise ValueError(
+            "Username must be 3-64 lowercase alphanumeric characters and underscores"
+        )
+    em = email.strip()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", em):
+        raise ValueError("Invalid email format")
+    if (
+        len(password) < 12
+        or not re.search(r"[A-Z]", password)
+        or not re.search(r"[a-z]", password)
+        or not re.search(r"[0-9]", password)
+    ):
+        raise ValueError(
+            "Password must be at least 12 characters and contain uppercase, lowercase, and digits"
+        )
+    return {
+        "db_url": db_u,
+        "redis_url": rd_u,
+        "username": uname,
+        "email": em,
+        "password": password,
+    }
 
 
 @router.post("/oobe/configure", tags=["OOBE"])
@@ -411,28 +454,39 @@ async def configure_system(
     password: str = Form(...),
 ):
     """Verify token, write configuration, initialize database schema, and trigger restart."""
-    if not verify_oobe_token(token):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token or expired"
-        )
+    async with _oobe_lock:
+        if not verify_oobe_token(token):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid token or expired",
+            )
 
-    config = {
-        "db_url": db_url,
-        "redis_url": redis_url,
-        "domain": domain,
-        "username": username,
-        "email": email,
-        "password": password,
-    }
+        try:
+            validated = _validate_oobe_inputs(
+                db_url, redis_url, username, email, password
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            )
 
-    try:
-        write_config_file(config)
-        await init_database(config)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Initialization failed: {str(e)}",
-        )
+        config = {
+            **validated,
+            "domain": domain.strip(),
+        }
+
+        saved_token = auth_sec.OOBE_TOKEN
+        auth_sec.OOBE_TOKEN = ""
+        try:
+            await init_database(config)
+            write_config_file(config)
+            clear_oobe_codes()
+        except Exception as e:
+            auth_sec.OOBE_TOKEN = saved_token
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Initialization failed: {str(e)}",
+            )
 
     # Trigger system restart in 1 second
     threading.Timer(

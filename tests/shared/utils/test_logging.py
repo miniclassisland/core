@@ -33,10 +33,14 @@ def test_custom_formatter():
 def test_get_client_ip_from_request():
     """测试从 HTTP 请求中提取对端 IP（含反向代理头分支）。"""
     req1 = MagicMock(spec=Request)
+    req1.client = MagicMock()
+    req1.client.host = "127.0.0.1"
     req1.headers = {"x-forwarded-for": "1.2.3.4, 5.6.7.8"}
     assert log_util.get_client_ip_from_request(req1) == "1.2.3.4"
 
     req2 = MagicMock(spec=Request)
+    req2.client = MagicMock()
+    req2.client.host = "127.0.0.1"
     req2.headers = {"x-real-ip": "1.2.3.4"}
     assert log_util.get_client_ip_from_request(req2) == "1.2.3.4"
 
@@ -60,10 +64,12 @@ def test_get_client_ip_from_grpc():
     assert log_util.get_client_ip_from_grpc(context) == "127.0.0.1"
 
     ctx_xff = MagicMock()
+    ctx_xff.peer.return_value = "ipv4:127.0.0.1:54321"
     ctx_xff.invocation_metadata.return_value = [("x-forwarded-for", "9.8.7.6, 1.1.1.1")]
     assert log_util.get_client_ip_from_grpc(ctx_xff) == "9.8.7.6"
 
     ctx_xri = MagicMock()
+    ctx_xri.peer.return_value = "ipv4:127.0.0.1:54321"
     ctx_xri.invocation_metadata.return_value = [("x-real-ip", "5.5.5.5")]
     assert log_util.get_client_ip_from_grpc(ctx_xri) == "5.5.5.5"
 

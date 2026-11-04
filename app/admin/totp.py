@@ -5,7 +5,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.db.session import get_db
 from app.shared.db.models import User
 from app.shared.security.auth import require_role
-from app.shared.security.crypto import generate_totp_secret
+from app.shared.security.crypto import (
+    generate_totp_secret,
+    generate_recovery_codes,
+    store_recovery_codes,
+    delete_recovery_codes,
+)
 from app.shared.literals import MSG_USER_NOT_FOUND
 
 router = APIRouter(prefix="/user", tags=["2FA"])
@@ -30,7 +35,9 @@ async def admin_enable_2fa(
     user.totp_secret = secret
     user.totp_enabled = True
     await db.commit()
-    return {"status": "enabled", "secret": secret}
+    codes = generate_recovery_codes()
+    await store_recovery_codes(user_id, codes)
+    return {"status": "enabled", "secret": secret, "recovery_codes": codes}
 
 
 @router.post("/{user_id}/2fa/disable")
@@ -50,6 +57,7 @@ async def admin_disable_2fa(
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
+    await delete_recovery_codes(user_id)
     return {"status": "disabled", "message": "2FA disabled"}
 
 
@@ -70,4 +78,5 @@ async def admin_reset_2fa(
     user.totp_secret = generate_totp_secret()
     user.totp_enabled = False
     await db.commit()
+    await delete_recovery_codes(user_id)
     return {"status": "reset", "message": "TOTP secret reset"}

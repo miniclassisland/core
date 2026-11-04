@@ -61,9 +61,18 @@ async def test_quota_service_fallback():
         assert await quota.check_quota(account_id, "max_bandwidth_mb", db) is True
         await quota.set_quota(account_id, "max_bandwidth_mb", 1, db)
         assert await quota.check_quota(account_id, "max_bandwidth_mb", db) is False
+
+        # Test flushing >= 1 MB in check_quota and get_quotas
         quota.reset_bandwidth_bytes(account_id)
+        await quota.set_quota(account_id, "max_bandwidth_mb", 10, db)
+        quota.record_bandwidth_bytes(account_id, 2 * 1024 * 1024 + 100)
+        assert await quota.check_quota(account_id, "max_bandwidth_mb", db) is True
+        rec_bw = await quota.get_quota_record(account_id, "max_bandwidth_mb", db)
+        assert rec_bw is not None and rec_bw.current_value >= 2
 
         all_q = await quota.get_quotas(account_id, db)
         assert len(all_q) >= 5
+        quota.record_bandwidth_bytes(account_id, 1024 * 1024 + 50)
         all_q_second = await quota.get_quotas(account_id, db)
         assert len(all_q_second) == len(all_q)
+        quota.reset_bandwidth_bytes(account_id)

@@ -21,12 +21,15 @@ from app.shared.db.models import (
     ClientProfile,
     ConfigUploadRecord,
     AuditLog,
+    SystemConfig,
     MODEL_MAP,
 )
 from app.shared.db.schema_init import seed_account_defaults
 from app.shared.schemas.schemas import (
     AccountOut,
     AccountCreate,
+    AccountUpdate,
+    AccountIdUpdate,
     AccountNameUpdate,
     SlugUpdate,
     AccessMemberOut,
@@ -53,10 +56,14 @@ from app.shared.security.crypto import (
 )
 from app.shared.services.user import (
     create_account,
+    update_account_info,
     update_account_slug,
     validate_slug_format,
     is_name_reserved,
+    cleanup_account_data,
 )
+from app.shared.security.middlewares import record_ip_failure
+from app.shared.utils.logging import get_client_ip_from_request
 from app.shared.services.quota import get_quotas, set_quota, get_bandwidth_mb
 from app.shared.schemas.schemas import QuotaOut, QuotaSetRequest
 from app.shared.literals import AUDIT_EVENT_NAMES, CONFIG_TYPE_NAMES, DEFAULT_RESOURCES
@@ -71,11 +78,51 @@ router = APIRouter()
 
 # ---- 1. Tenant Context Adaptive Dependency ----
 
+_VALID_ACCOUNT_ROLES = {"owner", "admin", "member", "viewer"}
+
+
+async def _get_effective_account_role(
+    account_id: str,
+    user_id: str,
+    db: AsyncSession,
+) -> Optional[str]:
+    """Return effective role in account ('owner' for superadmin, else member role or None)."""
+    member = (
+        await db.execute(
+            select(AccountMember).where(
+                AccountMember.account_id == account_id,
+                AccountMember.user_id == user_id,
+            )
+        )
+    ).scalar_one_or_none()
+    u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if u and u.role_code == "superadmin":
+        return "owner"
+    if member:
+        return member.role_in_account or "member"
+    return None
+
+
+async def _require_account_admin(
+    account_id: str,
+    user_id: str,
+    db: AsyncSession,
+) -> str:
+    """Ensure caller has owner or admin role in the account."""
+    role = await _get_effective_account_role(account_id, user_id, db)
+    if role not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only account owner or admin can perform this operation",
+        )
+    return role
+
 
 async def setup_tenant_context(
     account_id: str,
     db: AsyncSession = Depends(get_db),
     user_id: str = Depends(get_current_user_id),
+    request: Request = None,  # type: ignore[assignment]
 ):
     """Set tenant ID and database search_path in coroutine context, and verify member permissions."""
     from app.shared.utils.tenant import tenant_ctx, schema_ctx, set_search_path
@@ -88,33 +135,68 @@ async def setup_tenant_context(
             detail="Account invalid or non-existent",
         )
 
-    # Verify if current user is a member of this account (or superadmin)
-    member_stmt = select(AccountMember).where(
-        AccountMember.account_id == account_id,
-        AccountMember.user_id == user_id,
-    )
-    member = (await db.execute(member_stmt)).scalar_one_or_none()
-    if not member:
-        u = (
-            await db.execute(select(User).where(User.id == user_id))
-        ).scalar_one_or_none()
-        if not u or u.role_code != "superadmin":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Unauthorized access: You are not a member of this account",
+    role = await _get_effective_account_role(account_id, user_id, db)
+    if not role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized access: You are not a member of this account",
+        )
+
+    if isinstance(request, Request):
+        request.state.role_in_account = role
+        path = request.url.path
+        is_mutating_get = path.endswith("/create") or path.endswith("/delete")
+        if role == "viewer":
+            if (
+                request.method not in ("GET", "HEAD", "OPTIONS")
+                or is_mutating_get
+                or f"/account/{account_id}/Credentials" in path
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Viewer role has read-only access and cannot access Credentials",
+                )
+        elif role == "member":
+            if f"/account/{account_id}/Credentials" in path:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only account owner or admin can access Credentials",
+                )
+            is_admin_only_path = any(
+                seg in path
+                for seg in (
+                    "/pairing/",
+                    "/pre-registration/",
+                    "/broadcast/",
+                    f"/account/{account_id}/Policy/",
+                    "/client/batch",
+                )
+            ) or (
+                f"/account/{account_id}/client/" in path
+                and (
+                    request.method == "DELETE"
+                    or path.endswith(("/disable", "/enable", "/disconnect"))
+                )
             )
+            if is_admin_only_path and (
+                request.method not in ("GET", "HEAD", "OPTIONS") or is_mutating_get
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only account owner or admin can perform this operation",
+                )
 
     tenant_ctx.set(account.id)
     schema_ctx.set(f"tenant_{account.slug}")
     await set_search_path(db)
 
 
-def _account_out(a: Account) -> AccountOut:
+def _account_out(a: Account, *, include_api_key: bool = True) -> AccountOut:
     return AccountOut(
         id=a.id,
         name=a.name,
         slug=a.slug,
-        api_key=a.api_key,
+        api_key=a.api_key if include_api_key else "",
         is_active=a.is_active,
         registration_mode=getattr(a, "registration_mode", "open") or "open",
         created_at=(
@@ -167,11 +249,12 @@ async def search_accounts(
     user_id: str = Depends(get_current_user_id),
 ):
     """Search accessible accounts by name."""
+    escaped = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     stmt = (
         select(Account)
         .join(AccountMember, Account.id == AccountMember.account_id)
         .where(AccountMember.user_id == user_id)
-        .where(Account.name.ilike(f"%{q}%"))
+        .where(Account.name.ilike(f"%{escaped}%", escape="\\"))
     )
     rows = (await db.execute(stmt)).scalars().all()
     return [_account_out(a) for a in rows]
@@ -189,6 +272,8 @@ async def apply_account(
     user_id: str = Depends(get_current_user_id),
 ):
     """Apply to create a new account."""
+    from sqlalchemy import func
+
     user = (
         await db.execute(select(User).where(User.id == user_id))
     ).scalar_one_or_none()
@@ -199,6 +284,34 @@ async def apply_account(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Permission denied to create account",
         )
+    if user.role_code != "superadmin":
+        cfg_max = (
+            await db.execute(
+                select(SystemConfig).where(SystemConfig.key == "max_accounts_per_user")
+            )
+        ).scalar_one_or_none()
+        try:
+            max_accounts = int(cfg_max.value) if cfg_max and cfg_max.value else 0
+        except ValueError:
+            max_accounts = 0
+        if max_accounts > 0:
+            owned_count = (
+                await db.scalar(
+                    select(func.count(AccountMember.id))
+                    .join(Account, Account.id == AccountMember.account_id)
+                    .where(
+                        AccountMember.user_id == user_id,
+                        AccountMember.role_in_account == "owner",
+                        Account.is_active.is_(True),
+                    )
+                )
+                or 0
+            )
+            if owned_count >= max_accounts:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Maximum number of accounts per user reached",
+                )
     try:
         account = await create_account(body.name, user_id, db, slug=body.slug)
     except ValueError as exc:
@@ -212,16 +325,9 @@ async def delete_account(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """Deactivate account (Owner permission required, cleans up associated data)."""
-    member = (
-        await db.execute(
-            select(AccountMember).where(
-                AccountMember.account_id == account_id,
-                AccountMember.user_id == uid,
-            )
-        )
-    ).scalar_one_or_none()
-    if not member or member.role_in_account != "owner":
+    """Deactivate account (Owner or Super Admin permission required, cleans up associated data)."""
+    role = await _get_effective_account_role(account_id, uid, db)
+    if role != "owner":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only account owner can perform this operation",
@@ -235,13 +341,7 @@ async def delete_account(
         )
 
     acct.is_active = False
-    await invalidate_cached_account(acct.slug)
-    await db.execute(
-        delete(AccountMember).where(AccountMember.account_id == account_id)
-    )
-    await db.execute(
-        delete(PreRegisteredClient).where(PreRegisteredClient.account_id == account_id)
-    )
+    await cleanup_account_data(account_id, acct.slug, db)
     await db.commit()
     return {
         "status": "ok",
@@ -253,7 +353,7 @@ async def delete_account(
 async def get_account_info(
     account_id: str,
     db: AsyncSession = Depends(get_db),
-    _uid: str = Depends(get_current_user_id),
+    uid: str = Depends(get_current_user_id),
 ):
     """Get account information."""
     acct = (
@@ -263,7 +363,13 @@ async def get_account_info(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
         )
-    return _account_out(acct)
+    role = await _get_effective_account_role(account_id, uid, db)
+    if not role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized access: You are not a member of this account",
+        )
+    return _account_out(acct, include_api_key=role in ("owner", "admin"))
 
 
 @router.get(
@@ -343,6 +449,65 @@ async def set_account_quota_mgmt(
 
 
 @router.post(
+    "/account/{account_id}/info",
+    response_model=AccountOut,
+    tags=["Account"],
+)
+async def update_account_basic_info(
+    account_id: str,
+    body: AccountUpdate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
+):
+    """Update account basic info (ID, name, slug, registration_mode, is_active)."""
+    try:
+        acct = await update_account_info(
+            account_id,
+            uid,
+            db,
+            new_id=body.new_id,
+            name=body.name,
+            slug=body.slug,
+            is_active=body.is_active,
+            registration_mode=body.registration_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    if not acct:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
+        )
+    return _account_out(acct)
+
+
+@router.post(
+    "/account/{account_id}/info/id",
+    response_model=AccountOut,
+    tags=["Account"],
+)
+async def change_account_id(
+    account_id: str,
+    body: AccountIdUpdate,
+    db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
+):
+    """Update account ID."""
+    try:
+        acct = await update_account_info(account_id, uid, db, new_id=body.new_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    if not acct:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
+        )
+    return _account_out(acct)
+
+
+@router.post(
     "/account/{account_id}/info/slug", response_model=AccountOut, tags=["Account"]
 )
 async def change_slug(
@@ -369,24 +534,30 @@ async def change_slug(
     "/account/{account_id}/info/name",
     response_model=AccountOut,
     tags=["Account"],
-    dependencies=[Depends(setup_tenant_context)],
 )
 async def change_account_name(
     account_id: str,
     body: AccountNameUpdate,
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
-    """Update account organization display name."""
-    acct = (
-        await db.execute(select(Account).where(Account.id == account_id))
-    ).scalar_one_or_none()
+    """Update account organization display name and optional registration mode."""
+    try:
+        acct = await update_account_info(
+            account_id,
+            uid,
+            db,
+            name=body.name,
+            registration_mode=body.registration_mode,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if not acct:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
         )
-    acct.name = body.name.strip()
-    await db.commit()
-    await invalidate_cached_account(acct.slug)
     return _account_out(acct)
 
 
@@ -405,8 +576,11 @@ async def change_account_name(
 async def regenerate_account_api_key(
     account_id: str,
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Regenerate account API key."""
+    if isinstance(uid, str):
+        await _require_account_admin(account_id, uid, db)
     acct = (
         await db.execute(select(Account).where(Account.id == account_id))
     ).scalar_one_or_none()
@@ -518,8 +692,11 @@ async def rename_access(
     user_id: str,
     body: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Update display name for member user."""
+    if isinstance(uid, str):
+        await _require_account_admin(account_id, uid, db)
     m = (
         await db.execute(
             select(AccountMember).where(
@@ -535,6 +712,20 @@ async def rename_access(
     user = (
         await db.execute(select(User).where(User.id == m.user_id))
     ).scalar_one_or_none()
+    if (
+        user
+        and user.role_code == "superadmin"
+        and isinstance(uid, str)
+        and uid != user.id
+    ):
+        actor = (
+            await db.execute(select(User).where(User.id == uid))
+        ).scalar_one_or_none()
+        if not actor or actor.role_code != "superadmin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Cannot modify Super Admin display name",
+            )
     new_name = body.get("name") or body.get("display_name") or ""
     if user and new_name:
         user.display_name = str(new_name).strip()
@@ -615,8 +806,12 @@ async def delete_access(
     account_id: str,
     user_id: str,
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Remove member from account."""
+    actor_role = "owner"
+    if isinstance(uid, str):
+        actor_role = await _require_account_admin(account_id, uid, db)
     m = (
         await db.execute(
             select(AccountMember).where(
@@ -629,6 +824,28 @@ async def delete_access(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Member record not found"
         )
+    if m.role_in_account == "owner":
+        if actor_role != "owner":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only account owner can remove another owner",
+            )
+        from sqlalchemy import func
+
+        owner_count = (
+            await db.scalar(
+                select(func.count(AccountMember.id)).where(
+                    AccountMember.account_id == account_id,
+                    AccountMember.role_in_account == "owner",
+                )
+            )
+            or 0
+        )
+        if owner_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot remove the last owner of the account",
+            )
     await db.delete(m)
     await db.commit()
 
@@ -644,8 +861,17 @@ async def update_access(
     user_id: str,
     body: AccessRoleUpdate,
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Update member's role within account."""
+    actor_role = "owner"
+    if isinstance(uid, str):
+        actor_role = await _require_account_admin(account_id, uid, db)
+    if body.role_in_account not in _VALID_ACCOUNT_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role_in_account: {body.role_in_account}",
+        )
     m = (
         await db.execute(
             select(AccountMember).where(
@@ -658,6 +884,30 @@ async def update_access(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Member record not found"
         )
+    if (
+        m.role_in_account == "owner" or body.role_in_account == "owner"
+    ) and actor_role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only account owner can grant or modify owner role",
+        )
+    if m.role_in_account == "owner" and body.role_in_account != "owner":
+        from sqlalchemy import func
+
+        owner_count = (
+            await db.scalar(
+                select(func.count(AccountMember.id)).where(
+                    AccountMember.account_id == account_id,
+                    AccountMember.role_in_account == "owner",
+                )
+            )
+            or 0
+        )
+        if owner_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot demote the last owner of the account",
+            )
     m.role_in_account = body.role_in_account
     await db.commit()
     await db.refresh(m)
@@ -725,21 +975,21 @@ async def list_invitations(
 async def search_invitations(
     account_id: str,
     q: str = "",
+    limit: int = 100,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """Search invitations by code."""
-    rows = (
-        (
-            await db.execute(
-                select(Invitation).where(Invitation.account_id == account_id)
-            )
-        )
-        .scalars()
-        .all()
+    stmt = select(Invitation).where(Invitation.account_id == account_id)
+    if q:
+        stmt = stmt.where(Invitation.code.ilike(f"%{q}%"))
+    stmt = (
+        stmt.order_by(Invitation.created_at.desc())
+        .limit(min(max(1, limit), 500))
+        .offset(max(0, offset))
     )
-    if not q:
-        return [_inv_out(inv) for inv in rows]
-    return [_inv_out(inv) for inv in rows if q.lower() in (inv.code or "").lower()]
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_inv_out(inv) for inv in rows]
 
 
 @router.post(
@@ -752,8 +1002,12 @@ async def rename_invitation(
     invitation_id: str,
     body: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Update invitation role or max_uses."""
+    actor_role = "owner"
+    if isinstance(uid, str):
+        actor_role = await _require_account_admin(account_id, uid, db)
     inv = (
         await db.execute(
             select(Invitation).where(
@@ -767,7 +1021,18 @@ async def rename_invitation(
             status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found"
         )
     if "role_in_account" in body and body["role_in_account"]:
-        inv.role_in_account = str(body["role_in_account"])
+        new_role = str(body["role_in_account"])
+        if new_role not in _VALID_ACCOUNT_ROLES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid role_in_account: {new_role}",
+            )
+        if new_role == "owner" and actor_role != "owner":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only account owner can assign owner role to an invitation",
+            )
+        inv.role_in_account = new_role
     if "max_uses" in body and body["max_uses"] is not None:
         inv.max_uses = int(body["max_uses"])
     await db.commit()
@@ -815,6 +1080,19 @@ async def create_invitation(
     uid: str = Depends(get_current_user_id),
 ):
     """Create a new invitation code."""
+    actor_role = "owner"
+    if isinstance(uid, str):
+        actor_role = await _require_account_admin(account_id, uid, db)
+    if body.role_in_account not in _VALID_ACCOUNT_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid role_in_account: {body.role_in_account}",
+        )
+    if body.role_in_account == "owner" and actor_role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only account owner can create an owner invitation",
+        )
     inv = Invitation(
         account_id=account_id,
         inviter_user_id=uid,
@@ -838,8 +1116,11 @@ async def revoke_invitation(
     account_id: str,
     invitation_id: str,
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Revoke specified invitation code."""
+    if isinstance(uid, str):
+        await _require_account_admin(account_id, uid, db)
     inv = (
         await db.execute(
             select(Invitation).where(
@@ -861,15 +1142,20 @@ async def revoke_invitation(
 @router.post("/account/invitation/accept", tags=["Invite"])
 async def accept_invitation(
     body: InvitationAcceptRequest,
+    request: Request = None,  # type: ignore[assignment]
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
     """Redeem an invitation code to join an account."""
     code = body.code.strip()
     inv = (
-        await db.execute(select(Invitation).where(Invitation.code == code))
+        await db.execute(
+            select(Invitation).where(Invitation.code == code).with_for_update()
+        )
     ).scalar_one_or_none()
     if not inv or not inv.is_active:
+        if isinstance(request, Request):
+            record_ip_failure(get_client_ip_from_request(request) or "unknown")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invitation code invalid or revoked",
@@ -1026,31 +1312,29 @@ async def list_pairing_codes(
 async def search_pairing_codes(
     account_id: str,
     q: str = "",
+    limit: int = 100,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """Search pairing codes."""
-    rows = (
-        (
-            await db.execute(
-                select(PairingCode)
-                .where(PairingCode.tenant_id == account_id)
-                .order_by(PairingCode.created_at.desc())
+    stmt = select(PairingCode).where(PairingCode.tenant_id == account_id)
+    if q:
+        pattern = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                PairingCode.code.ilike(pattern),
+                PairingCode.client_id.ilike(pattern),
+                PairingCode.client_uid.ilike(pattern),
+                PairingCode.client_mac.ilike(pattern),
             )
         )
-        .scalars()
-        .all()
+    stmt = (
+        stmt.order_by(PairingCode.created_at.desc())
+        .limit(min(max(1, limit), 500))
+        .offset(max(0, offset))
     )
-    if not q:
-        return [_pairing_out(r) for r in rows]
-    ql = q.lower()
-    return [
-        _pairing_out(r)
-        for r in rows
-        if ql in (r.code or "").lower()
-        or ql in (r.client_id or "").lower()
-        or ql in (r.client_uid or "").lower()
-        or ql in (r.client_mac or "").lower()
-    ]
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_pairing_out(r) for r in rows]
 
 
 @router.post(
@@ -1338,30 +1622,30 @@ async def list_pre_regs(
 async def search_pre_regs(
     account_id: str,
     q: str = "",
+    limit: int = 100,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """Search pre-registered clients by class_identity, label, or mac_address."""
-    rows = (
-        (
-            await db.execute(
-                select(PreRegisteredClient).where(
-                    PreRegisteredClient.account_id == account_id
-                )
+    stmt = select(PreRegisteredClient).where(
+        PreRegisteredClient.account_id == account_id
+    )
+    if q:
+        pattern = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                PreRegisteredClient.class_identity.ilike(pattern),
+                PreRegisteredClient.label.ilike(pattern),
+                PreRegisteredClient.mac_address.ilike(pattern),
             )
         )
-        .scalars()
-        .all()
+    stmt = (
+        stmt.order_by(PreRegisteredClient.created_at.desc())
+        .limit(min(max(1, limit), 500))
+        .offset(max(0, offset))
     )
-    if not q:
-        return [_prereg_out(r) for r in rows]
-    ql = q.lower()
-    return [
-        _prereg_out(r)
-        for r in rows
-        if ql in (r.class_identity or "").lower()
-        or ql in (r.label or "").lower()
-        or ql in (getattr(r, "mac_address", "") or "").lower()
-    ]
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_prereg_out(r) for r in rows]
 
 
 @router.get(
@@ -1727,33 +2011,30 @@ async def search_clients(
     account_id: str,
     request: Request,
     q: str = "",
+    limit: int = 100,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """Search registered physical client devices by UID, ClassIdentity, display_name, MAC, or IP."""
-    rows = (
-        (
-            await db.execute(
-                select(ClientRecord)
-                .where(ClientRecord.account_id == account_id)
-                .order_by(ClientRecord.registered_at.desc())
+    stmt = select(ClientRecord).where(ClientRecord.account_id == account_id)
+    if q:
+        pattern = f"%{q}%"
+        stmt = stmt.where(
+            or_(
+                ClientRecord.uid.ilike(pattern),
+                ClientRecord.client_id.ilike(pattern),
+                ClientRecord.display_name.ilike(pattern),
+                ClientRecord.mac.ilike(pattern),
+                ClientRecord.ip.ilike(pattern),
             )
         )
-        .scalars()
-        .all()
+    stmt = (
+        stmt.order_by(ClientRecord.registered_at.desc())
+        .limit(min(max(1, limit), 500))
+        .offset(max(0, offset))
     )
-    items = await _serialize_clients(account_id, list(rows), request, db)
-    if not q:
-        return items
-    ql = q.lower()
-    return [
-        c
-        for c in items
-        if ql in c["uid"].lower()
-        or ql in c["client_id"].lower()
-        or ql in c["display_name"].lower()
-        or ql in c["mac"].lower()
-        or ql in c["ip"].lower()
-    ]
+    rows = (await db.execute(stmt)).scalars().all()
+    return await _serialize_clients(account_id, list(rows), request, db)
 
 
 @router.get(
@@ -2507,8 +2788,11 @@ async def list_audit_logs(
 async def clear_audit_logs(
     account_id: str,
     db: AsyncSession = Depends(get_db),
+    uid: str = Depends(get_current_user_id),
 ):
     """Clear audit logs for current tenant account."""
+    if isinstance(uid, str):
+        await _require_account_admin(account_id, uid, db)
     await db.execute(delete(AuditLog).where(AuditLog.account_id == account_id))
     await db.commit()
     return {"status": "ok", "message": "Audit logs cleared"}
@@ -2804,11 +3088,20 @@ async def write_data_endpoint(
 async def account_batch_operations(
     account_id: str,
     req: BatchRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Execute batch resource operations under the specified account."""
     from app.admin.bulk import process_batch
 
+    role = getattr(request.state, "role_in_account", "owner")
+    if role == "member":
+        for op in req.operations:
+            if op.resource_type in ("Credentials", "Policy"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only account owner or admin can modify Credentials or Policy",
+                )
     return await process_batch(req, db, account_id=account_id)
 
 

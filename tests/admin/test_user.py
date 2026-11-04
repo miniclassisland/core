@@ -76,10 +76,28 @@ async def test_admin_user_and_2fa_endpoints(test_superadmin_user):
             await client.get("/user/non-existent", headers=headers)
         ).status_code == 404
 
-        # 4. Update user & 404
+        # 4. Update user & 404 & self-demote/invalid-role checks
+        r_self_demote = await client.post(
+            f"/user/{test_superadmin_user}",
+            json={"is_active": False},
+            headers=headers,
+        )
+        assert r_self_demote.status_code == 400
+
+        r_bad_role = await client.post(
+            f"/user/{uid}",
+            json={"role_code": "non_existent_role"},
+            headers=headers,
+        )
+        assert r_bad_role.status_code == 400
+
         r_upd = await client.post(
             f"/user/{uid}",
-            json={"display_name": "Teacher A Updated", "role_code": "normal"},
+            json={
+                "display_name": "Teacher A Updated",
+                "role_code": "normal",
+                "is_active": False,
+            },
             headers=headers,
         )
         assert r_upd.status_code == 200
@@ -91,7 +109,33 @@ async def test_admin_user_and_2fa_endpoints(test_superadmin_user):
             )
         ).status_code == 404
 
-        # 5. Rename user & 404
+        # 5. Rename user & validation & 404
+        async with AsyncSessionLocal() as db:
+            from app.shared.db.models import ReservedName
+
+            db.add(ReservedName(name="reserved_admin_name"))
+            await db.commit()
+
+        assert (
+            await client.post(
+                f"/user/{uid}/rename", json={"name": "BAD FORMAT!"}, headers=headers
+            )
+        ).status_code == 400
+        assert (
+            await client.post(
+                f"/user/{uid}/rename",
+                json={"name": "reserved_admin_name"},
+                headers=headers,
+            )
+        ).status_code == 400
+        assert (
+            await client.post(
+                f"/user/{uid}/rename",
+                json={"name": "superadmin_test"},
+                headers=headers,
+            )
+        ).status_code == 400
+
         r_ren = await client.post(
             f"/user/{uid}/rename", json={"name": "teacher_a_renamed"}, headers=headers
         )
@@ -167,7 +211,11 @@ async def test_admin_user_and_2fa_endpoints(test_superadmin_user):
                 await client.post(f"/user/non-existent/2fa/{action}", headers=headers)
             ).status_code == 404
 
-        # 8. Delete user & 404
+        # 8. Delete user, self-delete protection & 404
+        assert (
+            await client.delete(f"/user/{test_superadmin_user}", headers=headers)
+        ).status_code == 400
+
         r_del = await client.delete(f"/user/{uid}", headers=headers)
         assert r_del.status_code == 200
 

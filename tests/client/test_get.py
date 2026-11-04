@@ -64,6 +64,15 @@ async def test_get_resource_by_token_branches():
         assert r_shared.status_code == 200
         assert r_shared.json()["Subjects"][ensure_guid_str("s1")]["Name"] == "History"
 
+        # 4b. Second download of same (account_id, resource_type, name, version) hits _NORMALIZED_RESOURCE_CACHE
+        tok_shared_cached = await create_token("other-tenant", "Subjects", "shared_sub")
+        r_shared_cached = await client.get("/get", params={"token": tok_shared_cached})
+        assert r_shared_cached.status_code == 200
+        assert (
+            r_shared_cached.json()["Subjects"][ensure_guid_str("s1")]["Name"]
+            == "History"
+        )
+
         # 5. Corrupted JSON -> 500
         tok_corrupt = await create_token("acct-corrupt", "Subjects", "corrupt_sub")
         r_corrupt = await client.get("/get", params={"token": tok_corrupt})
@@ -77,3 +86,14 @@ async def test_get_resource_by_token_branches():
         tok_bw = await create_token("acct-bw-limit", "Subjects", "default")
         r_bw = await client.get("/get", params={"token": tok_bw})
         assert r_bw.status_code == 429
+
+        # 7. Token IP mismatch -> 403 (line 37)
+        tok_ip = await create_token(
+            "acct-x", "Subjects", "default", client_ip="203.0.113.10"
+        )
+        r_ip_mismatch = await client.get(
+            "/get",
+            params={"token": tok_ip},
+            headers={"X-Real-IP": "198.51.100.22"},
+        )
+        assert r_ip_mismatch.status_code == 403

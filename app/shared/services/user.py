@@ -1,11 +1,12 @@
 """MINI ClassIsland shared user, account, and role management business logic service."""
 
+import re
 import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, update, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.models import (
@@ -15,15 +16,33 @@ from app.shared.db.models import (
     AccountQuota,
     CustomRole,
     ReservedName,
+    PreRegisteredClient,
+    PairingCode,
+    Invitation,
+    ClientRecord,
+    ClientProfile,
+    ConfigUploadRecord,
+    AuditLog,
+    MODEL_MAP,
 )
 from app.shared.db.schema_init import seed_account_defaults
-from app.shared.security.crypto import hash_password, verify_password
+from app.shared.security.crypto import hash_password_async, verify_password_async
 from app.shared.security.auth import create_session_token
 from app.shared.literals import DEFAULT_QUOTAS, SLUG_RE, SYSTEM_ROLES, USERNAME_RE
 
 # Regular expression validators
 _USERNAME_RE = USERNAME_RE
 _SLUG_RE = SLUG_RE
+_ACCOUNT_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_\-]{1,62}[a-zA-Z0-9]$")
+_ACCOUNT_ID_RESERVED = {
+    "list",
+    "search",
+    "apply",
+    "availability",
+    "create",
+    "invitation",
+    "bulk",
+}
 
 # Default account quotas
 _DEFAULT_QUOTAS = DEFAULT_QUOTAS
@@ -43,6 +62,14 @@ def validate_username_format(name: str) -> bool:
 def validate_slug_format(slug: str) -> bool:
     """Validate Slug format (3-64 lowercase alphanumeric characters and hyphens)."""
     return bool(_SLUG_RE.match(slug))
+
+
+def validate_account_id_format(account_id: str) -> bool:
+    """Validate Account ID format (3-64 alphanumeric characters, hyphens, and underscores)."""
+    return (
+        bool(_ACCOUNT_ID_RE.match(account_id))
+        and account_id.lower() not in _ACCOUNT_ID_RESERVED
+    )
 
 
 async def is_name_reserved(name: str, db: AsyncSession) -> bool:
@@ -76,6 +103,13 @@ async def register_user(
     if not username:
         username = f"user_{secrets.token_hex(4)}"
     else:
+        username = username.strip().lower()
+        if not validate_username_format(username):
+            raise ValueError(
+                "Username must be 3-64 lowercase alphanumeric characters and underscores"
+            )
+        if await is_name_reserved(username, db):
+            raise ValueError("Username is reserved by system")
         dup_u = await db.execute(select(User).where(User.username == username))
         if dup_u.scalar_one_or_none():
             raise ValueError("Username already exists")
@@ -84,7 +118,7 @@ async def register_user(
         id=str(uuid.uuid4()),
         username=username,
         email=email,
-        hashed_password=hash_password(password),
+        hashed_password=await hash_password_async(password),
         display_name=display_name or username,
         role_code=role_code,
         is_active=is_active,
@@ -105,7 +139,7 @@ async def login_user(
     result = await db.execute(select(User).where(User.email == email))
     user = result.scalar_one_or_none()
 
-    if not user or not verify_password(password, user.hashed_password):
+    if not user or not await verify_password_async(password, user.hashed_password):
         raise ValueError("Incorrect email or password")
 
     if user.role_code == "banned":
@@ -132,11 +166,12 @@ async def list_users(
     stmt = select(User)
     count_stmt = select(func.count(User.id))
     if search:
-        pattern = f"%{search}%"
+        escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
         cond = or_(
-            User.username.ilike(pattern),
-            User.email.ilike(pattern),
-            User.display_name.ilike(pattern),
+            User.username.ilike(pattern, escape="\\"),
+            User.email.ilike(pattern, escape="\\"),
+            User.display_name.ilike(pattern, escape="\\"),
         )
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
@@ -265,10 +300,13 @@ async def create_account(
     if not slug:
         slug = f"org-{secrets.token_hex(4)}"
     else:
+        slug = slug.strip().lower()
         if not validate_slug_format(slug):
             raise ValueError(
                 "Slug format invalid (3-64 lowercase alphanumeric characters and hyphens)"
             )
+        if await is_name_reserved(slug, db):
+            raise ValueError("Slug is reserved by system")
         dup = await db.execute(select(Account).where(Account.slug == slug))
         if dup.scalar_one_or_none():
             raise ValueError("Slug is already taken")
@@ -310,21 +348,18 @@ async def create_account(
     return account
 
 
-async def update_account_slug(
-    account_id: str, new_slug: str, user_id: str, db: AsyncSession
+async def update_account_info(
+    account_id: str,
+    user_id: str,
+    db: AsyncSession,
+    *,
+    new_id: Optional[str] = None,
+    name: Optional[str] = None,
+    slug: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    registration_mode: Optional[str] = None,
 ) -> Optional[Account]:
-    """Update tenant slug (requires owner or admin role)."""
-    if not validate_slug_format(new_slug):
-        raise ValueError(
-            "Slug format invalid (3-64 lowercase alphanumeric characters and hyphens)"
-        )
-
-    dup = await db.execute(
-        select(Account).where(Account.slug == new_slug, Account.id != account_id)
-    )
-    if dup.scalar_one_or_none():
-        raise ValueError("Slug is already taken")
-
+    """Update account basic info (ID, name, slug, active state, registration mode)."""
     member = await db.execute(
         select(AccountMember).where(
             AccountMember.user_id == user_id,
@@ -332,26 +367,158 @@ async def update_account_slug(
         )
     )
     m = member.scalar_one_or_none()
-    if not m or m.role_in_account not in ("owner", "admin"):
-        u = (
-            await db.execute(select(User).where(User.id == user_id))
-        ).scalar_one_or_none()
-        if not u or u.role_code != "superadmin":
-            raise PermissionError("Account owner or admin role required")
+    u = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    is_superadmin = bool(u and u.role_code == "superadmin")
+    is_owner = is_superadmin or bool(m and m.role_in_account == "owner")
+    if not is_owner and (not m or m.role_in_account != "admin"):
+        raise PermissionError("Account owner or admin role required")
 
     acct = await db.execute(select(Account).where(Account.id == account_id))
     account = acct.scalar_one_or_none()
     if not account:
         return None
 
+    old_id = account.id
     old_slug = account.slug
-    account.slug = new_slug
+
+    if name is not None:
+        cleaned_name = name.strip()
+        if not cleaned_name:
+            raise ValueError("Account name cannot be empty")
+        account.name = cleaned_name
+
+    if slug is not None and slug != account.slug:
+        if not validate_slug_format(slug):
+            raise ValueError(
+                "Slug format invalid (3-64 lowercase alphanumeric characters and hyphens)"
+            )
+        if await is_name_reserved(slug, db):
+            raise ValueError("Slug is reserved by system")
+        dup = await db.execute(
+            select(Account).where(Account.slug == slug, Account.id != old_id)
+        )
+        if dup.scalar_one_or_none():
+            raise ValueError("Slug is already taken")
+        account.slug = slug
+
+    id_changed = False
+    if new_id is not None:
+        cleaned_id = new_id.strip()
+        if cleaned_id != old_id:
+            if not is_owner:
+                raise PermissionError(
+                    "Only account owner or Super Admin can change Account ID"
+                )
+            if not validate_account_id_format(cleaned_id):
+                raise ValueError(
+                    "Account ID format invalid (3-64 alphanumeric characters, hyphens, and underscores)"
+                )
+            if await is_name_reserved(cleaned_id, db):
+                raise ValueError("Account ID is reserved by system")
+            dup_id = await db.execute(select(Account).where(Account.id == cleaned_id))
+            if dup_id.scalar_one_or_none():
+                raise ValueError("Account ID is already taken")
+
+            account.id = cleaned_id
+            id_changed = True
+            for tbl in (
+                AccountMember,
+                AccountQuota,
+                PreRegisteredClient,
+                Invitation,
+                ClientRecord,
+                ClientProfile,
+                ConfigUploadRecord,
+                AuditLog,
+                *MODEL_MAP.values(),
+            ):
+                await db.execute(
+                    update(tbl)
+                    .where(tbl.account_id == old_id)
+                    .values(account_id=cleaned_id)
+                )
+            await db.execute(
+                update(PairingCode)
+                .where(PairingCode.tenant_id == old_id)
+                .values(tenant_id=cleaned_id)
+            )
+
+    if is_active is not None:
+        if is_active is False and not is_owner:
+            raise PermissionError(
+                "Only account owner or Super Admin can deactivate account"
+            )
+        account.is_active = is_active
+
+    if registration_mode is not None:
+        if registration_mode not in ("open", "pairing", "pre_reg"):
+            raise ValueError("Invalid registration mode")
+        account.registration_mode = registration_mode
+
     await db.commit()
     from app.shared.utils.tenant import invalidate_cached_account
 
     await invalidate_cached_account(old_slug)
-    await invalidate_cached_account(new_slug)
+    await invalidate_cached_account(account.slug)
+    if id_changed or is_active is False:
+        await disconnect_account_clients(old_id, db)
     return account
+
+
+async def disconnect_account_clients(account_id: str, db: AsyncSession) -> None:
+    """Disconnect all active gRPC streams and clear Redis online state for an account."""
+    from app.shared.runtime import get_command_servicer, get_session_manager
+
+    servicer = get_command_servicer()
+    sm = get_session_manager()
+    uids: set[str] = set()
+    rows = (
+        (
+            await db.execute(
+                select(ClientRecord.uid).where(ClientRecord.account_id == account_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    uids.update(rows)
+    if sm:
+        online = await sm.get_all_clients_status(account_id)
+        for item in online:
+            uids.add(item["uid"])
+    for uid in uids:
+        if servicer:
+            await servicer.disconnect_client(account_id, uid)
+        if sm:
+            await sm.set_client_offline(account_id, uid)
+
+
+async def cleanup_account_data(account_id: str, slug: str, db: AsyncSession) -> None:
+    """Delete all associated tenant records, disconnect active clients, and invalidate cache."""
+    from app.shared.utils.tenant import invalidate_cached_account
+
+    await disconnect_account_clients(account_id, db)
+    await invalidate_cached_account(slug)
+    for tbl in (
+        AccountMember,
+        AccountQuota,
+        PreRegisteredClient,
+        Invitation,
+        ClientRecord,
+        ClientProfile,
+        ConfigUploadRecord,
+        AuditLog,
+        *MODEL_MAP.values(),
+    ):
+        await db.execute(delete(tbl).where(tbl.account_id == account_id))
+    await db.execute(delete(PairingCode).where(PairingCode.tenant_id == account_id))
+
+
+async def update_account_slug(
+    account_id: str, new_slug: str, user_id: str, db: AsyncSession
+) -> Optional[Account]:
+    """Update tenant slug (requires owner or admin role)."""
+    return await update_account_info(account_id, user_id, db, slug=new_slug)
 
 
 # ---- Role Configuration ----

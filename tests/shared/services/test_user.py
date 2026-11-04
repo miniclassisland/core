@@ -8,9 +8,13 @@ from app.shared.db.models import ReservedName, Account
 
 @pytest.mark.asyncio
 async def test_slug_and_name_reservations():
-    """Test slug/username format validation and reserved name lookup."""
+    """Test slug/username/account_id format validation and reserved name lookup."""
     assert user_service.validate_slug_format("my-school") is True
     assert user_service.validate_slug_format("INVALID_SLUG_FORMAT") is False
+
+    assert user_service.validate_account_id_format("school_2026-01") is True
+    assert user_service.validate_account_id_format("list") is False
+    assert user_service.validate_account_id_format("ab") is False
 
     assert user_service.validate_username_format("teacher_1") is True
     assert user_service.validate_username_format("INVALID USERNAME") is False
@@ -69,6 +73,26 @@ async def test_user_and_account_services():
                 display_name="Dup U",
                 db=db,
                 username="alpha_admin",
+            )
+
+        with pytest.raises(ValueError, match="Username must be 3-64"):
+            await user_service.register_user(
+                email="badfmt@school.com",
+                password="AnotherPassword1!",
+                display_name="Bad Fmt",
+                db=db,
+                username="bad!username",
+            )
+
+        db.add(ReservedName(name="reserved_uname"))
+        await db.commit()
+        with pytest.raises(ValueError, match="Username is reserved by system"):
+            await user_service.register_user(
+                email="resuname@school.com",
+                password="AnotherPassword1!",
+                display_name="Res U",
+                db=db,
+                username="reserved_uname",
             )
 
         # 2. Register user and test login error branches (pending, banned, deactivated, 2fa)
@@ -166,6 +190,13 @@ async def test_user_and_account_services():
                 name="Dup", user_id=owner.id, db=db, slug="alpha-school"
             )
 
+        db.add(ReservedName(name="reserved-create-slug"))
+        await db.commit()
+        with pytest.raises(ValueError, match="Slug is reserved by system"):
+            await user_service.create_account(
+                name="Res", user_id=owner.id, db=db, slug="reserved-create-slug"
+            )
+
         # 6. Update account slug branches
         with pytest.raises(ValueError, match="Slug format invalid"):
             await user_service.update_account_slug(acc.id, "BAD_SLUG!", owner.id, db)
@@ -198,9 +229,102 @@ async def test_user_and_account_services():
         acc_by_sa = await db.get(Account, acc.id)
         assert acc_by_sa is not None and acc_by_sa.slug == "alpha-school-by-sa"
 
-        # When AccountMember exists for a deleted Account row -> returns None
+        # Test update_account_info branches (name, new_id, slug reserved, registration_mode, is_active)
+        db.add(ReservedName(name="reserved-acct-name"))
+        await db.commit()
+
+        with pytest.raises(ValueError, match="Account name cannot be empty"):
+            await user_service.update_account_info(acc.id, owner.id, db, name="   ")
+
+        with pytest.raises(ValueError, match="Slug is reserved by system"):
+            await user_service.update_account_info(
+                acc.id, owner.id, db, slug="reserved-acct-name"
+            )
+
+        with pytest.raises(ValueError, match="Account ID format invalid"):
+            await user_service.update_account_info(acc.id, owner.id, db, new_id="list")
+
+        with pytest.raises(ValueError, match="Account ID is reserved by system"):
+            await user_service.update_account_info(
+                acc.id, owner.id, db, new_id="reserved-acct-name"
+            )
+
+        with pytest.raises(ValueError, match="Account ID is already taken"):
+            await user_service.update_account_info(
+                acc.id, owner.id, db, new_id=acc_auto.id
+            )
+
+        with pytest.raises(ValueError, match="Invalid registration mode"):
+            await user_service.update_account_info(
+                acc.id, owner.id, db, registration_mode="invalid_mode"
+            )
+
+        updated_acct = await user_service.update_account_info(
+            acc.id,
+            owner.id,
+            db,
+            new_id="alpha-custom-id-2026",
+            name="Alpha Custom School",
+            is_active=True,
+            registration_mode="pairing",
+        )
+        assert updated_acct is not None
+        assert updated_acct.id == "alpha-custom-id-2026"
+        assert updated_acct.name == "Alpha Custom School"
+        assert updated_acct.registration_mode == "pairing"
+
+        # Non-owner admin cannot change new_id or deactivate account (lines 409, 448)
         from app.shared.db.models import AccountMember
         from datetime import datetime, timezone
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        db.add(
+            AccountMember(
+                id="mem-admin-only",
+                user_id=new_user.id,
+                account_id="alpha-custom-id-2026",
+                role_in_account="admin",
+                joined_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+        with pytest.raises(
+            PermissionError,
+            match="Only account owner or Super Admin can change Account ID",
+        ):
+            await user_service.update_account_info(
+                "alpha-custom-id-2026",
+                new_user.id,
+                db,
+                new_id="another-id-2026",
+            )
+        with pytest.raises(
+            PermissionError,
+            match="Only account owner or Super Admin can deactivate account",
+        ):
+            await user_service.update_account_info(
+                "alpha-custom-id-2026",
+                new_user.id,
+                db,
+                is_active=False,
+            )
+
+        # Test disconnect_account_clients when sm and servicer are active (lines 488, 491)
+        mock_sm = MagicMock()
+        mock_sm.get_all_clients_status = AsyncMock(return_value=[{"uid": "online-c1"}])
+        mock_sm.set_client_offline = AsyncMock()
+        mock_srv = MagicMock()
+        mock_srv.disconnect_client = AsyncMock()
+        with (
+            patch("app.shared.runtime.get_session_manager", return_value=mock_sm),
+            patch("app.shared.runtime.get_command_servicer", return_value=mock_srv),
+        ):
+            await user_service.disconnect_account_clients("alpha-custom-id-2026", db)
+        mock_srv.disconnect_client.assert_awaited_once_with(
+            "alpha-custom-id-2026", "online-c1"
+        )
+
+        # When AccountMember exists for a deleted Account row -> returns None
 
         db.add(
             AccountMember(

@@ -130,6 +130,22 @@ async def test_oobe_stub_and_admin_apps():
         assert r2.status_code == 503
         assert r2.json()["code"] == oobe.ERR_SYSTEM_OOBE
 
+        # Embedded font endpoint branches (404 invalid name, 404 missing file, 200 ok)
+        r_bad_font = await client_admin.get("/fonts/NotAllowed.ttf")
+        assert r_bad_font.status_code == 404
+
+        from app.shared import fonts as fonts_mod
+
+        with patch("pathlib.Path.exists", return_value=False):
+            r_missing_font = await client_admin.get(
+                "/fonts/GoogleSansFlex-VariableFont.ttf"
+            )
+            assert r_missing_font.status_code == 404
+
+        r_ok_font = await client_admin.get("/fonts/GoogleSansFlex-VariableFont.ttf")
+        if (fonts_mod._FONTS_DIR / "GoogleSansFlex-VariableFont.ttf").exists():
+            assert r_ok_font.status_code == 200
+
 
 def test_decode_audit_payload():
     """Test decode_audit_payload and decode_audit_payload_json for all event types and error branch."""

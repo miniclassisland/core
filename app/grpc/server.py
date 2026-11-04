@@ -4,6 +4,7 @@ Provides an all-in-one implementation for gRPC command streaming, registration s
 audit streaming, handshake streaming, and tenant interceptor validation.
 """
 
+from collections.abc import AsyncGenerator
 import asyncio
 import functools
 import inspect
@@ -58,19 +59,19 @@ from app.Protobuf.Server import (
 from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
 
 from app.grpc.session import SessionManager
-from app.shared.utils.config import GRPC_PORT
+from app.shared.utils.config import LISTEN_HOST, GRPC_PORT
 
 logger = logging.getLogger(__name__)
+_REGISTER_LOCKS: dict[str, asyncio.Lock] = {}
+_MAX_REGISTER_LOCKS = 4096
 
-# gRPC auth exempt methods (UploadConfig and LogEvent are exempted here because upstream ClassIsland
-# calls UploadConfig without GetMetadata() and LogEvent may fire during startup before CompleteHandshake
-# finishes; both servicers verify session or registered client record in DB)
+# gRPC auth exempt methods (UploadConfig is exempted here because upstream ClassIsland
+# calls UploadConfig without GetMetadata(); the servicer verifies RequestGuidId or session)
 _AUTH_EXEMPT = {
     "Register",
     "BeginHandshake",
     "CompleteHandshake",
     "UploadConfig",
-    "LogEvent",
 }
 _CC_BLOCK_METHODS = {"Register", "BeginHandshake", "CompleteHandshake"}
 _QUEUE_MAXSIZE = 256
@@ -78,13 +79,17 @@ _MIN_PING_INTERVAL = 1.0
 _REDIS_HB_SYNC_INTERVAL = 20.0
 _STREAM_IDLE_TIMEOUT = 120
 _PAIRING_KEY = "pairing_enabled"
+_MAX_GRPC_PAYLOAD_BYTES = 2 * 1024 * 1024
+_MAX_CHALLENGE_TOKEN_LEN = 512
 _GRPC_SERVER_OPTIONS = [
     ("grpc.max_concurrent_streams", 2048),
-    ("grpc.keepalive_time_ms", 30000),
-    ("grpc.keepalive_timeout_ms", 10000),
+    ("grpc.keepalive_time_ms", 60000),
+    ("grpc.keepalive_timeout_ms", 20000),
     ("grpc.keepalive_permit_without_calls", 1),
     ("grpc.http2.max_pings_without_data", 0),
     ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+    ("grpc.http2.min_time_between_pings_ms", 5000),
+    ("grpc.http2.max_ping_strikes", 0),
 ]
 
 
@@ -258,7 +263,9 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
             stmt = select(ClientRecord).where(ClientRecord.uid == cuid)
             client = (await db.execute(stmt)).scalar_one_or_none()
 
-        if not client:
+        if not client or (
+            tid and client.account_id and client.account_id not in (tid, "default")
+        ):
             return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
                 Retcode=Retcode_pb2.ClientNotFound
             )
@@ -274,7 +281,11 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
         decrypted = await asyncio.to_thread(
             self._sm.decrypt_challenge, request.ChallengeTokenEncrypted
         )
-        if decrypted is None:
+        if (
+            decrypted is None
+            or not str(decrypted).strip()
+            or len(str(decrypted)) > _MAX_CHALLENGE_TOKEN_LEN
+        ):
             return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
                 Retcode=Retcode_pb2.ServerInternalError
             )
@@ -293,6 +304,7 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
     async def CompleteHandshake(self, request, context):
         tenant_id = _get_tenant_id_safe()
         cuid = _get_metadata_dict(context).get("cuid", "")
+        peer_ip = get_client_ip_from_grpc(context)
 
         effective_tid = tenant_id
         async with AsyncSessionLocal() as db:
@@ -311,22 +323,25 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                     and client.account_id != "default"
                 ):
                     effective_tid = client.account_id
+
+            pending = await self._sm.pop_handshake_challenge(effective_tid, cuid)
+            if not pending and effective_tid != tenant_id:
+                pending = await self._sm.pop_handshake_challenge(tenant_id, cuid)
+
+            if not request.Accepted:
+                return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
+                    Retcode=Retcode_pb2.HandshakeClientRejected
+                )
+
+            if not pending:
+                return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
+                    Retcode=Retcode_pb2.InvalidRequest
+                )
+
+            if client:
+                client.ip = peer_ip or client.ip
                 client.last_seen_at = datetime.now(timezone.utc)
                 await db.commit()
-
-        pending = await self._sm.pop_handshake_challenge(effective_tid, cuid)
-        if not pending and effective_tid != tenant_id:
-            pending = await self._sm.pop_handshake_challenge(tenant_id, cuid)
-
-        if not request.Accepted:
-            return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
-                Retcode=Retcode_pb2.HandshakeClientRejected
-            )
-
-        if not pending:
-            return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
-                Retcode=Retcode_pb2.InvalidRequest
-            )
 
         session_id = await self._sm.create_session(effective_tid, cuid)
         return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
@@ -349,10 +364,14 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
         peer_ip = get_client_ip_from_grpc(context)
         now = datetime.now(timezone.utc)
 
-        async with AsyncSessionLocal() as db:
+        if len(_REGISTER_LOCKS) > _MAX_REGISTER_LOCKS:
+            for k in [k for k, lk in _REGISTER_LOCKS.items() if not lk.locked()][:1024]:
+                _REGISTER_LOCKS.pop(k, None)
+        lock = _REGISTER_LOCKS.setdefault(tid or "default", asyncio.Lock())
+        async with lock, AsyncSessionLocal() as db:
             await set_search_path(db)
 
-            # Check if client already exists and is disabled
+            # Check if client already exists and is disabled or has mismatched hardware MAC
             existing_record = (
                 await db.execute(select(ClientRecord).where(ClientRecord.uid == cuid))
             ).scalar_one_or_none()
@@ -360,6 +379,15 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                 return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
                     Retcode=Retcode_pb2.InvalidRequest,
                     Message="Device has been disabled by administrator.",
+                )
+            if (
+                existing_record
+                and existing_record.mac
+                and existing_record.mac != request.ClientMac
+            ):
+                return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
+                    Retcode=Retcode_pb2.InvalidRequest,
+                    Message="Hardware MAC address mismatch for registered ClientUid.",
                 )
 
             # Check account registration mode & global pairing_enabled config
@@ -386,13 +414,12 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                     conds.append(PreRegisteredClient.mac_address == request.ClientMac)
                 pre_stmt = select(PreRegisteredClient).where(
                     PreRegisteredClient.is_enabled.is_(True),
+                    PreRegisteredClient.account_id == (tid or "default"),
                     or_(*conds),
                 )
-                if tid:
-                    pre_stmt = pre_stmt.where(PreRegisteredClient.account_id == tid)
                 matched_pre_reg = (await db.execute(pre_stmt)).scalars().first()
 
-            if matched_pre_reg is None:
+            if existing_record is None and matched_pre_reg is None:
                 if reg_mode == "pre_reg":
                     return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
                         Retcode=Retcode_pb2.InvalidRequest,
@@ -420,6 +447,15 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
             acct_id = tid or (
                 matched_pre_reg.account_id if matched_pre_reg else "default"
             )
+            if (
+                existing_record is not None
+                and existing_record.account_id
+                and existing_record.account_id not in (acct_id, "default")
+            ):
+                return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
+                    Retcode=Retcode_pb2.InvalidRequest,
+                    Message="ClientUid is already registered to another account.",
+                )
             if existing_record is None and acct_id and acct_id != "default":
                 if not await check_quota(acct_id, "max_clients", db):
                     return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
@@ -515,6 +551,12 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                 )
             ).scalar_one_or_none()
             if rec:
+                if tid and rec.account_id and rec.account_id not in (tid, "default"):
+                    await context.abort(
+                        grpc.StatusCode.PERMISSION_DENIED,
+                        "Device does not belong to this tenant",
+                    )
+                    return ClientRegisterScRsp_pb2.ClientRegisterScRsp()
                 await db.delete(rec)
                 await db.commit()
 
@@ -534,8 +576,11 @@ class ClientCommandDeliverServicer(
     def __init__(self, session_manager: SessionManager):
         self._sm = session_manager
         self.client_queues: dict[str, asyncio.Queue] = {}
+        self.tenant_clients: dict[str, set[str]] = {}
 
-    async def ListenCommand(self, request_iterator, context):
+    async def ListenCommand(
+        self, request_iterator, context
+    ) -> AsyncGenerator[Any, None]:
         md = _get_metadata_dict(context)
         sid = md.get("session", "")
 
@@ -550,7 +595,16 @@ class ClientCommandDeliverServicer(
         tid = await self._sm.get_session_tenant(sid) or _get_tenant_id_safe()
         client_ip = get_client_ip_from_grpc(context)
 
-        # Update DB record last_seen_at & ip
+        # Allocate queue and migrate any pending commands from stale stream
+        q_key = f"{tid}:{real_cuid}"
+        queue: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
+        old_q = self.client_queues.get(q_key)
+        self.client_queues[q_key] = queue
+        if tid:
+            self.tenant_clients.setdefault(tid, set()).add(real_cuid)
+        await self._sm.set_client_online(tid, real_cuid, ip=client_ip)
+
+        # Update DB record last_seen_at & ip and enforce max_grpc_connections quota in a single DB session
         try:
             async with AsyncSessionLocal() as db:
                 rec = (
@@ -560,47 +614,74 @@ class ClientCommandDeliverServicer(
                 ).scalar_one_or_none()
                 if rec:
                     if getattr(rec, "is_disabled", False):
+                        self.client_queues.pop(q_key, None)
                         await context.abort(
                             grpc.StatusCode.PERMISSION_DENIED,
                             "Device is disabled by administrator",
                         )
                         return
+                    if (
+                        tid
+                        and rec.account_id
+                        and rec.account_id not in (tid, "default")
+                    ):
+                        self.client_queues.pop(q_key, None)
+                        await context.abort(
+                            grpc.StatusCode.PERMISSION_DENIED,
+                            "Device does not belong to this tenant",
+                        )
+                        return
                     if not tid and rec.account_id and rec.account_id != "default":
+                        self.client_queues.pop(q_key, None)
                         tid = rec.account_id
+                        q_key = f"{tid}:{real_cuid}"
+                        old_q = self.client_queues.get(q_key) or old_q
+                        self.client_queues[q_key] = queue
+                        self.tenant_clients.setdefault(tid, set()).add(real_cuid)
                     if client_ip:
                         rec.ip = client_ip
                     rec.last_seen_at = datetime.now(timezone.utc)
                     await db.commit()
+
+                if tid and tid != "default":
+                    online_uids = set(self.tenant_clients.get(tid, ()))
+                    if len(online_uids) <= 1:
+                        online_items = await self._sm.get_all_clients_status(tid)
+                        online_uids.update(item["uid"] for item in online_items)
+                    other_active_count = len(online_uids - {real_cuid})
+                    quota_ok = await check_quota(
+                        tid,
+                        "max_grpc_connections",
+                        db,
+                        live_current=other_active_count,
+                    )
+                    if not quota_ok:
+                        self.client_queues.pop(q_key, None)
+                        await context.abort(
+                            grpc.StatusCode.RESOURCE_EXHAUSTED,
+                            "Account gRPC connection quota (max_grpc_connections) exceeded",
+                        )
+                        return
         except Exception:
             pass
 
-        # Enforce max_grpc_connections quota before accepting new active stream
-        q_key = f"{tid}:{real_cuid}"
-        if tid and tid != "default":
-            online_items = await self._sm.get_all_clients_status(tid)
-            online_uids = {item["uid"] for item in online_items}
-            for k in self.client_queues:
-                if k.startswith(f"{tid}:"):
-                    online_uids.add(k.split(":", 1)[1])
-            other_active_count = len(online_uids - {real_cuid})
-            async with AsyncSessionLocal() as db:
-                quota_ok = await check_quota(
-                    tid,
-                    "max_grpc_connections",
-                    db,
-                    live_current=other_active_count,
-                )
-            if not quota_ok:
-                await context.abort(
-                    grpc.StatusCode.RESOURCE_EXHAUSTED,
-                    "Account gRPC connection quota (max_grpc_connections) exceeded",
-                )
-                return
-
-        # Set device online and allocate queue
-        await self._sm.set_client_online(tid, real_cuid, ip=client_ip)
-        queue = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
-        self.client_queues[q_key] = queue
+        if old_q is not None and old_q is not queue:
+            while not old_q.empty():
+                try:
+                    pending_cmd = old_q.get_nowait()
+                    old_q.task_done()
+                    if (
+                        pending_cmd is not None
+                        and getattr(pending_cmd, "Type", None) != CommandTypes_pb2.Pong
+                        and not queue.full()
+                    ):
+                        queue.put_nowait(pending_cmd)
+                except Exception:  # pragma: no cover
+                    break
+            try:
+                old_q.put_nowait(None)
+            except asyncio.QueueFull:  # pragma: no cover
+                pass
 
         logger.info(
             "[%s] Command streaming listener ready: tid=%s, cuid=%s",
@@ -610,7 +691,7 @@ class ClientCommandDeliverServicer(
         )
 
         last_ping = 0.0
-        last_redis_hb = 0.0
+        last_redis_hb = time.monotonic()
 
         async def read_task():
             nonlocal last_ping, last_redis_hb
@@ -627,7 +708,10 @@ class ClientCommandDeliverServicer(
                     pong = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
                         RetCode=Retcode_pb2.Success, Type=CommandTypes_pb2.Pong
                     )
-                    await queue.put(pong)
+                    try:
+                        queue.put_nowait(pong)
+                    except asyncio.QueueFull:
+                        pass
                 else:
                     logger.info(
                         "Received client uplink command: type=%s (tid=%s)",
@@ -652,15 +736,24 @@ class ClientCommandDeliverServicer(
             task.cancel()
         finally:
             task.cancel()
-            self.client_queues.pop(q_key, None)
-            await self._sm.set_client_offline(tid, real_cuid)
+            if self.client_queues.get(q_key) is queue:
+                self.client_queues.pop(q_key, None)
+                t_set = self.tenant_clients.get(tid)
+                if t_set is not None:
+                    t_set.discard(real_cuid)
+                    if not t_set:
+                        self.tenant_clients.pop(tid, None)
+                await self._sm.set_client_offline(tid, real_cuid)
 
     async def send_command(self, tid: str, cuid: str, cmd) -> bool:
         """API push command to specific online client."""
         for key in (f"{tid}:{cuid}", f":{cuid}"):
             if key in self.client_queues:
-                await self.client_queues[key].put(cmd)
-                return True
+                try:
+                    self.client_queues[key].put_nowait(cmd)
+                    return True
+                except asyncio.QueueFull:
+                    return False
         return False
 
     async def disconnect_client(self, tid: str, cuid: str) -> bool:
@@ -669,7 +762,15 @@ class ClientCommandDeliverServicer(
         for key in (f"{tid}:{cuid}", f":{cuid}"):
             q = self.client_queues.get(key)
             if q is not None:
-                await q.put(None)
+                try:
+                    q.put_nowait(None)
+                except asyncio.QueueFull:
+                    try:
+                        q.get_nowait()
+                        q.task_done()
+                        q.put_nowait(None)
+                    except Exception:  # pragma: no cover
+                        pass
                 disconnected = True
         await self._sm.set_client_offline(tid, cuid)
         return disconnected
@@ -690,11 +791,17 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
         tid = (
             await self._sm.get_session_tenant(sid) if sid else None
         ) or _get_tenant_id_safe()
+        peer_ip = get_client_ip_from_grpc(context)
 
         req_guid = getattr(request, "RequestGuidId", "")
         req_guid_str = req_guid if isinstance(req_guid, str) else ""
         payload_val = getattr(request, "Payload", "")
         payload_str = payload_val if isinstance(payload_val, str) else str(payload_val)
+        if len(payload_str.encode("utf-8")) > _MAX_GRPC_PAYLOAD_BYTES:
+            return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
+                Retcode=Retcode_pb2.InvalidRequest,
+                Message="Payload size exceeds limit",
+            )
 
         async with AsyncSessionLocal() as db:
             await set_search_path(db)
@@ -708,7 +815,41 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                     )
                 ).scalar_one_or_none()
 
-            if existing:
+            if existing and getattr(existing, "status", "pending") == "pending":
+                if (
+                    tid
+                    and existing.account_id
+                    and existing.account_id not in (tid, "default")
+                ):
+                    return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
+                        Retcode=Retcode_pb2.InvalidRequest,
+                        Message="Tenant mismatch for upload request",
+                    )
+                if existing.client_uid:
+                    if real_cuid:
+                        if existing.client_uid != real_cuid:
+                            return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
+                                Retcode=Retcode_pb2.InvalidRequest,
+                                Message="Client mismatch for upload request",
+                            )
+                    else:
+                        client_rec = (
+                            await db.execute(
+                                select(ClientRecord).where(
+                                    ClientRecord.uid == existing.client_uid
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if (
+                            client_rec
+                            and client_rec.ip
+                            and peer_ip
+                            and client_rec.ip != peer_ip
+                        ):
+                            return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
+                                Retcode=Retcode_pb2.InvalidRequest,
+                                Message="Unauthorized client IP for upload request",
+                            )
                 existing.payload = payload_str
                 existing.status = "completed"
                 existing.uploaded_at = datetime.now(timezone.utc)
@@ -759,38 +900,29 @@ class AuditServicer(Audit_pb2_grpc.AuditServicer):
         ) or _get_tenant_id_safe()
 
         if not real_cuid:
-            cuid_hdr = md.get("cuid", "").strip()
-            if cuid_hdr:
-                async with AsyncSessionLocal() as db:
-                    await set_search_path(db)
-                    rec_check = (
-                        await db.execute(
-                            select(ClientRecord).where(ClientRecord.uid == cuid_hdr)
-                        )
-                    ).scalar_one_or_none()
-                    if rec_check and not getattr(rec_check, "is_disabled", False):
-                        real_cuid = rec_check.uid
-                        if not tid and rec_check.account_id:
-                            tid = rec_check.account_id
-
-        if not real_cuid:
             return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
 
         raw_payload = getattr(request, "Payload", b"") or b""
         if isinstance(raw_payload, str):
             raw_payload = raw_payload.encode("utf-8")
+        if len(raw_payload) > _MAX_GRPC_PAYLOAD_BYTES:
+            return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
         event_code = int(getattr(request, "Event", 0) or 0)
         decoded_str = decode_audit_payload_json(event_code, raw_payload)
 
         async with AsyncSessionLocal() as db:
             await set_search_path(db)
-            if not tid:
-                rec = (
-                    await db.execute(
-                        select(ClientRecord).where(ClientRecord.uid == real_cuid)
-                    )
-                ).scalar_one_or_none()
-                if rec and rec.account_id:
+            rec = (
+                await db.execute(
+                    select(ClientRecord).where(ClientRecord.uid == real_cuid)
+                )
+            ).scalar_one_or_none()
+            if rec:
+                if getattr(rec, "is_disabled", False):
+                    return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
+                if tid and rec.account_id and rec.account_id not in (tid, "default"):
+                    return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
+                if not tid and rec.account_id:
                     tid = rec.account_id
             if tid and tid != "default":
                 if not await check_quota(tid, "feature.audit", db):
@@ -835,7 +967,7 @@ async def serve_grpc(interceptors=None):
     )
     Audit_pb2_grpc.add_AuditServicer_to_server(AuditServicer(mgr), srv)
 
-    srv.add_insecure_port(f"[::]:{GRPC_PORT}")
+    srv.add_insecure_port(f"{LISTEN_HOST}:{GRPC_PORT}")
     await srv.start()
-    logger.info("gRPC server listening on port :%s", GRPC_PORT)
+    logger.info("gRPC server listening on %s:%s", LISTEN_HOST, GRPC_PORT)
     return srv, cmd_s, mgr

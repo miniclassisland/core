@@ -41,43 +41,57 @@ def _parse_forwarded_for(value: str) -> str:
     return value.split(",")[0].strip()
 
 
+_TRUSTED_PROXY_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
 def get_client_ip_from_request(request: Request) -> str:
-    """Extract real client IP from HTTP request."""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    ip = _parse_forwarded_for(forwarded)
-    if ip:
-        return ip
+    """Extract real client IP from HTTP request (only trusting X-Real-IP / X-Forwarded-For from local reverse proxy)."""
+    peer_host = (
+        request.client.host
+        if (request.client and isinstance(request.client.host, str))
+        else ""
+    )
+    if peer_host in _TRUSTED_PROXY_HOSTS:
+        real_ip = request.headers.get("x-real-ip", "")
+        if real_ip:
+            return real_ip.strip()
 
-    real_ip = request.headers.get("x-real-ip", "")
-    if real_ip:
-        return real_ip.strip()
+        forwarded = request.headers.get("x-forwarded-for", "")
+        ip = _parse_forwarded_for(forwarded)
+        if ip:
+            return ip
 
-    return request.client.host if request.client else ""
+    return peer_host
 
 
 def get_client_ip_from_grpc(context: Any) -> str:
     """Parse real client IP from gRPC call invocation metadata."""
-    raw_md = context.invocation_metadata() or ()
-    metadata: dict[str, str] = {
-        str(k): (v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v))
-        for k, v in raw_md
-    }
-
-    forwarded = metadata.get("x-forwarded-for", "")
-    ip = _parse_forwarded_for(forwarded)
-    if ip:
-        return ip
-
-    real_ip = metadata.get("x-real-ip", "")
-    if real_ip:
-        return real_ip.strip()
-
     peer = context.peer() or ""
+    peer_ip = ""
     if peer and ":" in peer:
         parts = peer.split(":")
         if len(parts) >= 2:
-            return parts[1]
-    return ""
+            peer_ip = parts[1]
+
+    if peer_ip in _TRUSTED_PROXY_HOSTS:
+        raw_md = context.invocation_metadata() or ()
+        metadata: dict[str, str] = {
+            str(k): (
+                v.decode("utf-8", errors="ignore") if isinstance(v, bytes) else str(v)
+            )
+            for k, v in raw_md
+        }
+
+        real_ip = metadata.get("x-real-ip", "")
+        if real_ip:
+            return real_ip.strip()
+
+        forwarded = metadata.get("x-forwarded-for", "")
+        ip = _parse_forwarded_for(forwarded)
+        if ip:
+            return ip
+
+    return peer_ip
 
 
 # ---- Log Formatter & Filters ----

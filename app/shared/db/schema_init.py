@@ -12,8 +12,22 @@ from app.shared.literals import DEFAULT_RESOURCES
 _SEED_LOCKS: dict[str, asyncio.Lock] = {}
 
 
-async def seed_account_defaults(account_id: str, db: AsyncSession) -> None:
+async def seed_account_defaults(
+    account_id: str, db: AsyncSession, *, fast_check: bool = False
+) -> None:
     """Seed default 7 profile resources and '__default__' ClientProfile for a tenant account."""
+    if fast_check:
+        has_default = (
+            await db.execute(
+                select(ClientProfile.client_id).where(
+                    ClientProfile.account_id == account_id,
+                    ClientProfile.client_id == "__default__",
+                )
+            )
+        ).scalar_one_or_none()
+        if has_default is not None:
+            return
+
     lock = _SEED_LOCKS.setdefault(account_id, asyncio.Lock())
     async with lock:
         now = datetime.now(timezone.utc)

@@ -16,6 +16,7 @@ from app.shared.security.middlewares import (
     AdminAuthMiddleware,
     CCProtectMiddleware,
 )
+from app.shared.utils.config import ALLOWED_ORIGINS
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_ADMIN
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ admin_app = FastAPI(
 )
 
 # Authentication, GZip compression, logging, and security middleware
-admin_app.add_middleware(AdminAuthMiddleware)
+admin_app.add_middleware(AdminAuthMiddleware, require_superadmin=True)
 admin_app.add_middleware(GZipMiddleware, minimum_size=500)
 admin_app.add_middleware(RequestLoggingMiddleware, port_tag=PORT_TAG_ADMIN)
 admin_app.add_middleware(CCProtectMiddleware)
@@ -35,7 +36,7 @@ admin_app.add_middleware(CCProtectMiddleware)
 # CORS middleware (MUST be added LAST to be the outermost middleware handling all early 401/403/429 error responses)
 admin_app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

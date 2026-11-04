@@ -1,20 +1,17 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
-from app.shared.db.models import ClientProfile, Account, PreRegisteredClient, MODEL_MAP
+from app.shared.db.models import ClientRecord, ClientProfile, Account, MODEL_MAP
 from app.shared.db.schema_init import seed_account_defaults
 from app.shared.schemas.schemas import ClientManifest
 from app.shared.utils.logging import get_client_ip_from_request
 from app.shared.utils.tenant import (
-    get_tenant_id,
     get_tenant_id_or_default,
     get_cached_account,
 )
-from app.shared.utils.config import BASE_DOMAIN
 from app.shared.security.auth import create_token
 from app.shared.services.quota import check_quota, record_bandwidth_bytes
 
@@ -32,6 +29,36 @@ VALID_RESOURCES = [
     "Credentials",
 ]
 
+_LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _ip_matches(grpc_ip: str, req_ip: str) -> bool:
+    """Verify whether the HTTP request IP matches the client's registered gRPC IP."""
+    if not grpc_ip or not req_ip:
+        return False
+    if grpc_ip == req_ip:
+        return True
+    return grpc_ip in _LOOPBACK_IPS and req_ip in _LOOPBACK_IPS
+
+
+def _build_empty_manifest(
+    org_name: str = "MINI ClassIsland Server",
+) -> ClientManifest:
+    """Build metadata-only Manifest without resource URLs for unregistered clients."""
+    empty_src = {"Value": "", "Version": 0}
+    return ClientManifest(
+        ClassPlanSource=empty_src,
+        TimeLayoutSource=empty_src,
+        SubjectsSource=empty_src,
+        DefaultSettingsSource=empty_src,
+        PolicySource=empty_src,
+        ComponentsSource=empty_src,
+        CredentialSource=empty_src,
+        ServerKind=1,
+        OrganizationName=org_name,
+        CoreVersion="2.0.0.0",
+    )
+
 
 @router.get(
     "/v1/client/{client_uid}/manifest", response_model=ClientManifest, tags=["Client"]
@@ -39,7 +66,13 @@ VALID_RESOURCES = [
 async def get_client_manifest(
     request: Request, client_uid: str, db: AsyncSession = Depends(get_db)
 ):
-    """Build complete Manifest JSON payload for requested client UID."""
+    """Build Manifest JSON payload for requested client UID.
+
+    - If the client has not joined management (no active ClientRecord), returns a
+      metadata-only Manifest without any resource download URLs.
+    - If the client has joined management, verifies that the HTTP request IP matches
+      the gRPC IP recorded on the ClientRecord before issuing one-time `/get?token=...` URLs.
+    """
     slug = getattr(request.state, "tenant_slug", "Unknown")
     tenant_id = get_tenant_id_or_default()
     client_ip = get_client_ip_from_request(request)
@@ -67,8 +100,27 @@ async def get_client_manifest(
         ).scalar_one_or_none()
     org_name = account.name if account and account.name else "MINI ClassIsland Server"
 
+    client_record = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.uid == client_uid,
+                ClientRecord.account_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if client_record is None or getattr(client_record, "is_disabled", False):
+        record_bandwidth_bytes(tenant_id, 512)
+        return _build_empty_manifest(org_name)
+
+    if not _ip_matches(client_record.ip, client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Client IP address mismatch",
+        )
+
     # Ensure default resources exist for this tenant
-    await seed_account_defaults(tenant_id, db)
+    await seed_account_defaults(tenant_id, db, fast_check=True)
 
     # Resolve client-specific profile and account '__default__' fallback in a single query
     stmt = select(ClientProfile).where(
@@ -97,6 +149,7 @@ async def get_client_manifest(
         "Credentials": cred,
     }
 
+    get_base_url = request.url_for("get_resource_by_token")
     sources: dict[str, dict] = {}
     for rt, res_name in resource_names.items():
         if not res_name:
@@ -116,8 +169,8 @@ async def get_client_manifest(
         if ver_val is None:
             sources[rt] = {"Value": "", "Version": 0}
         else:
-            url = request.url_for("get_client_resource", resource_type=rt)
-            full_url = str(url.include_query_params(name=res_name))
+            token = await create_token(tenant_id, rt, res_name, client_ip=client_ip)
+            full_url = str(get_base_url.include_query_params(token=token))
             sources[rt] = {"Value": full_url, "Version": max(1, int(ver_val or 1))}
 
     record_bandwidth_bytes(tenant_id, 1024)
@@ -133,84 +186,3 @@ async def get_client_manifest(
         OrganizationName=org_name,
         CoreVersion="2.0.0.0",
     )
-
-
-def _build_manifest(request: Request, cp, tl, sub, ds, pol, comp, cred, ver):
-    """Assemble Manifest structure for each resource source."""
-
-    def _src(rt, n):
-        if not n:
-            return {"Value": "", "Version": 0}
-        url = request.url_for("get_client_resource", resource_type=rt)
-        full_url = str(url.include_query_params(name=n))
-        return {"Value": full_url, "Version": ver}
-
-    return ClientManifest(
-        ClassPlanSource=_src("ClassPlan", cp),
-        TimeLayoutSource=_src("TimeLayout", tl),
-        SubjectsSource=_src("Subjects", sub),
-        DefaultSettingsSource=_src("DefaultSettings", ds),
-        PolicySource=_src("Policy", pol),
-        ComponentsSource=_src("Components", comp),
-        CredentialSource=_src("Credentials", cred),
-        ServerKind=1,
-        OrganizationName="MINI ClassIsland Server",
-        CoreVersion="2.0.0.0",
-    )
-
-
-@router.get("/v1/client/{resource_type}", tags=["Client"])
-async def get_client_resource(resource_type: str, name: str, request: Request):
-    """Redirect to token-protected download endpoint per protocol rules."""
-    if resource_type not in VALID_RESOURCES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type"
-        )
-
-    tenant_id = get_tenant_id()
-    client_ip = get_client_ip_from_request(request)
-
-    token = await create_token(tenant_id, resource_type, name, client_ip=client_ip)
-    return RedirectResponse(
-        url=f"/get?token={token}", status_code=status.HTTP_302_FOUND
-    )
-
-
-@router.get("/v1/management-config", tags=["Guide"])
-async def get_config(
-    class_identity: str = "",
-    db: AsyncSession = Depends(get_db),
-):
-    """Return ManagementPreset.json according to subdomain.
-
-    If class_identity is provided and matches a pre-registered client,
-    returns additional PreRegisteredLabel field.
-    """
-    tenant_id = get_tenant_id()
-    stmt = select(Account).where(Account.id == tenant_id)
-    account = (await db.execute(stmt)).scalar_one_or_none()
-    slug = account.slug if account else "unknown"
-
-    # Attempt matching pre-registered client
-    label = ""
-    if class_identity and account:
-        pre_reg = (
-            await db.execute(
-                select(PreRegisteredClient).where(
-                    PreRegisteredClient.account_id == account.id,
-                    PreRegisteredClient.class_identity == class_identity,
-                )
-            )
-        ).scalar_one_or_none()
-        if pre_reg:
-            label = pre_reg.label
-
-    return {
-        "IsManagementEnabled": True,
-        "ManagementServerKind": 1,
-        "ManagementServer": f"https://{slug}.{BASE_DOMAIN}",
-        "ManagementServerGrpc": f"https://{slug}.{BASE_DOMAIN}",
-        "ClassIdentity": class_identity,
-        "PreRegisteredLabel": label,
-        "ManifestUrlTemplate": "",
-    }

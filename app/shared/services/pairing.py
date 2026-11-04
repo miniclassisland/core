@@ -32,12 +32,13 @@ async def create_pairing_request(
     client_ip: str = "",
 ) -> str:
     """Physical client requests a pairing code prior to long-connection registration."""
+    effective_tid = tenant_id or "default"
     async with AsyncSessionLocal() as db:
         await set_search_path(db)
         stmt = (
             select(PairingCode)
             .where(PairingCode.client_uid == client_uid)
-            .where(PairingCode.tenant_id == tenant_id)
+            .where(PairingCode.tenant_id == effective_tid)
             .where(PairingCode.used.is_(False))
         )
         existing = (await db.execute(stmt)).scalars().first()
@@ -54,7 +55,7 @@ async def create_pairing_request(
         code = generate_code()
         record = PairingCode(
             code=code,
-            tenant_id=tenant_id,
+            tenant_id=effective_tid,
             client_uid=client_uid,
             client_id=client_id,
             client_mac=client_mac,
@@ -67,7 +68,7 @@ async def create_pairing_request(
         logger.info(
             "Generated pairing request code %s (tenant=%s, device=%s)",
             code,
-            tenant_id,
+            effective_tid,
             client_uid,
         )
         return code
@@ -75,12 +76,13 @@ async def create_pairing_request(
 
 async def check_approved(client_uid: str, tenant_id: str) -> bool:
     """Check if pairing request for device has been approved by admin. If so, consume and apply profile."""
+    effective_tid = tenant_id or "default"
     async with AsyncSessionLocal() as db:
         await set_search_path(db)
         stmt = (
             select(PairingCode)
             .where(PairingCode.client_uid == client_uid)
-            .where(PairingCode.tenant_id == tenant_id)
+            .where(PairingCode.tenant_id == effective_tid)
             .where(PairingCode.approved.is_(True))
             .where(PairingCode.used.is_(False))
         )

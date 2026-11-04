@@ -10,6 +10,7 @@ from app.client import router as client_router
 from app.client import token_get_router
 from app.shared.fonts import router as fonts_router
 from app.shared.security.middlewares import TenantMiddleware, CCProtectMiddleware
+from app.shared.utils.config import ALLOWED_ORIGINS
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_CLIENT
 from app.shared.lifespan import app_lifespan
 
@@ -31,7 +32,7 @@ client_app.add_middleware(CCProtectMiddleware)
 # CORS middleware (MUST be added LAST to be the outermost middleware handling all early 401/403/429 error responses)
 client_app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

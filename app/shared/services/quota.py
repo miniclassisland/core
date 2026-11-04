@@ -75,6 +75,12 @@ async def check_quota(
         )
         return cnt < quota.max_value
     if quota_key == "max_bandwidth_mb":
+        raw_bytes = _BANDWIDTH_BYTES.get(account_id, 0)
+        if raw_bytes >= 1024 * 1024:
+            flushed_mb = raw_bytes // (1024 * 1024)
+            _BANDWIDTH_BYTES[account_id] = raw_bytes % (1024 * 1024)
+            quota.current_value = (quota.current_value or 0) + flushed_mb
+            await db.commit()
         return get_bandwidth_mb(account_id, quota.current_value) < quota.max_value
     return quota.current_value < quota.max_value
 
@@ -86,7 +92,7 @@ async def get_quotas(account_id: str, db: AsyncSession) -> list[AccountQuota]:
     )
     rows = list(result.scalars().all())
     existing_keys = {r.quota_key for r in rows}
-    added = False
+    dirty = False
     for key, default_val in DEFAULT_QUOTAS:
         if key not in existing_keys:
             q = AccountQuota(
@@ -97,8 +103,17 @@ async def get_quotas(account_id: str, db: AsyncSession) -> list[AccountQuota]:
             )
             db.add(q)
             rows.append(q)
-            added = True
-    if added:
+            dirty = True
+    raw_bytes = _BANDWIDTH_BYTES.get(account_id, 0)
+    if raw_bytes >= 1024 * 1024:
+        flushed_mb = raw_bytes // (1024 * 1024)
+        _BANDWIDTH_BYTES[account_id] = raw_bytes % (1024 * 1024)
+        for r in rows:
+            if r.quota_key == "max_bandwidth_mb":
+                r.current_value = (r.current_value or 0) + flushed_mb
+                dirty = True
+                break
+    if dirty:
         await db.commit()
     return rows
 

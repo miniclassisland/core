@@ -4,7 +4,9 @@ Includes Argon2id password hashing, TOTP (pyotp) generation/verification, Redis 
 and upstream ClassIsland Credential Base64 JSON encoding.
 """
 
+import asyncio
 import base64
+from collections import deque
 import hashlib
 import json
 import os
@@ -47,12 +49,22 @@ def hash_password(plain: str) -> str:
     return _hasher.hash(plain)
 
 
+async def hash_password_async(plain: str) -> str:
+    """Hash plain password in worker thread pool to avoid blocking the asyncio event loop."""
+    return await asyncio.to_thread(_hasher.hash, plain)
+
+
 def verify_password(plain: str, hashed: str) -> bool:
     """Verify password match against hash in constant time."""
     try:
         return _hasher.verify(hashed, plain)
     except VerifyMismatchError:
         return False
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    """Verify password match in worker thread pool to avoid blocking the asyncio event loop."""
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 
 # ---- Upstream ClassIsland Credential Encoding ----
@@ -281,6 +293,17 @@ def verify_totp(secret: str, code: str) -> bool:
     return totp.verify(code, valid_window=1)
 
 
+async def verify_totp_once(user_id: str, secret: str, code: str) -> bool:
+    """Verify TOTP code and prevent replay within the validity window."""
+    if not verify_totp(secret, code):
+        return False
+    rd = get_redis(REDIS_DB_AUTH)
+    clean_code = code.strip()
+    replay_key = f"totp_used:{user_id}:{clean_code}"
+    acquired = await rd.set(replay_key, "1", ex=90, nx=True)
+    return bool(acquired)
+
+
 # ---- 2FA One-Time Recovery Codes ----
 
 
@@ -301,6 +324,12 @@ async def store_recovery_codes(user_id: str, codes: list[str]) -> None:
         await rd.sadd(key, *codes)
 
 
+async def delete_recovery_codes(user_id: str) -> None:
+    """Delete all stored 2FA recovery codes for user."""
+    rd = get_redis(REDIS_DB_AUTH)
+    await rd.delete(f"{_RECOVERY_KEY_PREFIX}:{user_id}")
+
+
 async def use_recovery_code(user_id: str, code: str) -> bool:
     """Verify and consume a one-time recovery code."""
     rd = get_redis(REDIS_DB_AUTH)
@@ -318,8 +347,8 @@ async def get_remaining_recovery_count(user_id: str) -> int:
 # ---- CC Attack Protection Global State ----
 
 _is_cc_attack_active: bool = False
-_global_requests: list[float] = []
-_ip_failures: dict[str, list[float]] = {}
+_global_requests: deque[float] = deque()
+_ip_failures: dict[str, Any] = {}
 
 
 def get_cc_state() -> bool:
@@ -338,6 +367,6 @@ def get_ip_failures_dict() -> dict:
     return _ip_failures
 
 
-def get_global_requests() -> list:
-    """Get global request timestamp list reference."""
+def get_global_requests() -> deque[float]:
+    """Get global request timestamp deque reference."""
     return _global_requests

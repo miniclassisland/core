@@ -80,6 +80,21 @@ async def test_admin_bulk_operations(test_superadmin_user):
         res = await bulk.process_batch(req_skip, db, account_id="default")
         assert res["results"][0]["status"] == "skipped"
 
+        # Test HTTPException re-raise on oversized payload (lines 81-83)
+        req_huge = BatchRequest(
+            operations=[
+                BatchOperation(
+                    action=BatchOpType.write,
+                    resource_type="Subjects",
+                    name="huge_sub",
+                    payload={"data": "x" * (600 * 1024)},
+                )
+            ]
+        )
+        with pytest.raises(HTTPException) as exc_400:
+            await bulk.process_batch(req_huge, db, account_id="default")
+        assert exc_400.value.status_code == 400
+
         with patch.object(db, "execute", side_effect=RuntimeError("db failure")):
             req_err = BatchRequest(
                 operations=[

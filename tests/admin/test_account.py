@@ -43,10 +43,20 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
         mock_sm.get_all_clients_status = AsyncMock(
             return_value=[{"uid": "online-uid-1"}]
         )
-        with patch("app.admin.account.get_session_manager", return_value=mock_sm):
+        with (
+            patch("app.admin.account.get_command_servicer", return_value=None),
+            patch("app.admin.account.get_session_manager", return_value=mock_sm),
+        ):
             r_stats2 = await client.get("/stats", headers=headers)
             assert r_stats2.status_code == 200
             assert r_stats2.json()["online_clients"] == 1
+
+        mock_cs = MagicMock()
+        mock_cs.client_queues = {"t1:u1": MagicMock(), "t1:u2": MagicMock()}
+        with patch("app.admin.account.get_command_servicer", return_value=mock_cs):
+            r_stats3 = await client.get("/stats", headers=headers)
+            assert r_stats3.status_code == 200
+            assert r_stats3.json()["online_clients"] == 2
 
         # 3. Create account
         r_create = await client.post(
@@ -113,18 +123,31 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
 
         # Direct call to admin_update_account with model_construct invalid slug -> 400
         async with AsyncSessionLocal() as db:
+            sa_obj = await db.get(User, test_superadmin_user)
+            assert sa_obj is not None
             with pytest.raises(account.HTTPException) as exc_bad_slug:
                 await account.admin_update_account(
                     acct_id,
                     account.AccountUpdate.model_construct(
+                        new_id=None,
                         name=None,
                         slug="INVALID_SLUG!",
                         is_active=None,
                         registration_mode=None,
                     ),
                     db,
+                    sa_obj,
                 )
             assert exc_bad_slug.value.status_code == 400
+            # Also test fallback when admin_user has no id attribute
+            with pytest.raises(account.HTTPException) as exc_fallback_404:
+                await account.admin_update_account(
+                    "non-existent",
+                    account.AccountUpdate(name="X"),
+                    db,
+                    None,  # type: ignore[arg-type]
+                )
+            assert exc_fallback_404.value.status_code == 404
 
         # Create a second account to test duplicate slug conflict
         r_create2 = await client.post(
@@ -156,6 +179,16 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
             q["quota_key"] == "max_clients" and q["current_value"] == 1
             for q in quotas_list
         )
+
+        mock_cs_q = MagicMock()
+        mock_cs_q.tenant_clients = {acct_id: {"c1", "c2", "c3"}}
+        with patch("app.admin.account.get_command_servicer", return_value=mock_cs_q):
+            r_quotas_cs = await client.get(f"/account/{acct_id}/quota", headers=headers)
+            assert r_quotas_cs.status_code == 200
+            assert any(
+                q["quota_key"] == "max_grpc_connections" and q["current_value"] == 3
+                for q in r_quotas_cs.json()
+            )
 
         r_set_quota = await client.post(
             f"/account/{acct_id}/quota",
@@ -226,6 +259,13 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
         r_oobe_bad = await client.post("/oobe/verify", data={"passcode": "WRONG123"})
         assert r_oobe_bad.status_code == 403
 
+        # Lockout 429 branch on /oobe/verify
+        auth.OOBE_LOCKOUT_UNTIL = 999999999.0
+        r_oobe_locked = await client.post("/oobe/verify", data={"passcode": passcode})
+        assert r_oobe_locked.status_code == 429
+        auth.OOBE_LOCKOUT_UNTIL = 0.0
+        auth.OOBE_FAIL_COUNT = 0
+
         r_oobe_ok = await client.post("/oobe/verify", data={"passcode": passcode})
         assert r_oobe_ok.status_code == 200
         oobe_token = r_oobe_ok.json()["token"]
@@ -243,6 +283,27 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
             },
         )
         assert r_cfg_bad_tok.status_code == 403
+
+        # Invalid OOBE input validation branches (db_url, redis_url, username, email, password)
+        for bad_override in (
+            {"db_url": "mysql://localhost/db"},
+            {"redis_url": "http://localhost:6379"},
+            {"username": "ab"},
+            {"email": "not-an-email"},
+            {"password": "weak"},
+        ):
+            base_form = {
+                "token": oobe_token,
+                "db_url": "postgresql+psycopg://u:p@localhost/db",
+                "redis_url": "redis://localhost:6379/0",
+                "domain": "miniclassisland.com",
+                "username": "admin",
+                "email": "admin@school.com",
+                "password": "Password123!",
+                **bad_override,
+            }
+            r_bad_in = await client.post("/oobe/configure", data=base_form)
+            assert r_bad_in.status_code == 400
 
         with (
             patch("app.admin.account.write_config_file") as mock_write,
@@ -268,7 +329,10 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
             mock_init_db.assert_awaited_once()
             mock_timer.assert_called_once()
 
+        auth.generate_oobe_codes()
+        oobe_token = auth.get_oobe_token()
         with (
+            patch("app.admin.account.init_database", new_callable=AsyncMock),
             patch(
                 "app.admin.account.write_config_file",
                 side_effect=RuntimeError("disk full"),

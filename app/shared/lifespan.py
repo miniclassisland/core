@@ -1,6 +1,9 @@
 """Global application lifespan management — startup and shutdown."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -32,6 +35,13 @@ async def app_lifespan(app: FastAPI):
 
 async def _startup(app: FastAPI):
     """Start up backend services."""
+    loop = asyncio.get_running_loop()
+    max_workers = min(128, (os.cpu_count() or 4) * 16)
+    executor = ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="minicims-worker"
+    )
+    loop.set_default_executor(executor)
+    app.state.thread_executor = executor
     logger.info("Initializing database connection...")
     await init_db()
     logger.info("Initializing Redis connection pool...")
@@ -75,4 +85,7 @@ async def _shutdown(app: FastAPI):
     runtime_hub.command_servicer = None
     logger.info("Closing Redis connection pool...")
     await close_redis()
+    executor = getattr(app.state, "thread_executor", None)
+    if executor:
+        executor.shutdown(wait=False)
     logger.info("System shutdown complete")
