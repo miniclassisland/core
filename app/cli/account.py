@@ -3,13 +3,23 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+import click
 import typer
 from sqlalchemy import select
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import Account, AccountMember, User
 
-account_app = typer.Typer(help="Account and tenant management")
+account_app = typer.Typer(help="Account and tenant management", no_args_is_help=True)
+
+
+def _require_args(**kwargs) -> None:
+    """Display command help and exit(0) if any required parameter is omitted."""
+    if any(v is None for v in kwargs.values()):
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            print(ctx.get_help())
+        raise typer.Exit(code=0)
 
 
 @account_app.command("list")
@@ -31,10 +41,11 @@ def list_accounts():
 
 @account_app.command("create")
 def create_account_cmd(
-    name: str = typer.Argument(..., help="Account name"),
+    name: Optional[str] = typer.Argument(None, help="Account name"),
     slug: Optional[str] = typer.Argument(None, help="Tenant unique Slug"),
 ):
     """Create a new tenant account."""
+    _require_args(name=name)
     actual_slug = slug or name.replace("_", "-")
 
     async def _run():
@@ -57,9 +68,10 @@ def create_account_cmd(
 
 @account_app.command("delete")
 def delete_account_cmd(
-    slug: str = typer.Argument(..., help="Slug of account to delete"),
+    slug: Optional[str] = typer.Argument(None, help="Slug of account to delete"),
 ):
     """Delete specified account."""
+    _require_args(slug=slug)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -78,13 +90,14 @@ def delete_account_cmd(
 
 @account_app.command("add-member")
 def add_member_cmd(
-    slug: str = typer.Argument(..., help="Account Slug"),
-    username: str = typer.Argument(..., help="Username to add"),
+    slug: Optional[str] = typer.Argument(None, help="Account Slug"),
+    username: Optional[str] = typer.Argument(None, help="Username to add"),
     role: str = typer.Option(
         "owner", "--role", help="Member role (owner / admin / member)"
     ),
 ):
     """Add a member to a tenant account."""
+    _require_args(slug=slug, username=username)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -114,10 +127,11 @@ def add_member_cmd(
 
 @account_app.command("remove-member")
 def remove_member_cmd(
-    slug: str = typer.Argument(..., help="Account Slug"),
-    username: str = typer.Argument(..., help="Username to remove"),
+    slug: Optional[str] = typer.Argument(None, help="Account Slug"),
+    username: Optional[str] = typer.Argument(None, help="Username to remove"),
 ):
     """Remove a member from a tenant account."""
+    _require_args(slug=slug, username=username)
 
     async def _run():
         async with AsyncSessionLocal() as db:

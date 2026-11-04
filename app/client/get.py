@@ -8,6 +8,7 @@ from app.shared.db.models import MODEL_MAP
 from app.shared.literals import DEFAULT_RESOURCES
 from app.shared.utils.tenant import set_search_path
 from app.shared.security.auth import resolve_token
+from app.shared.security.crypto import normalize_resource_payload
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -57,15 +58,16 @@ async def get_resource_by_token(token: str, request: Request):
     if row is None:
         fallback = DEFAULT_RESOURCES.get(resource_type, {}).get(name)
         if fallback is not None:
-            return fallback
+            return normalize_resource_payload(resource_type, fallback)
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Resource not found"
         )
 
     try:
-        return json.loads(row.content)
+        parsed = json.loads(row.content)
     except (json.JSONDecodeError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Corrupted resource content",
         )
+    return normalize_resource_payload(resource_type, parsed)

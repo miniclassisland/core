@@ -16,12 +16,12 @@ cli = typer.Typer(
 )
 
 # Register sub-command apps
-cli.add_typer(sys_app, name="sys")
-cli.add_typer(account_app, name="account")
-cli.add_typer(user_app, name="user")
-cli.add_typer(ci_app, name="ci")
-cli.add_typer(client_app, name="client")
-cli.add_typer(cd_app, name="cd")
+cli.add_typer(sys_app, name="sys", no_args_is_help=True)
+cli.add_typer(account_app, name="account", no_args_is_help=True)
+cli.add_typer(user_app, name="user", no_args_is_help=True)
+cli.add_typer(ci_app, name="ci", no_args_is_help=True)
+cli.add_typer(client_app, name="client", no_args_is_help=True)
+cli.add_typer(cd_app, name="cd", no_args_is_help=True)
 
 
 @cli.command("about")

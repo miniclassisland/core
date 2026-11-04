@@ -4,9 +4,11 @@ import sys
 from pathlib import Path
 import typer
 
-ci_app = typer.Typer(help="CI continuous integration and toolchain")
-grpc_app = typer.Typer(help="gRPC code generation")
-ci_app.add_typer(grpc_app, name="grpc")
+ci_app = typer.Typer(
+    help="CI continuous integration and toolchain", no_args_is_help=True
+)
+grpc_app = typer.Typer(help="gRPC code generation", no_args_is_help=True)
+ci_app.add_typer(grpc_app, name="grpc", no_args_is_help=True)
 
 
 @ci_app.command("build")

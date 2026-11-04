@@ -544,10 +544,14 @@ async def test_config_upload_and_audit():
     res_cfg_ok = await config_servicer.UploadConfig(req_cfg_new, ctx_ok)
     assert res_cfg_ok.Retcode == Retcode_pb2.Success
 
-    # 4. 审计日志上报（含无 tid 时从 ClientRecord 回查 account_id 及 str Payload 分支）
+    # 4. 审计日志上报（含无 tid 时从 ClientRecord 回查 account_id、cuid header fallback 及 str Payload 分支）
     req_audit = AuditScReq_pb2.AuditScReq(Event=1, Payload=b"", TimestampUtc=1700000000)
     res_audit_ok = await audit_servicer.LogEvent(req_audit, ctx_ok)
     assert res_audit_ok.Retcode == Retcode_pb2.Success
+
+    ctx_cuid_only = get_mock_context(metadata=[("cuid", "client-uid-audit")])
+    res_audit_cuid = await audit_servicer.LogEvent(req_audit, ctx_cuid_only)
+    assert res_audit_cuid.Retcode == Retcode_pb2.Success
 
     mock_str_audit = MagicMock()
     mock_str_audit.Payload = "string-payload"
@@ -561,8 +565,9 @@ async def test_config_upload_and_audit():
 @pytest.mark.asyncio
 async def test_serve_grpc_bootstrap():
     """测试 gRPC 服务器的引导和安全停止动作。"""
-    srv, cmd_s, mgr = await server.serve_grpc()
-    assert srv is not None
-    assert cmd_s is not None
-    assert mgr is not None
-    await srv.stop(grace=None)
+    with patch.object(server, "GRPC_PORT", 0):
+        srv, cmd_s, mgr = await server.serve_grpc()
+        assert srv is not None
+        assert cmd_s is not None
+        assert mgr is not None
+        await srv.stop(grace=None)

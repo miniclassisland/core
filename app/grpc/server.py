@@ -61,10 +61,16 @@ from app.shared.utils.config import GRPC_PORT
 
 logger = logging.getLogger(__name__)
 
-# gRPC auth exempt methods (UploadConfig is exempted here because upstream ClassIsland
-# calls client.UploadConfig without GetMetadata(), and ConfigUploadServicer verifies
-# either session metadata or the pre-created RequestGuidId in DB)
-_AUTH_EXEMPT = {"Register", "BeginHandshake", "CompleteHandshake", "UploadConfig"}
+# gRPC auth exempt methods (UploadConfig and LogEvent are exempted here because upstream ClassIsland
+# calls UploadConfig without GetMetadata() and LogEvent may fire during startup before CompleteHandshake
+# finishes; both servicers verify session or registered client record in DB)
+_AUTH_EXEMPT = {
+    "Register",
+    "BeginHandshake",
+    "CompleteHandshake",
+    "UploadConfig",
+    "LogEvent",
+}
 _CC_BLOCK_METHODS = {"Register", "BeginHandshake", "CompleteHandshake"}
 _QUEUE_MAXSIZE = 256
 _MIN_PING_INTERVAL = 1.0
@@ -690,12 +696,31 @@ class AuditServicer(Audit_pb2_grpc.AuditServicer):
         self._sm = session_manager
 
     async def LogEvent(self, request, context):
-        sid = _get_metadata_dict(context).get("session", "")
-        real_cuid = await self._sm.validate_session(sid)
+        md = _get_metadata_dict(context)
+        sid = md.get("session", "")
+        real_cuid = await self._sm.validate_session(sid) if sid else None
+        tid = (
+            await self._sm.get_session_tenant(sid) if sid else None
+        ) or _get_tenant_id_safe()
+
+        if not real_cuid:
+            cuid_hdr = md.get("cuid", "").strip()
+            if cuid_hdr:
+                async with AsyncSessionLocal() as db:
+                    await set_search_path(db)
+                    rec_check = (
+                        await db.execute(
+                            select(ClientRecord).where(ClientRecord.uid == cuid_hdr)
+                        )
+                    ).scalar_one_or_none()
+                    if rec_check and not getattr(rec_check, "is_disabled", False):
+                        real_cuid = rec_check.uid
+                        if not tid and rec_check.account_id:
+                            tid = rec_check.account_id
+
         if not real_cuid:
             return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
 
-        tid = await self._sm.get_session_tenant(sid) or _get_tenant_id_safe()
         raw_payload = getattr(request, "Payload", b"") or b""
         if isinstance(raw_payload, str):
             raw_payload = raw_payload.encode("utf-8")

@@ -1,7 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select, or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
@@ -100,9 +100,7 @@ async def get_client_manifest(
             (
                 await db.execute(
                     select(model).where(
-                        or_(
-                            model.account_id == tenant_id, model.account_id == "default"
-                        ),
+                        model.account_id == tenant_id,
                         model.name == res_name,
                     )
                 )

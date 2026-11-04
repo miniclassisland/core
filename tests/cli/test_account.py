@@ -7,7 +7,14 @@ runner = CliRunner()
 
 
 def test_account_cli_commands():
-    """Test account CLI subcommands (list, create, delete, add-member, remove-member)."""
+    """Test account CLI subcommands (list, create, delete, add-member, remove-member) and no-arg help."""
+    # No-args help on group and subcommands with required arguments
+    assert runner.invoke(cli, ["account"]).exit_code in (0, 2)
+    for sub in ("create", "delete", "add-member", "remove-member"):
+        res_help = runner.invoke(cli, ["account", sub])
+        assert res_help.exit_code == 0
+        assert "Usage" in res_help.output
+
     # Empty list
     res_empty = runner.invoke(cli, ["account", "list"])
     assert res_empty.exit_code == 0

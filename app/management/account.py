@@ -49,7 +49,7 @@ from app.shared.security.auth import (
 )
 from app.shared.security.crypto import (
     encode_classisland_credential,
-    normalize_credentials_payload,
+    normalize_resource_payload,
 )
 from app.shared.services.user import (
     create_account,
@@ -929,11 +929,7 @@ async def list_pairing_codes(
         (
             await db.execute(
                 select(PairingCode)
-                .where(
-                    or_(
-                        PairingCode.tenant_id == account_id, PairingCode.tenant_id == ""
-                    )
-                )
+                .where(PairingCode.tenant_id == account_id)
                 .order_by(PairingCode.created_at.desc())
             )
         )
@@ -959,11 +955,7 @@ async def search_pairing_codes(
         (
             await db.execute(
                 select(PairingCode)
-                .where(
-                    or_(
-                        PairingCode.tenant_id == account_id, PairingCode.tenant_id == ""
-                    )
-                )
+                .where(PairingCode.tenant_id == account_id)
                 .order_by(PairingCode.created_at.desc())
             )
         )
@@ -1038,7 +1030,7 @@ async def reject_pairing(
         await db.execute(
             select(PairingCode).where(
                 or_(PairingCode.id == pairing_id, PairingCode.code == pairing_id),
-                or_(PairingCode.tenant_id == account_id, PairingCode.tenant_id == ""),
+                PairingCode.tenant_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -1067,7 +1059,7 @@ async def approve_pairing_code(
         await db.execute(
             select(PairingCode).where(
                 or_(PairingCode.id == pairing_id, PairingCode.code == pairing_id),
-                or_(PairingCode.tenant_id == account_id, PairingCode.tenant_id == ""),
+                PairingCode.tenant_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -1576,19 +1568,12 @@ async def _serialize_clients(
 ) -> list[dict[str, Any]]:
     sm = get_session_manager(request)
     online_list = await sm.get_all_clients_status(account_id) if sm else []
-    if sm and not online_list:
-        online_list = await sm.get_all_clients_status("")
     online_map = {item["uid"]: item for item in online_list}
 
     profiles_rows = (
         (
             await db.execute(
-                select(ClientProfile).where(
-                    or_(
-                        ClientProfile.account_id == account_id,
-                        ClientProfile.account_id == "default",
-                    )
-                )
+                select(ClientProfile).where(ClientProfile.account_id == account_id)
             )
         )
         .scalars()
@@ -1650,12 +1635,7 @@ async def list_clients(
         (
             await db.execute(
                 select(ClientRecord)
-                .where(
-                    or_(
-                        ClientRecord.account_id == account_id,
-                        ClientRecord.account_id == "default",
-                    )
-                )
+                .where(ClientRecord.account_id == account_id)
                 .order_by(ClientRecord.registered_at.desc())
             )
         )
@@ -1681,12 +1661,7 @@ async def search_clients(
         (
             await db.execute(
                 select(ClientRecord)
-                .where(
-                    or_(
-                        ClientRecord.account_id == account_id,
-                        ClientRecord.account_id == "default",
-                    )
-                )
+                .where(ClientRecord.account_id == account_id)
                 .order_by(ClientRecord.registered_at.desc())
             )
         )
@@ -1830,10 +1805,7 @@ async def get_client_detail(
         await db.execute(
             select(ClientRecord).where(
                 ClientRecord.uid == client_id,
-                or_(
-                    ClientRecord.account_id == account_id,
-                    ClientRecord.account_id == "default",
-                ),
+                ClientRecord.account_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -1861,10 +1833,7 @@ async def delete_client(
         await db.execute(
             select(ClientRecord).where(
                 ClientRecord.uid == client_id,
-                or_(
-                    ClientRecord.account_id == account_id,
-                    ClientRecord.account_id == "default",
-                ),
+                ClientRecord.account_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -1905,10 +1874,7 @@ async def rename_client(
         await db.execute(
             select(ClientRecord).where(
                 ClientRecord.uid == client_id,
-                or_(
-                    ClientRecord.account_id == account_id,
-                    ClientRecord.account_id == "default",
-                ),
+                ClientRecord.account_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -1983,10 +1949,7 @@ async def disable_client(
         await db.execute(
             select(ClientRecord).where(
                 ClientRecord.uid == client_id,
-                or_(
-                    ClientRecord.account_id == account_id,
-                    ClientRecord.account_id == "default",
-                ),
+                ClientRecord.account_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -2020,10 +1983,7 @@ async def enable_client(
         await db.execute(
             select(ClientRecord).where(
                 ClientRecord.uid == client_id,
-                or_(
-                    ClientRecord.account_id == account_id,
-                    ClientRecord.account_id == "default",
-                ),
+                ClientRecord.account_id == account_id,
             )
         )
     ).scalar_one_or_none()
@@ -2077,7 +2037,10 @@ async def batch_client_action(
         elif action in ("enable", "disable", "delete"):
             rec = (
                 await db.execute(
-                    select(ClientRecord).where(ClientRecord.uid == uid_str)
+                    select(ClientRecord).where(
+                        ClientRecord.uid == uid_str,
+                        ClientRecord.account_id == account_id,
+                    )
                 )
             ).scalar_one_or_none()
             if not rec:
@@ -2205,7 +2168,10 @@ async def list_client_config_uploads(
         (
             await db.execute(
                 select(ConfigUploadRecord)
-                .where(ConfigUploadRecord.client_uid == client_id)
+                .where(
+                    ConfigUploadRecord.account_id == account_id,
+                    ConfigUploadRecord.client_uid == client_id,
+                )
                 .order_by(ConfigUploadRecord.uploaded_at.desc())
                 .limit(50)
             )
@@ -2243,7 +2209,8 @@ async def get_config_upload_detail(
     r = (
         await db.execute(
             select(ConfigUploadRecord).where(
-                ConfigUploadRecord.request_guid == request_guid
+                ConfigUploadRecord.account_id == account_id,
+                ConfigUploadRecord.request_guid == request_guid,
             )
         )
     ).scalar_one_or_none()
@@ -2377,8 +2344,6 @@ async def broadcast_notify(
     targets = payload.target_uids or payload.client_uids
     if not targets:
         online_list = await sm.get_all_clients_status(account_id)
-        if not online_list:
-            online_list = await sm.get_all_clients_status("")
         targets = [item["uid"] for item in online_list]
 
     delivered_count = 0
@@ -2408,9 +2373,7 @@ async def list_audit_logs(
     db: AsyncSession = Depends(get_db),
 ):
     """Query decoded client audit event logs for current tenant account."""
-    stmt = select(AuditLog).where(
-        or_(AuditLog.account_id == account_id, AuditLog.account_id == "default")
-    )
+    stmt = select(AuditLog).where(AuditLog.account_id == account_id)
     if client_uid:
         stmt = stmt.where(AuditLog.client_uid == client_uid)
     ev_filter = event if event is not None else event_type
@@ -2429,12 +2392,7 @@ async def list_audit_logs(
     clients = (
         (
             await db.execute(
-                select(ClientRecord).where(
-                    or_(
-                        ClientRecord.account_id == account_id,
-                        ClientRecord.account_id == "default",
-                    )
-                )
+                select(ClientRecord).where(ClientRecord.account_id == account_id)
             )
         )
         .scalars()
@@ -2478,11 +2436,7 @@ async def clear_audit_logs(
     db: AsyncSession = Depends(get_db),
 ):
     """Clear audit logs for current tenant account."""
-    await db.execute(
-        delete(AuditLog).where(
-            or_(AuditLog.account_id == account_id, AuditLog.account_id == "default")
-        )
-    )
+    await db.execute(delete(AuditLog).where(AuditLog.account_id == account_id))
     await db.commit()
     return {"status": "ok", "message": "Audit logs cleared"}
 
@@ -2686,9 +2640,9 @@ async def patch_data(
                 base[k] = v
         return base
 
-    merged = dict_deep_merge(current, payload)
-    if resource_type == "Credentials":
-        merged = normalize_credentials_payload(merged)
+    merged = normalize_resource_payload(
+        resource_type, dict_deep_merge(current, payload)
+    )
     record.content = json.dumps(merged, ensure_ascii=False)
     record.version = (record.version or 0) + 1
     record.updated_at = datetime.now(timezone.utc)
@@ -2750,8 +2704,7 @@ async def write_data_endpoint(
     if not model:
         return StatusResponse(status="error", message="Invalid resource type")
 
-    if resource_type == "Credentials":
-        payload = normalize_credentials_payload(payload)
+    payload = normalize_resource_payload(resource_type, payload)
 
     record = (
         await db.execute(
@@ -2821,9 +2774,10 @@ async def get_resource_content_endpoint(
         )
 
     try:
-        return json.loads(record.content) if record.content else {}
+        parsed = json.loads(record.content) if record.content else {}
     except (json.JSONDecodeError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Corrupted resource content",
         )
+    return normalize_resource_payload(resource_type, parsed)

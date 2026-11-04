@@ -1,6 +1,9 @@
 import typer
 
-cd_app = typer.Typer(help="Configuration deployment and continuous delivery management")
+cd_app = typer.Typer(
+    help="Configuration deployment and continuous delivery management",
+    no_args_is_help=True,
+)
 
 
 @cd_app.command("a")

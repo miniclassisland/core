@@ -149,25 +149,39 @@ CONFIG_TYPE_NAMES: dict[int, str] = {
 
 
 # ---- 6. Default Profile Resource Templates ----
+DEFAULT_SUB_CHINESE_GUID = "97d0bf3f-137f-4f8a-87d6-ff387063bbd3"
+DEFAULT_SUB_MATH_GUID = "1154d452-5ede-4194-b4dd-cb40c956c8ed"
+DEFAULT_SUB_ENGLISH_GUID = "3bbed0c0-bcf3-4dfe-a78d-5da9b02cf8bd"
+DEFAULT_TL_WEEKDAY_GUID = "4b9c71e2-6a1f-4d8e-9b2c-3d4e5f6a7b8c"
+DEFAULT_CP_MONDAY_GUID = "5c8d62f3-7b2a-4e9f-8c3d-4e5f6a7b8c9d"
+
+LEGACY_RESOURCE_ID_MAP: dict[str, str] = {
+    "sub-chinese": DEFAULT_SUB_CHINESE_GUID,
+    "sub-math": DEFAULT_SUB_MATH_GUID,
+    "sub-english": DEFAULT_SUB_ENGLISH_GUID,
+    "tl-weekday": DEFAULT_TL_WEEKDAY_GUID,
+    "cp-monday": DEFAULT_CP_MONDAY_GUID,
+}
+
 DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
     "Subjects": {
         "default": {
             "Subjects": {
-                "sub-chinese": {
+                DEFAULT_SUB_CHINESE_GUID: {
                     "Name": "语文",
                     "Initial": "语",
                     "TeacherName": "",
                     "IsOutDoor": False,
                     "AttachedObjects": {},
                 },
-                "sub-math": {
+                DEFAULT_SUB_MATH_GUID: {
                     "Name": "数学",
                     "Initial": "数",
                     "TeacherName": "",
                     "IsOutDoor": False,
                     "AttachedObjects": {},
                 },
-                "sub-english": {
+                DEFAULT_SUB_ENGLISH_GUID: {
                     "Name": "英语",
                     "Initial": "英",
                     "TeacherName": "",
@@ -180,15 +194,17 @@ DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
     "TimeLayout": {
         "default": {
             "TimeLayouts": {
-                "tl-weekday": {
+                DEFAULT_TL_WEEKDAY_GUID: {
                     "Name": "标准平日作息",
                     "Layouts": [
                         {
                             "StartSecond": "1970-01-01T08:00:00",
                             "EndSecond": "1970-01-01T08:45:00",
+                            "StartTime": "08:00:00",
+                            "EndTime": "08:45:00",
                             "TimeType": 0,
                             "IsHideDefault": False,
-                            "DefaultClassId": "sub-chinese",
+                            "DefaultClassId": DEFAULT_SUB_CHINESE_GUID,
                             "BreakName": "",
                             "ActionSet": None,
                             "AttachedObjects": {},
@@ -196,9 +212,11 @@ DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
                         {
                             "StartSecond": "1970-01-01T08:45:00",
                             "EndSecond": "1970-01-01T08:55:00",
+                            "StartTime": "08:45:00",
+                            "EndTime": "08:55:00",
                             "TimeType": 1,
                             "IsHideDefault": False,
-                            "DefaultClassId": "",
+                            "DefaultClassId": "00000000-0000-0000-0000-000000000000",
                             "BreakName": "课间休息",
                             "ActionSet": None,
                             "AttachedObjects": {},
@@ -206,9 +224,11 @@ DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
                         {
                             "StartSecond": "1970-01-01T08:55:00",
                             "EndSecond": "1970-01-01T09:40:00",
+                            "StartTime": "08:55:00",
+                            "EndTime": "09:40:00",
                             "TimeType": 0,
                             "IsHideDefault": False,
-                            "DefaultClassId": "sub-math",
+                            "DefaultClassId": DEFAULT_SUB_MATH_GUID,
                             "BreakName": "",
                             "ActionSet": None,
                             "AttachedObjects": {},
@@ -222,9 +242,9 @@ DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
     "ClassPlan": {
         "default": {
             "ClassPlans": {
-                "cp-monday": {
+                DEFAULT_CP_MONDAY_GUID: {
                     "Name": "周一课表",
-                    "TimeLayoutId": "tl-weekday",
+                    "TimeLayoutId": DEFAULT_TL_WEEKDAY_GUID,
                     "TimeRule": {
                         "WeekDay": 1,
                         "WeekCountDiv": 0,
@@ -232,12 +252,12 @@ DEFAULT_RESOURCES: dict[str, dict[str, dict]] = {
                     },
                     "Classes": [
                         {
-                            "SubjectId": "sub-chinese",
+                            "SubjectId": DEFAULT_SUB_CHINESE_GUID,
                             "IsEnabled": True,
                             "AttachedObjects": {},
                         },
                         {
-                            "SubjectId": "sub-math",
+                            "SubjectId": DEFAULT_SUB_MATH_GUID,
                             "IsEnabled": True,
                             "AttachedObjects": {},
                         },

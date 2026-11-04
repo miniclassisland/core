@@ -11,7 +11,10 @@ import typer
 from app.shared.utils.config import CONFIG_FILE
 from app.shared.utils.oobe import write_config_file, init_database
 
-sys_app = typer.Typer(help="System control and daemon process management")
+sys_app = typer.Typer(
+    help="System control and daemon process management",
+    no_args_is_help=True,
+)
 
 
 def _ask(prompt: str, default: str = "", validator=None) -> str:

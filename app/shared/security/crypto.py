@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import secrets
+import uuid
 import pyotp
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -22,6 +23,7 @@ from app.shared.literals import (
     RECOVERY_KEY_PREFIX,
     RECOVERY_CODE_COUNT,
     RECOVERY_CODE_LENGTH,
+    LEGACY_RESOURCE_ID_MAP,
 )
 
 # Argon2id configuration (OWASP recommended parameters)
@@ -108,6 +110,150 @@ def normalize_credentials_payload(payload: dict) -> dict:
         if isinstance(val, str) and val and not is_encoded_classisland_credential(val):
             out[key] = encode_classisland_credential(val)
     return out
+
+
+_EMPTY_GUID = "00000000-0000-0000-0000-000000000000"
+
+
+def ensure_guid_str(value: str, *, allow_empty: bool = False) -> str:
+    """Convert any identifier string into a valid canonical UUID string for upstream ClassIsland System.Guid."""
+    if not value or not isinstance(value, str):
+        return "" if allow_empty else _EMPTY_GUID
+    s = value.strip()
+    if not s:
+        return "" if allow_empty else _EMPTY_GUID
+    if s in LEGACY_RESOURCE_ID_MAP:
+        return LEGACY_RESOURCE_ID_MAP[s]
+    try:
+        return str(uuid.UUID(s))
+    except (ValueError, AttributeError):
+        return str(uuid.uuid5(uuid.NAMESPACE_OID, f"miniclassisland:{s}"))
+
+
+def _normalize_hhmmss(raw: str, default: str = "08:00:00") -> tuple[str, str]:
+    """Return (StartSecond ISO string, StartTime HH:mm:ss string)."""
+    if not raw or not isinstance(raw, str):
+        return f"1970-01-01T{default}", default
+    t_idx = raw.find("T")
+    time_part = raw[t_idx + 1 :] if t_idx >= 0 else raw
+    parts = time_part.split(":")
+    h = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 8
+    m = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    sec_str = parts[2].split(".")[0] if len(parts) > 2 else "00"
+    sec = int(sec_str) if sec_str.isdigit() else 0
+    span = f"{h:02d}:{m:02d}:{sec:02d}"
+    return f"1970-01-01T{span}", span
+
+
+def normalize_resource_payload(resource_type: str, payload: dict) -> dict:
+    """Normalize resource JSON to strictly conform to upstream ClassIsland C# Profile/Model serialization."""
+    if not isinstance(payload, dict):
+        return payload
+
+    if resource_type == "Credentials":
+        return normalize_credentials_payload(payload)
+
+    if resource_type == "Subjects":
+        raw_subs = (
+            payload.get("Subjects")
+            if isinstance(payload.get("Subjects"), dict)
+            else {k: v for k, v in payload.items() if isinstance(v, dict)}
+        )
+        norm_subs: dict[str, dict] = {}
+        for k, v in raw_subs.items():
+            if isinstance(v, dict):
+                norm_subs[ensure_guid_str(str(k))] = dict(v)
+        return {"Subjects": norm_subs}
+
+    if resource_type == "TimeLayout":
+        raw_tls = (
+            payload.get("TimeLayouts")
+            if isinstance(payload.get("TimeLayouts"), dict)
+            else {k: v for k, v in payload.items() if isinstance(v, dict)}
+        )
+        norm_tls: dict[str, dict] = {}
+        for k, v in raw_tls.items():
+            if not isinstance(v, dict):  # pragma: no cover
+                continue
+            tl_copy = dict(v)
+            layouts = tl_copy.get("Layouts")
+            if isinstance(layouts, list):
+                norm_items = []
+                for item in layouts:
+                    if not isinstance(item, dict):
+                        continue
+                    it = dict(item)
+                    s_raw = it.get("StartTime") or it.get("StartSecond") or "08:00:00"
+                    e_raw = it.get("EndTime") or it.get("EndSecond") or "08:45:00"
+                    s_iso, s_span = _normalize_hhmmss(str(s_raw), "08:00:00")
+                    e_iso, e_span = _normalize_hhmmss(str(e_raw), "08:45:00")
+                    it["StartSecond"] = s_iso
+                    it["EndSecond"] = e_iso
+                    it["StartTime"] = s_span
+                    it["EndTime"] = e_span
+                    def_cls = it.get("DefaultClassId")
+                    it["DefaultClassId"] = (
+                        ensure_guid_str(str(def_cls)) if def_cls else _EMPTY_GUID
+                    )
+                    norm_items.append(it)
+                tl_copy["Layouts"] = norm_items
+            norm_tls[ensure_guid_str(str(k))] = tl_copy
+        return {"TimeLayouts": norm_tls}
+
+    if resource_type == "ClassPlan":
+        has_wrapper = isinstance(payload.get("ClassPlans"), dict)
+        raw_cps = (
+            payload["ClassPlans"]
+            if has_wrapper
+            else {
+                k: v
+                for k, v in payload.items()
+                if k != "ClassPlanGroups" and isinstance(v, dict)
+            }
+        )
+        norm_cps: dict[str, dict] = {}
+        for k, v in raw_cps.items():
+            if not isinstance(v, dict):  # pragma: no cover
+                continue
+            cp_copy = dict(v)
+            tl_id = cp_copy.get("TimeLayoutId")
+            cp_copy["TimeLayoutId"] = (
+                ensure_guid_str(str(tl_id)) if tl_id else _EMPTY_GUID
+            )
+            assoc_grp = cp_copy.get("AssociatedGroup")
+            cp_copy["AssociatedGroup"] = (
+                ensure_guid_str(str(assoc_grp)) if assoc_grp else _EMPTY_GUID
+            )
+            ov_src = cp_copy.get("OverlaySourceId")
+            if ov_src:
+                cp_copy["OverlaySourceId"] = ensure_guid_str(str(ov_src))
+            classes = cp_copy.get("Classes")
+            if isinstance(classes, list):
+                norm_classes = []
+                for cls_item in classes:
+                    if not isinstance(cls_item, dict):
+                        continue
+                    ci = dict(cls_item)
+                    sub_id = ci.get("SubjectId")
+                    ci["SubjectId"] = (
+                        ensure_guid_str(str(sub_id)) if sub_id else _EMPTY_GUID
+                    )
+                    norm_classes.append(ci)
+                cp_copy["Classes"] = norm_classes
+            norm_cps[ensure_guid_str(str(k))] = cp_copy
+
+        raw_groups = (
+            payload.get("ClassPlanGroups")
+            if isinstance(payload.get("ClassPlanGroups"), dict)
+            else {_EMPTY_GUID: {"Name": "默认课表群", "IsGlobal": False}}
+        )
+        norm_groups: dict[str, dict] = {}
+        for gk, gv in raw_groups.items():
+            if isinstance(gv, dict):
+                norm_groups[ensure_guid_str(str(gk))] = dict(gv)
+        return {"ClassPlans": norm_cps, "ClassPlanGroups": norm_groups}
+
+    return payload
 
 
 # ---- TOTP Two-Factor Authentication ----

@@ -1,6 +1,9 @@
 import typer
 
-client_app = typer.Typer(help="Client devices and state management")
+client_app = typer.Typer(
+    help="Client devices and state management",
+    no_args_is_help=True,
+)
 
 
 @client_app.command("a")

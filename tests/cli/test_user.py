@@ -7,7 +7,13 @@ runner = CliRunner()
 
 
 def test_user_cli_commands():
-    """Test user CLI subcommands (list, create, ban, activate, reset-password, set-role, delete)."""
+    """Test user CLI subcommands (list, create, ban, activate, reset-password, set-role, delete) and no-arg help."""
+    assert runner.invoke(cli, ["user"]).exit_code in (0, 2)
+    for sub in ("create", "delete", "ban", "activate", "reset-password", "set-role"):
+        res_help = runner.invoke(cli, ["user", sub])
+        assert res_help.exit_code == 0
+        assert "Usage" in res_help.output
+
     # Operations on non-existent user
     for cmd_args in (
         ["user", "delete", "missing_u"],

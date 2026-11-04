@@ -1,4 +1,6 @@
 import asyncio
+from typing import Optional
+import click
 import typer
 from sqlalchemy import select
 
@@ -7,7 +9,16 @@ from app.shared.db.models import User
 from app.shared.security.crypto import hash_password
 from app.shared.services.user import register_user, list_users
 
-user_app = typer.Typer(help="User account management")
+user_app = typer.Typer(help="User account management", no_args_is_help=True)
+
+
+def _require_args(**kwargs) -> None:
+    """Display command help and exit(0) if any required parameter is omitted."""
+    if any(v is None for v in kwargs.values()):
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            print(ctx.get_help())
+        raise typer.Exit(code=0)
 
 
 @user_app.command("list")
@@ -26,12 +37,13 @@ def list_users_cmd():
 
 @user_app.command("create")
 def create_user_cmd(
-    username: str = typer.Argument(..., help="Username"),
-    email: str = typer.Argument(..., help="User email"),
-    password: str = typer.Argument(..., help="User password"),
+    username: Optional[str] = typer.Argument(None, help="Username"),
+    email: Optional[str] = typer.Argument(None, help="User email"),
+    password: Optional[str] = typer.Argument(None, help="User password"),
     role: str = typer.Option("normal", "--role", help="Initial user role"),
 ):
     """Create a new user account."""
+    _require_args(username=username, email=email, password=password)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -55,9 +67,10 @@ def create_user_cmd(
 
 @user_app.command("delete")
 def delete_user_cmd(
-    username: str = typer.Argument(..., help="Username to delete"),
+    username: Optional[str] = typer.Argument(None, help="Username to delete"),
 ):
     """Delete specified user account."""
+    _require_args(username=username)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -76,9 +89,10 @@ def delete_user_cmd(
 
 @user_app.command("ban")
 def ban_user_cmd(
-    username: str = typer.Argument(..., help="Username to ban"),
+    username: Optional[str] = typer.Argument(None, help="Username to ban"),
 ):
     """Ban specified user account."""
+    _require_args(username=username)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -97,9 +111,10 @@ def ban_user_cmd(
 
 @user_app.command("activate")
 def activate_user_cmd(
-    username: str = typer.Argument(..., help="Username to activate"),
+    username: Optional[str] = typer.Argument(None, help="Username to activate"),
 ):
     """Activate/unban specified user account."""
+    _require_args(username=username)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -119,10 +134,11 @@ def activate_user_cmd(
 
 @user_app.command("reset-password")
 def reset_password_cmd(
-    username: str = typer.Argument(..., help="Username"),
-    password: str = typer.Argument(..., help="New password"),
+    username: Optional[str] = typer.Argument(None, help="Username"),
+    password: Optional[str] = typer.Argument(None, help="New password"),
 ):
     """Reset password for specified user account."""
+    _require_args(username=username, password=password)
 
     async def _run():
         async with AsyncSessionLocal() as db:
@@ -141,10 +157,13 @@ def reset_password_cmd(
 
 @user_app.command("set-role")
 def set_role_cmd(
-    username: str = typer.Argument(..., help="Username"),
-    role: str = typer.Argument(..., help="Role code (superadmin / admin / normal)"),
+    username: Optional[str] = typer.Argument(None, help="Username"),
+    role: Optional[str] = typer.Argument(
+        None, help="Role code (superadmin / admin / normal)"
+    ),
 ):
     """Set system role for specified user account."""
+    _require_args(username=username, role=role)
 
     async def _run():
         async with AsyncSessionLocal() as db:

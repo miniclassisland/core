@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.db.session import get_db
 from app.shared.db.models import MODEL_MAP
 from app.shared.schemas.schemas import BatchRequest, BatchOpType
-from app.shared.security.crypto import normalize_credentials_payload
+from app.shared.security.crypto import normalize_resource_payload
 from app.shared.utils.tenant import get_tenant_id_or_default
 
 logger = logging.getLogger(__name__)
@@ -51,8 +51,8 @@ async def process_batch(
                 )
             ).scalar_one_or_none()
             payload = op.payload or {}
-            if op.resource_type == "Credentials" and isinstance(payload, dict):
-                payload = normalize_credentials_payload(payload)
+            if isinstance(payload, dict):
+                payload = normalize_resource_payload(op.resource_type, payload)
             if op.action == BatchOpType.delete and record:
                 await db.delete(record)
             elif op.action in [BatchOpType.write, BatchOpType.create]:
@@ -63,9 +63,10 @@ async def process_batch(
                 db.add(rc)
             elif op.action == BatchOpType.update and record:
                 cur = json.loads(record.content) if record.content else {}
-                record.content = json.dumps(
-                    dict_deep_merge(cur, payload), ensure_ascii=False
+                merged = normalize_resource_payload(
+                    op.resource_type, dict_deep_merge(cur, payload)
                 )
+                record.content = json.dumps(merged, ensure_ascii=False)
                 record.version = (record.version or 0) + 1
                 record.updated_at = datetime.now(timezone.utc)
             res.append({"action": op.action, "name": op.name, "status": "success"})

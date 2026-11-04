@@ -9,6 +9,7 @@ from app.client.app import client_app
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import SubFile
 from app.shared.security.auth import create_token
+from app.shared.security.crypto import ensure_guid_str
 
 
 def test_import():
@@ -61,7 +62,7 @@ async def test_get_resource_by_token_branches():
         tok_shared = await create_token("other-tenant", "Subjects", "shared_sub")
         r_shared = await client.get("/get", params={"token": tok_shared})
         assert r_shared.status_code == 200
-        assert r_shared.json()["Subjects"]["s1"]["Name"] == "History"
+        assert r_shared.json()["Subjects"][ensure_guid_str("s1")]["Name"] == "History"
 
         # 5. Corrupted JSON -> 500
         tok_corrupt = await create_token("acct-corrupt", "Subjects", "corrupt_sub")

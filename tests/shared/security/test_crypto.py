@@ -25,6 +25,89 @@ def test_classisland_credential_encoding():
     assert crypto.encode_classisland_credential(encoded) == encoded
 
 
+def test_resource_payload_normalization():
+    """Test normalize_resource_payload and ensure_guid_str for upstream ClassIsland System.Guid compatibility."""
+    assert crypto.ensure_guid_str("") == "00000000-0000-0000-0000-000000000000"
+    assert crypto.ensure_guid_str("", allow_empty=True) == ""
+    assert crypto.ensure_guid_str("   ", allow_empty=True) == ""
+    assert (
+        crypto.ensure_guid_str("sub-chinese") == "97d0bf3f-137f-4f8a-87d6-ff387063bbd3"
+    )
+    valid_uuid = "1154d452-5ede-4194-b4dd-cb40c956c8ed"
+    assert crypto.ensure_guid_str(valid_uuid) == valid_uuid
+    custom_uuid = crypto.ensure_guid_str("custom-non-guid-id")
+    assert len(custom_uuid) == 36 and "-" in custom_uuid
+
+    assert crypto._normalize_hhmmss("") == ("1970-01-01T08:00:00", "08:00:00")
+    assert crypto._normalize_hhmmss("1970-01-01T09:15:30.123") == (
+        "1970-01-01T09:15:30",
+        "09:15:30",
+    )
+
+    assert crypto.normalize_resource_payload("Subjects", "not-a-dict") == "not-a-dict"
+
+    sub_norm = crypto.normalize_resource_payload(
+        "Subjects",
+        {"sub-chinese": {"Name": "语文"}, "skip_non_dict": "val"},
+    )
+    assert "97d0bf3f-137f-4f8a-87d6-ff387063bbd3" in sub_norm["Subjects"]
+
+    tl_norm = crypto.normalize_resource_payload(
+        "TimeLayout",
+        {
+            "tl-weekday": {
+                "Name": "作息",
+                "Layouts": [
+                    {
+                        "StartSecond": "1970-01-01T08:00:00",
+                        "EndSecond": "1970-01-01T08:45:00",
+                        "TimeType": 0,
+                        "DefaultClassId": "sub-chinese",
+                    },
+                    "skip-non-dict",
+                ],
+            },
+            "bad": "skip",
+        },
+    )
+    tl_guid = "4b9c71e2-6a1f-4d8e-9b2c-3d4e5f6a7b8c"
+    assert tl_guid in tl_norm["TimeLayouts"]
+    assert tl_norm["TimeLayouts"][tl_guid]["Layouts"][0]["StartTime"] == "08:00:00"
+    assert (
+        tl_norm["TimeLayouts"][tl_guid]["Layouts"][0]["DefaultClassId"]
+        == "97d0bf3f-137f-4f8a-87d6-ff387063bbd3"
+    )
+
+    cp_norm = crypto.normalize_resource_payload(
+        "ClassPlan",
+        {
+            "cp-monday": {
+                "Name": "周一",
+                "TimeLayoutId": "tl-weekday",
+                "OverlaySourceId": "cp-monday",
+                "Classes": [
+                    {"SubjectId": "sub-chinese", "IsEnabled": True},
+                    "skip-non-dict",
+                ],
+            },
+            "bad": "skip",
+        },
+    )
+    cp_guid = "5c8d62f3-7b2a-4e9f-8c3d-4e5f6a7b8c9d"
+    assert cp_guid in cp_norm["ClassPlans"]
+    assert cp_norm["ClassPlans"][cp_guid]["TimeLayoutId"] == tl_guid
+    assert cp_norm["ClassPlans"][cp_guid]["OverlaySourceId"] == cp_guid
+    assert (
+        cp_norm["ClassPlans"][cp_guid]["Classes"][0]["SubjectId"]
+        == "97d0bf3f-137f-4f8a-87d6-ff387063bbd3"
+    )
+    assert "00000000-0000-0000-0000-000000000000" in cp_norm["ClassPlanGroups"]
+
+    assert crypto.normalize_resource_payload(
+        "Policy", {"AllowExitManagement": True}
+    ) == {"AllowExitManagement": True}
+
+
 def test_totp_lifecycle():
     """Test TOTP secret generation, URI, and verification."""
     secret = crypto.generate_totp_secret()
