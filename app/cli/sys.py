@@ -4,10 +4,21 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+import click
 import typer
+from sqlalchemy import func, select
 
+from app.shared.db.session import AsyncSessionLocal
+from app.shared.db.models import (
+    Account,
+    AuditLog,
+    ClientRecord,
+    SystemConfig,
+    User,
+)
 from app.shared.utils.config import CONFIG_FILE
 from app.shared.utils.oobe import write_config_file, init_database
 
@@ -15,6 +26,15 @@ sys_app = typer.Typer(
     help="System control and daemon process management",
     no_args_is_help=True,
 )
+
+
+def _require_args(**kwargs) -> None:
+    """Display command help and exit(0) if any required parameter is omitted."""
+    if any(v is None for v in kwargs.values()):
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            print(ctx.get_help())
+        raise typer.Exit(code=0)
 
 
 def _ask(prompt: str, default: str = "", validator=None) -> str:
@@ -169,6 +189,87 @@ def get_status():
     """Check and display system configuration status."""
     s = "✅ Initialized" if CONFIG_FILE.exists() else "❌ Uninitialized"
     print(s)
+
+
+@sys_app.command("stats")
+def show_stats():
+    """Display global platform statistics (accounts, users, clients, audit logs)."""
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            total_accounts = await db.scalar(select(func.count(Account.id))) or 0
+            active_accounts = (
+                await db.scalar(
+                    select(func.count(Account.id)).where(Account.is_active.is_(True))
+                )
+                or 0
+            )
+            total_users = await db.scalar(select(func.count(User.id))) or 0
+            pending_users = (
+                await db.scalar(
+                    select(func.count(User.id)).where(User.role_code == "pending")
+                )
+                or 0
+            )
+            total_clients = await db.scalar(select(func.count(ClientRecord.uid))) or 0
+            total_audits = await db.scalar(select(func.count(AuditLog.id))) or 0
+            print(f"Accounts:      {active_accounts} active / {total_accounts} total")
+            print(f"Users:         {total_users} total ({pending_users} pending)")
+            print(f"Clients:       {total_clients} registered")
+            print(f"Audit Logs:    {total_audits}")
+
+    asyncio.run(_run())
+
+
+@sys_app.command("settings")
+def list_settings():
+    """Display all system configuration settings from database."""
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            rows = (
+                (await db.execute(select(SystemConfig).order_by(SystemConfig.key)))
+                .scalars()
+                .all()
+            )
+            if not rows:
+                print("No system settings found")
+                return
+            for r in rows:
+                print(f"  {r.key} = {r.value}")
+
+    asyncio.run(_run())
+
+
+@sys_app.command("set-setting")
+def set_setting_cmd(
+    key: Optional[str] = typer.Argument(None, help="Configuration key"),
+    value: Optional[str] = typer.Argument(None, help="Configuration value"),
+):
+    """Set or update a system configuration key-value pair."""
+    _require_args(key=key, value=value)
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            now = datetime.now(timezone.utc)
+            cfg = (
+                await db.execute(select(SystemConfig).where(SystemConfig.key == key))
+            ).scalar_one_or_none()
+            if cfg:
+                cfg.value = str(value)
+                cfg.updated_at = now
+            else:
+                db.add(
+                    SystemConfig(
+                        key=key or "",
+                        value=str(value),
+                        updated_at=now,
+                    )
+                )
+            await db.commit()
+            print(f"✅ Setting {key} updated to {value}")
+
+    asyncio.run(_run())
 
 
 @sys_app.command("monit")

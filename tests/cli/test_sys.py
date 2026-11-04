@@ -190,3 +190,31 @@ def test_sys_pid_command():
     assert res2.exit_code == 0
     assert str(PID.read()) in res2.output
     PID.remove()
+
+
+def test_sys_stats_and_settings_commands():
+    """Test sys stats, settings, and set-setting commands (including no-arg help)."""
+    res_help = runner.invoke(cli, ["sys", "set-setting"])
+    assert res_help.exit_code == 0
+    assert "Usage" in res_help.output
+
+    # Stats
+    res_stats = runner.invoke(cli, ["sys", "stats"])
+    assert res_stats.exit_code == 0
+    assert "Accounts:" in res_stats.output
+
+    # Settings when empty or populated
+    assert runner.invoke(cli, ["sys", "settings"]).exit_code == 0
+
+    # Set-setting (insert and update)
+    assert (
+        runner.invoke(cli, ["sys", "set-setting", "cli_test_key", "val1"]).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(cli, ["sys", "set-setting", "cli_test_key", "val2"]).exit_code
+        == 0
+    )
+    res_settings = runner.invoke(cli, ["sys", "settings"])
+    assert res_settings.exit_code == 0
+    assert "cli_test_key = val2" in res_settings.output
