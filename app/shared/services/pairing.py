@@ -4,9 +4,8 @@ import json
 import secrets
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
-from sqlalchemy import select, delete as sa_delete
+from sqlalchemy import select
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import PairingCode, ClientProfile
@@ -131,65 +130,3 @@ async def check_approved(client_uid: str, tenant_id: str) -> bool:
             await db.commit()
             return True
     return False
-
-
-async def get_pairing_by_code(code: str, tenant_id: str) -> PairingCode | None:
-    """Query pairing request details by code."""
-    async with AsyncSessionLocal() as db:
-        await set_search_path(db)
-        stmt = (
-            select(PairingCode)
-            .where(PairingCode.code == code)
-            .where(PairingCode.tenant_id == tenant_id)
-        )
-        return (await db.execute(stmt)).scalar_one_or_none()
-
-
-async def approve_pairing(
-    code: str, tenant_id: str, preset_profile: Optional[dict] = None
-) -> bool:
-    """Approve pairing request for specified client."""
-    async with AsyncSessionLocal() as db:
-        await set_search_path(db)
-        stmt = (
-            select(PairingCode)
-            .where(PairingCode.code == code)
-            .where(PairingCode.tenant_id == tenant_id)
-        )
-        record = (await db.execute(stmt)).scalars().first()
-        if not record or record.approved or record.used:
-            return False
-        record.approved = True
-        record.status = "approved"
-        if preset_profile:
-            record.preset_profile_json = json.dumps(preset_profile, ensure_ascii=False)
-        await db.commit()
-        logger.info("Approved pairing code %s (tenant=%s)", code, tenant_id)
-        return True
-
-
-async def revoke_pairing(code: str, tenant_id: str) -> bool:
-    """Revoke/delete specified pairing request."""
-    async with AsyncSessionLocal() as db:
-        await set_search_path(db)
-        result = await db.execute(
-            sa_delete(PairingCode)
-            .where(PairingCode.code == code)
-            .where(PairingCode.tenant_id == tenant_id)
-        )
-        await db.commit()
-        return int(getattr(result, "rowcount", 0) or 0) > 0
-
-
-async def list_pending(tenant_id: str) -> list[PairingCode]:
-    """List pending pairing requests for specified tenant account."""
-    async with AsyncSessionLocal() as db:
-        await set_search_path(db)
-        stmt = (
-            select(PairingCode)
-            .where(PairingCode.tenant_id == tenant_id)
-            .where(PairingCode.used.is_(False))
-            .order_by(PairingCode.created_at.desc())
-        )
-        result = await db.execute(stmt)
-        return list(result.scalars().all())

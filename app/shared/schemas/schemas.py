@@ -41,14 +41,6 @@ class MessageResponse(BaseModel):
     message: str = Field(default="", max_length=1024)
 
 
-class TokenResponse(BaseModel):
-    """Session token response issued upon authentication."""
-
-    token: str = Field(max_length=512)
-    expires_in: int = 3600
-    token_type: str = Field(default="Bearer", max_length=32)
-
-
 # ---- 2. User Related Schemas ----
 
 
@@ -185,29 +177,6 @@ class AccessRoleUpdate(BaseModel):
     )
 
 
-class PermissionGrantRequest(BaseModel):
-    """Grant atomic permission request schema."""
-
-    member_id: str = Field(..., description="Account member ID")
-    permission_code: str = Field(..., max_length=64)
-    granted: bool = Field(True, description="True=Grant, False=Deny")
-
-
-class PermissionRevokeRequest(BaseModel):
-    """Revoke atomic permission request schema."""
-
-    member_id: str = Field(..., description="Account member ID")
-    permission_code: str = Field(..., max_length=64)
-
-
-class PermissionDefOut(BaseModel):
-    """Permission definition output payload."""
-
-    code: str
-    label: str
-    category: str
-
-
 # ---- 5. Batch Operation Schemas ----
 
 
@@ -233,10 +202,6 @@ class BatchRequest(BaseModel):
     """Batch operation collection request."""
 
     operations: List[BatchOperation] = Field(..., max_length=100)
-
-
-# Backward compatibility support
-BatchOperationAction = BatchOpType
 
 
 # ---- 6. Physical Client & Configuration Manifest ----
@@ -379,24 +344,6 @@ class QuotaOut(BaseModel):
     quota_key: str
     max_value: int
     current_value: int
-
-
-class RoleCreateRequest(BaseModel):
-    """Create custom role request schema."""
-
-    code: str = Field(..., min_length=2, max_length=32)
-    label: str = Field(..., max_length=64)
-    priority: int = Field(..., ge=-100, le=99)
-
-
-class RoleOut(BaseModel):
-    """Role definition output payload."""
-
-    id: str
-    code: str
-    label: str
-    priority: int
-    is_system: bool
 
 
 # ---- 10. System Settings & 2FA Schemas ----

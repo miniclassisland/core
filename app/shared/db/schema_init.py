@@ -6,20 +6,10 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.shared.db.session import engine
-from app.shared.db.models import Base, ClientProfile, MODEL_MAP
-from app.shared.literals import DEFAULT_RESOURCES, PUBLIC_SCHEMA
-from app.shared.utils.tenant import safe_identifier
+from app.shared.db.models import ClientProfile, MODEL_MAP
+from app.shared.literals import DEFAULT_RESOURCES
 
 _SEED_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-async def ensure_tenant_schema(slug: str) -> str:
-    """Ensure multi-tenant tables exist in the unified public schema."""
-    _ = safe_identifier(f"tenant_{slug}")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    return PUBLIC_SCHEMA
 
 
 async def seed_account_defaults(account_id: str, db: AsyncSession) -> None:

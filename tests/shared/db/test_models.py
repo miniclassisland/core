@@ -10,8 +10,6 @@ def test_models_exist():
     assert models.Account.__tablename__ == "accounts"
     assert models.CustomRole.__tablename__ == "custom_roles"
     assert models.AccountMember.__tablename__ == "account_members"
-    assert models.PermissionDef.__tablename__ == "permission_defs"
-    assert models.MemberPermission.__tablename__ == "member_permissions"
     assert models.AccountQuota.__tablename__ == "account_quotas"
     assert models.SystemConfig.__tablename__ == "system_config"
     assert models.ReservedName.__tablename__ == "reserved_names"
@@ -23,4 +21,3 @@ def test_models_exist():
     assert models.PairingCode.__tablename__ == "pairing_codes"
     assert models.PreRegisteredClient.__tablename__ == "pre_registered_clients"
     assert models.Invitation.__tablename__ == "invitations"
-    assert models.RolePermission.__tablename__ == "role_permissions"

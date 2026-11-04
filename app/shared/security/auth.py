@@ -1,6 +1,6 @@
 """MINI ClassIsland authentication and security dependencies.
 
-Provides authentication and authorization via Redis sessions and API tokens, as well as RBAC-based FastAPI dependencies.
+Provides authentication and authorization via Redis sessions, resource access tokens, and RBAC-based FastAPI dependencies.
 """
 
 import logging
@@ -13,88 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.utils.config import REDIS_DB_AUTH
 from app.shared.utils.redis import get_redis
-from app.shared.utils.tenant import get_tenant_id, set_search_path
-from app.shared.db.session import get_db, AsyncSessionLocal
-from app.shared.db.models import (
-    User,
-    CustomRole,
-    AccountMember,
-    RolePermission,
-    MemberPermission,
-)
-from app.shared.literals import (
-    DEFAULT_TTL,
-    GRACE_TTL,
-    REDIS_AUTH_PREFIX,
-    TOKEN_BYTES,
-)
+from app.shared.db.session import get_db
+from app.shared.db.models import User, CustomRole
 
 logger = logging.getLogger(__name__)
-
-# Security token parameters
-_TOKEN_BYTES = TOKEN_BYTES
-_DEFAULT_TTL = DEFAULT_TTL
-_GRACE_TTL = GRACE_TTL
-
-
-# ---- API Token Lifecycle Management ----
-
-
-def _token_redis_key(tenant_id: str, token: str) -> str:
-    """Construct tenant-isolated Redis token key."""
-    return (
-        f"{REDIS_AUTH_PREFIX}{tenant_id}:{token}"
-        if tenant_id
-        else f"{REDIS_AUTH_PREFIX}:{token}"
-    )
-
-
-async def generate_token(
-    scope: str, tenant_id: str = "", *, ttl: int = _DEFAULT_TTL
-) -> str:
-    """Generate a cryptographically secure single-use or persistent API access token in Redis."""
-    rd = get_redis(REDIS_DB_AUTH)
-    token = secrets.token_urlsafe(_TOKEN_BYTES)
-    key = _token_redis_key(tenant_id, token)
-
-    await rd.hset(key, mapping={"scope": scope, "tenant_id": tenant_id})
-    await rd.expire(key, ttl)
-
-    logger.info("Token [%s] generated for tenant [%s]", scope, tenant_id or "global")
-    return token
-
-
-async def validate_and_refresh(
-    token: str, *, tenant_id: str = "", ttl: int = _DEFAULT_TTL
-) -> Optional[tuple[str, str]]:
-    """Validate token validity and refresh its TTL if valid."""
-    rd = get_redis(REDIS_DB_AUTH)
-    key = _token_redis_key(tenant_id, token)
-    data = await rd.hgetall(key)
-
-    if not data or data.get("refreshed") == "1":
-        return None
-
-    # Automatic renewal
-    await rd.expire(key, ttl)
-    return str(data.get("scope") or ""), str(data.get("tenant_id") or "")
-
-
-async def revoke_token(token: str, *, tenant_id: str = "") -> bool:
-    """Revoke API access token with grace period to avoid refresh collisions."""
-    if not token:
-        return False
-
-    rd = get_redis(REDIS_DB_AUTH)
-    key = _token_redis_key(tenant_id, token)
-    data = await rd.hgetall(key)
-    if not data or data.get("refreshed") == "1":
-        return False
-
-    # Mark soft deletion and set grace TTL
-    await rd.hset(key, "refreshed", "1")
-    await rd.expire(key, _GRACE_TTL)
-    return True
 
 
 # ---- Session Token (HTTP Session) Management ----
@@ -168,73 +90,6 @@ def require_role(min_priority: int):
         return user
 
     return _check
-
-
-async def _get_member_permissions(user_id: str, account_id: str) -> set[str]:
-    """Compute all granular permission codes for user within account scope."""
-    async with AsyncSessionLocal() as db:
-        await set_search_path(db)
-        # Query account member record
-        stmt = (
-            select(AccountMember)
-            .where(AccountMember.user_id == user_id)
-            .where(AccountMember.account_id == account_id)
-        )
-        member = (await db.execute(stmt)).scalar_one_or_none()
-        if not member:
-            return set()
-
-        # Account owner has global permission
-        if member.role_in_account == "owner":
-            return {"*"}
-
-        # Role-based permissions
-        role_perms_stmt = select(RolePermission.permission_code).where(
-            RolePermission.role_code == member.role_in_account
-        )
-        role_perms = set((await db.execute(role_perms_stmt)).scalars().all())
-
-        # Member specific overrides
-        member_overrides_stmt = select(MemberPermission).where(
-            MemberPermission.member_id == member.id
-        )
-        overrides = (await db.execute(member_overrides_stmt)).scalars().all()
-        for ov in overrides:
-            if ov.granted:
-                role_perms.add(ov.permission_code)
-            else:
-                role_perms.discard(ov.permission_code)
-
-        return role_perms
-
-
-def require_permission(*perms: str):
-    """FastAPI dependency: check if user possesses required permissions within current tenant."""
-
-    async def _checker(request: Request):
-        user_id = await get_current_user_id(request)
-        account_id = get_tenant_id()
-        if not account_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, detail="Tenant context missing"
-            )
-
-        granted = await _get_member_permissions(user_id, account_id)
-        if "*" in granted:
-            return user_id
-
-        for p in perms:
-            if p not in granted:
-                logger.warning(
-                    "Permission check failed: user=%s missing perm=%s", user_id, p
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Permission missing: {p}",
-                )
-        return user_id
-
-    return _checker
 
 
 # ---- Resource Access Token Management ----

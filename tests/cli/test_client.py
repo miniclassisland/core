@@ -18,11 +18,7 @@ runner = CliRunner()
 
 
 def test_client_cli_commands():
-    """Test client CLI commands (list, info, enable, disable, rename, delete, pre-reg-*, pairing-*, audit-*, and legacy a/b)."""
-    # Legacy placeholder commands
-    assert runner.invoke(cli, ["client", "a"]).exit_code == 0
-    assert runner.invoke(cli, ["client", "b"]).exit_code == 0
-
+    """Test client CLI commands (list, info, enable, disable, rename, delete, pre-reg-*, pairing-*, audit-*)."""
     # No-args help on group and subcommands with required arguments
     assert runner.invoke(cli, ["client"]).exit_code in (0, 2)
     for sub in (

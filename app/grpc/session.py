@@ -135,15 +135,6 @@ class SessionManager:
         await rd.expire(key, SESSION_TTL)
         return sid
 
-    async def complete_handshake(
-        self, tenant_id: str, cuid: str, accepted: bool
-    ) -> str | None:
-        """Complete handshake evaluation."""
-        pending = await self.pop_handshake_challenge(tenant_id, cuid)
-        return (
-            await self.create_session(tenant_id, cuid) if pending and accepted else None
-        )
-
     async def validate_session(self, sid: str) -> str | None:
         """Retrieve corresponding client cuid from session ID."""
         if not sid:
@@ -203,20 +194,3 @@ class SessionManager:
                 }
             )
         return res
-
-    async def get_all_online_ips(self, tid: str) -> set[str]:
-        """Get set of IP addresses for all online devices."""
-        rd = get_redis(REDIS_DB_SESSION)
-        prefix = f"online:{tid}:"
-        ips = set()
-        async for key in rd.scan_iter(match=f"{prefix}*"):
-            data = await rd.hgetall(key)
-            raw_ip = data.get("ip", "")
-            ip = (
-                parse_grpc_peer_ip(raw_ip)
-                if raw_ip.startswith(("ipv4:", "ipv6:"))
-                else raw_ip
-            )
-            if ip:
-                ips.add(ip)
-        return ips

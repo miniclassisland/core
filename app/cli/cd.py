@@ -397,15 +397,3 @@ def encode_credential_cmd(
     """Encode a plaintext password into an upstream ClassIsland Credential string."""
     _require_args(password=password)
     print(encode_classisland_credential(password or ""))
-
-
-@cd_app.command("a", hidden=True)
-def cmd_a():
-    """Deployment distribution placeholder command a."""
-    print("cd cmd a executed")
-
-
-@cd_app.command("b", hidden=True)
-def cmd_b():
-    """Deployment distribution placeholder command b."""
-    print("cd cmd b executed")

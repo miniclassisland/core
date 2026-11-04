@@ -16,7 +16,6 @@ from app.shared.db.models import (
     AccountMember,
     AccountQuota,
     SystemConfig,
-    PermissionDef,
     ReservedName,
 )
 from app.shared.db.schema_init import seed_account_defaults
@@ -385,11 +384,10 @@ async def _init_system_config(config: dict) -> None:
 
 
 async def _init_default_data(config: dict) -> None:
-    """Create superadmin user, default roles, permission definitions, and reserved names."""
+    """Create superadmin user, default roles, and reserved names."""
     async with AsyncSessionLocal() as db:
         await ensure_system_roles(db)
         await _create_superadmin(config, db)
-        await _init_permissions(db)
         await _init_reserved_names(db)
 
 
@@ -445,24 +443,6 @@ async def _create_superadmin(config: dict, db) -> None:
     await seed_account_defaults(account.id, db)
     await db.commit()
     logger.info("Superadmin user %s created", config["username"])
-
-
-async def _init_permissions(db) -> None:
-    """Initialize default permission definitions."""
-    perms = [
-        ("client.read", "Read Client", "client"),
-        ("client.write", "Modify Client", "client"),
-        ("client.delete", "Delete Client", "client"),
-        ("command.execute", "Execute Remote Command", "command"),
-        ("config.read", "Read Config", "config"),
-        ("config.write", "Modify Config", "config"),
-        ("audit.read", "View Audit Logs", "audit"),
-        ("account.manage", "Manage Account", "account"),
-        ("member.manage", "Manage Member", "member"),
-    ]
-    for code, label, cat in perms:
-        db.add(PermissionDef(code=code, label=label, category=cat))
-    await db.commit()
 
 
 async def _init_reserved_names(db) -> None:

@@ -354,7 +354,7 @@ async def update_account_slug(
     return account
 
 
-# ---- Role and Permission Configuration ----
+# ---- Role Configuration ----
 
 
 async def ensure_system_roles(db: AsyncSession) -> None:
@@ -372,32 +372,3 @@ async def ensure_system_roles(db: AsyncSession) -> None:
             )
         )
     await db.commit()
-
-
-async def list_roles(db: AsyncSession) -> list[CustomRole]:
-    """Get list of all roles sorted by priority descending."""
-    result = await db.execute(select(CustomRole).order_by(CustomRole.priority.desc()))
-    return list(result.scalars().all())
-
-
-async def create_role(
-    code: str, label: str, priority: int, db: AsyncSession
-) -> CustomRole:
-    """Create custom role definition."""
-    role = CustomRole(code=code, label=label, priority=priority, is_system=False)
-    db.add(role)
-    await db.commit()
-    return role
-
-
-async def delete_role(code: str, db: AsyncSession) -> Optional[str]:
-    """Delete non-system custom role definition."""
-    result = await db.execute(select(CustomRole).where(CustomRole.code == code))
-    role = result.scalar_one_or_none()
-    if not role:
-        return "Role not found"
-    if role.is_system:
-        return "System role cannot be deleted"
-    await db.delete(role)
-    await db.commit()
-    return None

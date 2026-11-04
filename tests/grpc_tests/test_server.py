@@ -17,10 +17,10 @@ from app.shared.db.models import (
     Account,
     ClientRecord,
     ConfigUploadRecord,
+    PairingCode,
     PreRegisteredClient,
     SystemConfig,
 )
-from app.shared.services.pairing import PairingCode, approve_pairing
 from app.Protobuf.Client import (
     HandshakeScReq_pb2,
     ClientRegisterCsReq_pb2,
@@ -395,7 +395,9 @@ async def test_client_register_servicer_all_modes():
                 )
             )
         ).scalar_one()
-        await approve_pairing(record.code, "")
+        record.approved = True
+        record.status = "approved"
+        await db.commit()
 
     res_ok = await servicer.Register(req, ctx)
     assert res_ok.Retcode == Retcode_pb2.Registered

@@ -9,11 +9,7 @@ runner = CliRunner()
 
 
 def test_cd_cli_commands(tmp_path: Path):
-    """Test cd CLI commands (types, list, show, create, delete, export, import, assign, encode-credential, and legacy a/b)."""
-    # Legacy placeholder commands
-    assert runner.invoke(cli, ["cd", "a"]).exit_code == 0
-    assert runner.invoke(cli, ["cd", "b"]).exit_code == 0
-
+    """Test cd CLI commands (types, list, show, create, delete, export, import, assign, encode-credential)."""
     # List resource types
     res_types = runner.invoke(cli, ["cd", "types"])
     assert res_types.exit_code == 0

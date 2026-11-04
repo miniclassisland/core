@@ -125,23 +125,8 @@ async def test_session_manager_flows():
         status_list = await sm.get_all_clients_status(tenant_id)
         assert any(s["uid"] == cuid for s in status_list)
 
-        ips = await sm.get_all_online_ips(tenant_id)
-        assert "127.0.0.1" in ips
-
         await sm.set_client_offline(tenant_id, cuid)
         assert await sm.is_client_online(tenant_id, cuid) is False
-
-        await sm.store_pending_handshake(tenant_id, cuid, challenge)
-        res_fail = await sm.complete_handshake(tenant_id, cuid, accepted=False)
-        assert res_fail is None
-
-        await sm.store_pending_handshake(tenant_id, cuid, challenge)
-        res_ok = await sm.complete_handshake(tenant_id, cuid, accepted=True)
-        assert res_ok is not None
-        assert await sm.validate_session(res_ok) == cuid
-
-        res_expired = await sm.complete_handshake(tenant_id, cuid, accepted=True)
-        assert res_expired is None
     finally:
         if os.path.exists(key_file):
             os.remove(key_file)

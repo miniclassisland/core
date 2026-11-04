@@ -3,7 +3,6 @@
 import pytest
 from app.shared.services import quota
 from app.shared.db.session import AsyncSessionLocal
-from app.shared.db.models import AccountQuota
 
 
 @pytest.mark.asyncio
@@ -68,35 +67,3 @@ async def test_quota_service_fallback():
         assert len(all_q) >= 5
         all_q_second = await quota.get_quotas(account_id, db)
         assert len(all_q_second) == len(all_q)
-
-
-@pytest.mark.asyncio
-async def test_quota_increment():
-    """Test increment_quota under limit, over limit, and unset."""
-    account_id = "test-account-00000000"
-    async with AsyncSessionLocal() as db:
-        q = AccountQuota(
-            account_id=account_id,
-            quota_key="bandwidth",
-            max_value=100,
-            current_value=0,
-        )
-        db.add(q)
-        await db.commit()
-
-        assert (
-            await quota.increment_quota(account_id, "bandwidth", db, amount=50) is True
-        )
-        await db.refresh(q)
-        assert q.current_value == 50
-
-        assert (
-            await quota.increment_quota(account_id, "bandwidth", db, amount=60) is False
-        )
-        await db.refresh(q)
-        assert q.current_value == 50
-
-        assert (
-            await quota.increment_quota(account_id, "non_existent", db, amount=10)
-            is True
-        )

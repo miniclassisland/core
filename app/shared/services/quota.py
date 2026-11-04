@@ -79,25 +79,6 @@ async def check_quota(
     return quota.current_value < quota.max_value
 
 
-async def increment_quota(
-    account_id: str,
-    quota_key: str,
-    db: AsyncSession,
-    *,
-    amount: int = 1,
-) -> bool:
-    """Increment quota usage. Returns False if limit exceeded."""
-    quota = await get_quota_record(account_id, quota_key, db)
-    if not quota:
-        return True
-    if quota.max_value != -1:
-        if quota.current_value + amount > quota.max_value:
-            return False
-    quota.current_value += amount
-    await db.commit()
-    return True
-
-
 async def get_quotas(account_id: str, db: AsyncSession) -> list[AccountQuota]:
     """Get all quota records and current usage for account, seeding missing default keys."""
     result = await db.execute(

@@ -25,25 +25,10 @@ async def test_slug_and_name_reservations():
 
 @pytest.mark.asyncio
 async def test_roles_initialization_and_custom_roles():
-    """Test system role initialization and custom role list, create, delete."""
+    """Test system role initialization."""
     async with AsyncSessionLocal() as db:
         await user_service.ensure_system_roles(db)
         await user_service.ensure_system_roles(db)
-
-        roles = await user_service.list_roles(db)
-        assert len(roles) >= 4
-
-        custom = await user_service.create_role("teacher_lead", "Teacher Lead", 20, db)
-        assert custom.code == "teacher_lead"
-
-        assert (
-            await user_service.delete_role("non_existent_role", db) == "Role not found"
-        )
-        assert (
-            await user_service.delete_role("superadmin", db)
-            == "System role cannot be deleted"
-        )
-        assert await user_service.delete_role("teacher_lead", db) is None
 
 
 @pytest.mark.asyncio

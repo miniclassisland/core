@@ -9,9 +9,7 @@ from starlette.middleware.base import (
 )
 from starlette.responses import JSONResponse
 
-from app.shared.utils.config import REDIS_DB_AUTH
-from app.shared.utils.redis import get_redis
-from app.shared.utils.tenant import tenant_ctx, schema_ctx, get_tenant_id
+from app.shared.utils.tenant import tenant_ctx, schema_ctx
 from app.shared.utils.logging import get_client_ip_from_request
 from app.shared.security.crypto import (
     get_cc_state,
@@ -159,36 +157,12 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
             request.state.current_user_id = user_id
             return await call_next(request)
 
-        # Compatible with legacy command scope tokens (for /account/{id}/... paths)
-        if path.startswith("/account/"):
-            ok = await _check_legacy_token(token, path)
-            if ok:
-                return await call_next(request)
-
         client_ip = get_client_ip_from_request(request)
         logger.warning("Authentication failed: ip=%s path=%s", client_ip, path)
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"code": "ERR_AUTH_INVALID", "msg": "Invalid credentials"},
         )
-
-
-async def _check_legacy_token(token: str, path: str = "") -> bool:
-    rd = get_redis(REDIS_DB_AUTH)
-    tid = None
-    try:
-        tid = get_tenant_id()
-    except RuntimeError:
-        pass
-    if not tid and path:
-        m = re.match(r"^/accounts?/([^/]+)/", path)
-        if m:
-            tid = m.group(1)
-    if not tid:
-        return False
-    key = f"auth:{tid}:{token}"
-    data = await rd.hgetall(key)
-    return bool(data and data.get("scope") == "command")
 
 
 # ---- 3. Multi-Tenant Context Middleware ----

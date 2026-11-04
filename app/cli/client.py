@@ -497,15 +497,3 @@ def clear_audit_cmd(
             print(f"✅ Audit logs cleared for account {slug}")
 
     asyncio.run(_run())
-
-
-@client_app.command("a", hidden=True)
-def cmd_a():
-    """Client management placeholder command a."""
-    print("client cmd a executed")
-
-
-@client_app.command("b", hidden=True)
-def cmd_b():
-    """Client management placeholder command b."""
-    print("client cmd b executed")

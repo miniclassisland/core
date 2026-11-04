@@ -61,9 +61,6 @@ def test_pydantic_schemas_instantiation():
     )
     assert u_resp.role_code == "member"
 
-    cr_create = schemas.RoleCreateRequest(code="editor", label="Editor", priority=10)
-    assert cr_create.code == "editor"
-
     acc_create = schemas.AccountCreate(name="Test School", slug="test-school")
     assert acc_create.slug == "test-school"
     with pytest.raises(ValidationError):

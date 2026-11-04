@@ -98,32 +98,6 @@ class AccountMember(Base):
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
-class PermissionDef(Base):
-    """Atomic permission definition record."""
-
-    __tablename__ = "permission_defs"
-
-    code: Mapped[str] = mapped_column(String(64), primary_key=True)
-    label: Mapped[str] = mapped_column(String(128))
-    category: Mapped[str] = mapped_column(String(32), default="general")
-
-
-class MemberPermission(Base):
-    """Member-granularity permission override record."""
-
-    __tablename__ = "member_permissions"
-    __table_args__ = (
-        UniqueConstraint("member_id", "permission_code", name="uq_member_perm"),
-    )
-
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    member_id: Mapped[str] = mapped_column(String, index=True)
-    permission_code: Mapped[str] = mapped_column(String(64))
-    granted: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
 class AccountQuota(Base):
     """Account-level resource quota limit record."""
 
@@ -353,21 +327,6 @@ class Invitation(Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-
-
-class RolePermission(Base):
-    """Relation record between role and atomic permission."""
-
-    __tablename__ = "role_permissions"
-    __table_args__ = (
-        UniqueConstraint("role_code", "permission_code", name="uq_role_perm"),
-    )
-
-    id: Mapped[str] = mapped_column(
-        String, primary_key=True, default=lambda: str(uuid.uuid4())
-    )
-    role_code: Mapped[str] = mapped_column(String(32), index=True)
-    permission_code: Mapped[str] = mapped_column(String(64))
 
 
 # Resource type to database model mapping table
