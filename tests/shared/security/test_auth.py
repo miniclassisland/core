@@ -94,7 +94,9 @@ async def test_session_token_and_2fa_temp_token():
     assert auth.verify_oobe_passcode("WRONG") is False
     assert auth.verify_oobe_passcode(saved_code) is True
 
-    # Per-IP OOBE lockout & eviction
+    # Per-IP OOBE lockout & eviction (expired & unlocked eviction vs locked-out retention)
+    now_mono = time.monotonic()
+    auth._OOBE_IP_FAILS["10.9.9.1"] = (5, now_mono - 10.0)
     for i in range(1026):
         auth._OOBE_IP_FAILS[f"10.0.0.{i}"] = (1, 0.0)
     for _ in range(5):

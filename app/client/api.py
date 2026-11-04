@@ -14,6 +14,7 @@ from app.shared.utils.tenant import (
 )
 from app.shared.security.auth import create_token
 from app.shared.services.quota import check_quota, record_bandwidth_bytes
+from app.shared.runtime import get_session_manager
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -113,7 +114,22 @@ async def get_client_manifest(
         record_bandwidth_bytes(tenant_id, 512)
         return _build_empty_manifest(org_name)
 
-    if not _ip_matches(client_record.ip, client_ip):
+    session_header = (
+        request.headers.get("x-client-session") or request.headers.get("session") or ""
+    ).strip()
+    if session_header:
+        sm = get_session_manager()
+        session_uid = (
+            await sm.validate_session(session_header, tenant_id=tenant_id)
+            if sm is not None
+            else None
+        )
+        if session_uid != client_uid:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid client session",
+            )
+    elif not _ip_matches(client_record.ip, client_ip):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Client IP address mismatch",

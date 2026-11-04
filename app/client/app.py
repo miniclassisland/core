@@ -10,7 +10,7 @@ from app.client import router as client_router
 from app.client import token_get_router
 from app.shared.fonts import router as fonts_router
 from app.shared.security.middlewares import TenantMiddleware, CCProtectMiddleware
-from app.shared.utils.config import ALLOWED_ORIGINS
+from app.shared.utils.config import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_CLIENT
 from app.shared.lifespan import app_lifespan
 
@@ -33,6 +33,7 @@ client_app.add_middleware(CCProtectMiddleware)
 client_app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

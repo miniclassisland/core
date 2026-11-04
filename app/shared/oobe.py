@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.admin.account import router as oobe_router
 from app.shared.fonts import router as fonts_router
 from app.shared.security.middlewares import CCProtectMiddleware
-from app.shared.utils.config import ALLOWED_ORIGINS
+from app.shared.utils.config import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX
 
 ERR_SYSTEM_OOBE = "ERR_SYSTEM_OOBE"
 
@@ -18,6 +18,7 @@ def _create_stub() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
+        allow_origin_regex=ALLOWED_ORIGIN_REGEX,
         allow_methods=["*"],
         allow_headers=["*"],
         allow_credentials=True,
@@ -46,6 +47,7 @@ def _create_admin() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=ALLOWED_ORIGINS,
+        allow_origin_regex=ALLOWED_ORIGIN_REGEX,
         allow_methods=["*"],
         allow_headers=["*"],
         allow_credentials=True,

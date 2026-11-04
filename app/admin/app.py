@@ -16,7 +16,7 @@ from app.shared.security.middlewares import (
     AdminAuthMiddleware,
     CCProtectMiddleware,
 )
-from app.shared.utils.config import ALLOWED_ORIGINS
+from app.shared.utils.config import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_ADMIN
 
 logger = logging.getLogger(__name__)
@@ -37,6 +37,7 @@ admin_app.add_middleware(CCProtectMiddleware)
 admin_app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

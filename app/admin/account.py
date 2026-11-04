@@ -1,7 +1,7 @@
 import asyncio
 import os
 import re
-import sys
+import signal
 import threading
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request, status
 from sqlalchemy import select, func, or_
@@ -488,11 +488,9 @@ async def configure_system(
                 detail=f"Initialization failed: {str(e)}",
             )
 
-    # Trigger system restart in 1 second
+    # Trigger graceful daemon exit in 1 second so systemd / supervisor restarts into initialized mode
     threading.Timer(
         1.0,
-        lambda: os.execv(
-            sys.executable, [sys.executable, "-m", "app.main", "sys", "daemon"]
-        ),
+        lambda: os.kill(os.getpid(), signal.SIGTERM),
     ).start()
     return {"status": "ok", "message": "Initialization complete, system restarting"}

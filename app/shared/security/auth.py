@@ -319,12 +319,23 @@ def verify_oobe_passcode(code: str, *, client_ip: str = "") -> bool:
             _OOBE_IP_FAILS.pop(client_ip, None)
         return True
     if client_ip:
+        now = time.monotonic()
         if len(_OOBE_IP_FAILS) > 1024 and client_ip not in _OOBE_IP_FAILS:
-            _OOBE_IP_FAILS.pop(next(iter(_OOBE_IP_FAILS)), None)
+            expired_ips = [
+                ip for ip, (_, lu) in _OOBE_IP_FAILS.items() if lu > 0 and now >= lu
+            ]
+            for ip in expired_ips:
+                _OOBE_IP_FAILS.pop(ip, None)
+            if len(_OOBE_IP_FAILS) > 1024:
+                unlocked_ip = next(
+                    (ip for ip, (_, lu) in _OOBE_IP_FAILS.items() if lu <= now), None
+                )
+                if unlocked_ip is not None:
+                    _OOBE_IP_FAILS.pop(unlocked_ip, None)
         cnt, lock_until = _OOBE_IP_FAILS.get(client_ip, (0, 0.0))
         cnt += 1
         if cnt >= OOBE_MAX_FAILURES:
-            lock_until = time.monotonic() + OOBE_LOCKOUT_SECONDS
+            lock_until = now + OOBE_LOCKOUT_SECONDS
             logger.warning(
                 "OOBE passcode failed %d times from IP %s, entering %ds cooldown lockout",
                 cnt,

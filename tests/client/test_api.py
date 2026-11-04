@@ -117,6 +117,32 @@ async def test_client_app_endpoints():
         )
         assert r_ip_bad.status_code == 403
 
+        # 2c-session. Registered client with valid/invalid X-Client-Session header
+        from unittest.mock import AsyncMock
+
+        mock_sm = AsyncMock()
+        mock_sm.validate_session = AsyncMock(return_value="some-long-client-uid-12345")
+        with patch("app.client.api.get_session_manager", return_value=mock_sm):
+            r_sess_ok = await client.get(
+                "/api/v1/client/some-long-client-uid-12345/manifest",
+                headers={
+                    **host_headers,
+                    "X-Real-IP": "198.51.100.99",
+                    "X-Client-Session": "valid-session-id",
+                },
+            )
+            assert r_sess_ok.status_code == 200
+            mock_sm.validate_session = AsyncMock(return_value="other-uid")
+            r_sess_bad = await client.get(
+                "/api/v1/client/some-long-client-uid-12345/manifest",
+                headers={
+                    **host_headers,
+                    "X-Real-IP": "198.51.100.99",
+                    "X-Client-Session": "bad-session-id",
+                },
+            )
+            assert r_sess_bad.status_code == 403
+
         # 2d. Registered client with matching gRPC IP -> full Manifest with /get?token=... URLs
         r_man = await client.get(
             "/api/v1/client/some-long-client-uid-12345/manifest",

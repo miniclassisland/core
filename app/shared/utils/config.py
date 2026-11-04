@@ -5,6 +5,7 @@ Configuration priority: .miniclassisland/config.json > Environment variables > .
 
 import json
 import logging
+import re
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -143,7 +144,14 @@ def get_allowed_origins() -> list[str]:
     ]
 
 
+def get_allowed_origin_regex() -> str:
+    """Return regex matching BASE_DOMAIN and any valid single-label tenant subdomain."""
+    domain = BASE_DOMAIN.strip().lower()
+    return rf"^https?://([a-z0-9-]+\.)?{re.escape(domain)}(:\d+)?$"
+
+
 ALLOWED_ORIGINS: list[str] = get_allowed_origins()
+ALLOWED_ORIGIN_REGEX: str = get_allowed_origin_regex()
 
 
 def validate_config() -> None:

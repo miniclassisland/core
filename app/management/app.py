@@ -14,7 +14,7 @@ from app.shared.security.middlewares import (
     AccountContextMiddleware,
     CCProtectMiddleware,
 )
-from app.shared.utils.config import ALLOWED_ORIGINS
+from app.shared.utils.config import ALLOWED_ORIGINS, ALLOWED_ORIGIN_REGEX
 from app.shared.utils.logging import RequestLoggingMiddleware, PORT_TAG_MGMT
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ management_app.add_middleware(CCProtectMiddleware)
 management_app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=ALLOWED_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
