@@ -11,7 +11,8 @@ runner = CliRunner()
 def test_cli_help():
     """Test root CLI help and main() entrypoint."""
     res = runner.invoke(cli, [])
-    assert res.exit_code == 0
+    # Click >= 8.2 exits with 2 when no command is given and help is printed.
+    assert res.exit_code in (0, 2)
     assert "Usage" in res.stdout
 
     with patch.object(cli_main, "cli") as mock_cli:
