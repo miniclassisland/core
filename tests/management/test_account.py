@@ -1423,6 +1423,66 @@ async def test_management_account_full_suite(test_superadmin_user):
             )
         ).status_code == 200
 
+        # Resource history list & version retrieval
+        r_hist_list = await client.get(
+            f"/account/{acct_id}/Subjects/history",
+            params={"name": "custom_sub"},
+            headers=sa_headers,
+        )
+        assert r_hist_list.status_code == 200
+        hist_items = r_hist_list.json()
+        assert len(hist_items) >= 2
+        assert hist_items[0]["is_current"] is True
+
+        r_hist_v1 = await client.get(
+            f"/account/{acct_id}/Subjects/history/1",
+            params={"name": "custom_sub"},
+            headers=sa_headers,
+        )
+        assert r_hist_v1.status_code == 200
+        assert r_hist_v1.json()["version"] == 1
+
+        # Editing based on a historical version creates a brand new latest version
+        latest_ver_before = hist_items[0]["version"]
+        r_write_from_v1 = await client.post(
+            f"/account/{acct_id}/Subjects/write",
+            params={"name": "custom_sub"},
+            json=r_hist_v1.json()["content"],
+            headers=sa_headers,
+        )
+        assert r_write_from_v1.status_code == 200
+
+        r_hist_after = await client.get(
+            f"/account/{acct_id}/Subjects/history",
+            params={"name": "custom_sub"},
+            headers=sa_headers,
+        )
+        assert r_hist_after.status_code == 200
+        assert r_hist_after.json()[0]["version"] == latest_ver_before + 1
+
+        # Error cases for history endpoints
+        assert (
+            await client.get(
+                f"/account/{acct_id}/InvalidRes/history",
+                params={"name": "custom_sub"},
+                headers=sa_headers,
+            )
+        ).status_code == 400
+        assert (
+            await client.get(
+                f"/account/{acct_id}/Subjects/history",
+                params={"name": "missing_sub"},
+                headers=sa_headers,
+            )
+        ).status_code == 404
+        assert (
+            await client.get(
+                f"/account/{acct_id}/Subjects/history/999",
+                params={"name": "custom_sub"},
+                headers=sa_headers,
+            )
+        ).status_code == 404
+
         # Corrupted content in DB -> patch resets to {}, get raises 500
         async with AsyncSessionLocal() as db:
             db.add(

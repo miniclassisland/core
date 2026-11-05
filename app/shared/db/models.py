@@ -188,6 +188,22 @@ class CredentialsFile(Base, ResourceMixin):
     __tablename__ = "credentials_files"
 
 
+class ResourceHistory(Base):
+    """Immutable historical version snapshots for tenant configuration resource files."""
+
+    __tablename__ = "resource_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64), index=True, default=_default_account_id
+    )
+    resource_type: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255), index=True)
+    version: Mapped[int] = mapped_column(Integer, index=True, default=1)
+    content: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class ClientRecord(Base):
     """Registered physical client device database record."""
 

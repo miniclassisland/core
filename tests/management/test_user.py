@@ -186,16 +186,50 @@ async def test_management_user_endpoints(test_superadmin_user):
         assert r_info.status_code == 200
         assert r_info.json()["username"] == "mgmt_user"
 
-        # Email update (conflict & success)
+        # Email update: regular user is forbidden (403), Super Admin is allowed
+        r_em_forbidden = await client.post(
+            "/user/info/email", json={"email": "mgmt_new@school.com"}, headers=headers
+        )
+        assert r_em_forbidden.status_code == 403
+
+        sa_sid_early = await create_session_token(test_superadmin_user)
+        sa_headers_early = {"Authorization": f"Bearer {sa_sid_early}"}
         r_em_dup = await client.post(
-            "/user/info/email", json={"email": "other@school.com"}, headers=headers
+            "/user/info/email",
+            json={"email": "other@school.com"},
+            headers=sa_headers_early,
         )
         assert r_em_dup.status_code == 400
 
         r_em_ok = await client.post(
-            "/user/info/email", json={"email": "mgmt_new@school.com"}, headers=headers
+            "/user/info/email",
+            json={"email": "superadmin_new@school.com"},
+            headers=sa_headers_early,
         )
         assert r_em_ok.status_code == 200
+
+        # Turnstile rejection test when invalid test token is sent
+        r_ts_fail_login = await client.post(
+            "/user/auth",
+            json={
+                "email": "mgmt@school.com",
+                "password": "MgmtPassword123!",
+                "cf_turnstile_response": "INVALID_TURNSTILE_TOKEN",
+            },
+        )
+        assert r_ts_fail_login.status_code == 400
+
+        r_ts_fail_reg = await client.post(
+            "/user/apply",
+            json={
+                "username": "ts_fail_user",
+                "email": "ts_fail@school.com",
+                "password": "MgmtPassword123!",
+                "display_name": "TS Fail",
+                "cf_turnstile_response": "INVALID_TURNSTILE_TOKEN",
+            },
+        )
+        assert r_ts_fail_reg.status_code == 400
 
         # Username update (invalid format, reserved, conflict, success)
         r_un_bad = await client.post(
@@ -311,7 +345,7 @@ async def test_management_user_endpoints(test_superadmin_user):
         # Login with 2FA enabled -> requires_2fa + temp_token
         r_login_2fa = await client.post(
             "/user/auth",
-            json={"email": "mgmt_new@school.com", "password": "MgmtPassword123!"},
+            json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
         )
         assert r_login_2fa.status_code == 200
         assert r_login_2fa.json()["requires_2fa"] is True
@@ -327,7 +361,7 @@ async def test_management_user_endpoints(test_superadmin_user):
         # Verify 2FA login with valid code -> 200
         r_login_2fa2 = await client.post(
             "/user/auth",
-            json={"email": "mgmt_new@school.com", "password": "MgmtPassword123!"},
+            json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
         )
         temp_token2 = r_login_2fa2.json()["temp_token"]
         r_ver_ok = await client.post(
@@ -340,7 +374,7 @@ async def test_management_user_endpoints(test_superadmin_user):
         # Recover 2FA with invalid recovery code -> 401
         r_login_2fa3 = await client.post(
             "/user/auth",
-            json={"email": "mgmt_new@school.com", "password": "MgmtPassword123!"},
+            json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
         )
         temp_token3 = r_login_2fa3.json()["temp_token"]
         r_rec_bad = await client.post(
@@ -352,7 +386,7 @@ async def test_management_user_endpoints(test_superadmin_user):
         # Recover 2FA with valid recovery code -> 200
         r_login_2fa4 = await client.post(
             "/user/auth",
-            json={"email": "mgmt_new@school.com", "password": "MgmtPassword123!"},
+            json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
         )
         temp_token4 = r_login_2fa4.json()["temp_token"]
         r_rec_ok = await client.post(

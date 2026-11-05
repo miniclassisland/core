@@ -22,9 +22,10 @@ from app.shared.db.models import (
     ConfigUploadRecord,
     AuditLog,
     SystemConfig,
+    ResourceHistory,
     MODEL_MAP,
 )
-from app.shared.db.schema_init import seed_account_defaults
+from app.shared.db.schema_init import seed_account_defaults, record_resource_history
 from app.shared.schemas.schemas import (
     AccountOut,
     AccountCreate,
@@ -2888,14 +2889,25 @@ async def create_data(
     if existing.scalar_one_or_none():
         return StatusResponse(status="error", message=f"{name} already exists")
     default_template = DEFAULT_RESOURCES.get(resource_type, {}).get("default", {})
+    now = datetime.now(timezone.utc)
+    serialized = json.dumps(default_template, ensure_ascii=False)
     db.add(
         model(
             account_id=account_id,
             name=name,
-            content=json.dumps(default_template, ensure_ascii=False),
+            content=serialized,
             version=1,
-            updated_at=datetime.now(timezone.utc),
+            updated_at=now,
         )
+    )
+    await record_resource_history(
+        db,
+        account_id=account_id,
+        resource_type=resource_type,
+        name=name,
+        version=1,
+        content=serialized,
+        created_at=now,
     )
     await db.commit()
     return StatusResponse(status="success", message=f"Created {name}")
@@ -2957,6 +2969,13 @@ async def delete_data(
     await db.execute(
         delete(model).where(model.account_id == account_id, model.name == name)
     )
+    await db.execute(
+        delete(ResourceHistory).where(
+            ResourceHistory.account_id == account_id,
+            ResourceHistory.resource_type == resource_type,
+            ResourceHistory.name == name,
+        )
+    )
     await db.commit()
     return StatusResponse(status="success", message=f"Deleted {name}")
 
@@ -3004,9 +3023,21 @@ async def patch_data(
     merged = normalize_resource_payload(
         resource_type, dict_deep_merge(current, payload)
     )
-    record.content = json.dumps(merged, ensure_ascii=False)
-    record.version = (record.version or 0) + 1
-    record.updated_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    serialized = json.dumps(merged, ensure_ascii=False)
+    next_version = (record.version or 0) + 1
+    record.content = serialized
+    record.version = next_version
+    record.updated_at = now
+    await record_resource_history(
+        db,
+        account_id=account_id,
+        resource_type=resource_type,
+        name=name,
+        version=next_version,
+        content=serialized,
+        created_at=now,
+    )
     await db.commit()
     return StatusResponse(status="success", message="Merged successfully")
 
@@ -3076,10 +3107,22 @@ async def write_data_endpoint(
         check_version(record, version)
     else:
         record = model(account_id=account_id, name=name)
-    record.content = json.dumps(payload, ensure_ascii=False)
-    record.version = (record.version or 0) + 1
-    record.updated_at = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    serialized = json.dumps(payload, ensure_ascii=False)
+    next_version = (record.version or 0) + 1
+    record.content = serialized
+    record.version = next_version
+    record.updated_at = now
     db.add(record)
+    await record_resource_history(
+        db,
+        account_id=account_id,
+        resource_type=resource_type,
+        name=name,
+        version=next_version,
+        content=serialized,
+        created_at=now,
+    )
     await db.commit()
     return StatusResponse(status="success", message=f"{name} written successfully")
 
@@ -3107,6 +3150,190 @@ async def account_batch_operations(
                     detail="Only account owner or admin can modify Credentials or Policy",
                 )
     return await process_batch(req, db, account_id=account_id)
+
+
+@router.get(
+    "/account/{account_id}/{resource_type}/history",
+    tags=["Resource"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def list_resource_history(
+    account_id: str,
+    resource_type: str,
+    name: str = Query(..., min_length=1, max_length=255),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all historical versions of a specific configuration resource file."""
+    model = MODEL_MAP.get(resource_type)
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type"
+        )
+
+    await seed_account_defaults(account_id, db)
+
+    record = (
+        await db.execute(
+            select(model).where(model.account_id == account_id, model.name == name)
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Resource {name} not found",
+        )
+
+    rows = (
+        (
+            await db.execute(
+                select(ResourceHistory)
+                .where(
+                    ResourceHistory.account_id == account_id,
+                    ResourceHistory.resource_type == resource_type,
+                    ResourceHistory.name == name,
+                )
+                .order_by(ResourceHistory.version.desc(), ResourceHistory.id.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    current_ver = record.version or 1
+    has_current = any(r.version == current_ver for r in rows)
+    if not has_current:
+        snap_time = record.updated_at or datetime.now(timezone.utc)
+        await record_resource_history(
+            db,
+            account_id=account_id,
+            resource_type=resource_type,
+            name=name,
+            version=current_ver,
+            content=record.content or "{}",
+            created_at=snap_time,
+        )
+        await db.commit()
+        rows = (
+            (
+                await db.execute(
+                    select(ResourceHistory)
+                    .where(
+                        ResourceHistory.account_id == account_id,
+                        ResourceHistory.resource_type == resource_type,
+                        ResourceHistory.name == name,
+                    )
+                    .order_by(ResourceHistory.version.desc(), ResourceHistory.id.desc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+    else:
+        await db.commit()
+
+    seen_versions: set[int] = set()
+    out = []
+    for r in rows:
+        if r.version in seen_versions:
+            continue
+        seen_versions.add(r.version)
+        out.append(
+            {
+                "version": r.version,
+                "name": r.name,
+                "resource_type": r.resource_type,
+                "updated_at": r.created_at.isoformat() if r.created_at else "",
+                "size_bytes": len((r.content or "").encode("utf-8")),
+                "is_current": r.version == current_ver,
+            }
+        )
+    return out
+
+
+@router.get(
+    "/account/{account_id}/{resource_type}/history/{version}",
+    tags=["Resource"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def get_resource_history_version(
+    account_id: str,
+    resource_type: str,
+    version: int,
+    name: str = Query(..., min_length=1, max_length=255),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the normalized JSON content of a specific historical version of a configuration file."""
+    model = MODEL_MAP.get(resource_type)
+    if not model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type"
+        )
+
+    await seed_account_defaults(account_id, db)
+
+    row = (
+        (
+            await db.execute(
+                select(ResourceHistory)
+                .where(
+                    ResourceHistory.account_id == account_id,
+                    ResourceHistory.resource_type == resource_type,
+                    ResourceHistory.name == name,
+                    ResourceHistory.version == version,
+                )
+                .order_by(ResourceHistory.id.desc())
+            )
+        )
+        .scalars()
+        .first()
+    )
+
+    if not row:
+        record = (
+            await db.execute(
+                select(model).where(model.account_id == account_id, model.name == name)
+            )
+        ).scalar_one_or_none()
+        if record and (record.version or 1) == version:
+            snap_time = record.updated_at or datetime.now(timezone.utc)
+            await record_resource_history(
+                db,
+                account_id=account_id,
+                resource_type=resource_type,
+                name=name,
+                version=version,
+                content=record.content or "{}",
+                created_at=snap_time,
+            )
+            await db.commit()
+            raw_content = record.content or "{}"
+            updated_iso = snap_time.isoformat()
+        else:
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Historical version {version} of {name} not found",
+            )
+    else:
+        await db.commit()
+        raw_content = row.content or "{}"
+        updated_iso = row.created_at.isoformat() if row.created_at else ""
+
+    try:
+        parsed = json.loads(raw_content) if raw_content else {}
+    except (json.JSONDecodeError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Corrupted historical resource content",
+        )
+
+    return {
+        "version": version,
+        "name": name,
+        "resource_type": resource_type,
+        "updated_at": updated_iso,
+        "content": normalize_resource_payload(resource_type, parsed),
+    }
 
 
 @router.get(

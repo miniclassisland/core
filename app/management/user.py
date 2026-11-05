@@ -46,6 +46,7 @@ from app.shared.services.user import (
     login_user,
 )
 from app.shared.security.middlewares import record_ip_failure
+from app.shared.security.turnstile import require_turnstile_verification
 from app.shared.utils.logging import get_client_ip_from_request
 
 router = APIRouter(prefix="/user")
@@ -56,10 +57,17 @@ router = APIRouter(prefix="/user")
 
 @router.post("/apply", response_model=MessageResponse, tags=["User"])
 async def apply_user(
+    request: Request,
     payload: UserRegisterRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
     """User submits registration application (respects registration_open, require_approval, default_role)."""
+    client_ip = (
+        get_client_ip_from_request(request) if hasattr(request, "headers") else ""
+    )
+    await require_turnstile_verification(
+        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+    )
     cfg_rows = (
         (
             await db.execute(
@@ -157,10 +165,17 @@ async def check_username_availability(
 
 @router.post("/auth", tags=["User"])
 async def user_login(
+    request: Request,
     payload: UserLoginRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
     """User login to acquire Session token; issues temporary token for 2FA if enabled."""
+    client_ip = (
+        get_client_ip_from_request(request) if hasattr(request, "headers") else ""
+    )
+    await require_turnstile_verification(
+        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+    )
     try:
         token, user, needs_2fa = await login_user(payload.email, payload.password, db)
     except ValueError as exc:
@@ -210,17 +225,22 @@ async def change_email(
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """Update current user's email address."""
+    """Update current user's email address (restricted to Super Admin only)."""
+    user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
+        )
+    if user.role_code != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email modification is disabled for standard users; please contact a Super Administrator",
+        )
     dup = await db.execute(select(User).where(User.email == body.email, User.id != uid))
     if dup.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email is already registered",
-        )
-    user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
     user.email = body.email
     await db.commit()

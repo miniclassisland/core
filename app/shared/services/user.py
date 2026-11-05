@@ -23,6 +23,7 @@ from app.shared.db.models import (
     ClientProfile,
     ConfigUploadRecord,
     AuditLog,
+    ResourceHistory,
     MODEL_MAP,
 )
 from app.shared.db.schema_init import seed_account_defaults
@@ -430,6 +431,7 @@ async def update_account_info(
                 ClientProfile,
                 ConfigUploadRecord,
                 AuditLog,
+                ResourceHistory,
                 *MODEL_MAP.values(),
             ):
                 await db.execute(
@@ -508,6 +510,7 @@ async def cleanup_account_data(account_id: str, slug: str, db: AsyncSession) -> 
         ClientProfile,
         ConfigUploadRecord,
         AuditLog,
+        ResourceHistory,
         *MODEL_MAP.values(),
     ):
         await db.execute(delete(tbl).where(tbl.account_id == account_id))

@@ -92,6 +92,7 @@ ALLOWED_SETTINGS_KEYS = {
     "max_accounts_per_user",
     "default_role",
     "motd",
+    "turnstile_secret_key",
 }
 
 RESERVED_SUBDOMAINS = {

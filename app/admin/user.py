@@ -153,6 +153,42 @@ async def update_user_info(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role_code"
             )
+    if body.email is not None:
+        dup_email = (
+            await db.execute(
+                select(User.id).where(User.email == body.email, User.id != user_id)
+            )
+        ).scalar_one_or_none()
+        if dup_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email is already registered",
+            )
+    if body.username is not None:
+        cleaned_uname = body.username.strip().lower()
+        if not validate_username_format(cleaned_uname):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username format invalid",
+            )
+        if await is_name_reserved(cleaned_uname, db):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Name is reserved by system",
+            )
+        dup_uname = (
+            await db.execute(
+                select(User.id).where(
+                    User.username == cleaned_uname, User.id != user_id
+                )
+            )
+        ).scalar_one_or_none()
+        if dup_uname:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username is already taken",
+            )
+        body.username = cleaned_uname
     updated = await update_user(user_id, db, **body.model_dump(exclude_none=True))
     if not updated:
         raise HTTPException(

@@ -7,7 +7,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
-from app.shared.db.models import MODEL_MAP
+from app.shared.db.models import MODEL_MAP, ResourceHistory
+from app.shared.db.schema_init import record_resource_history
 from app.shared.schemas.schemas import BatchRequest, BatchOpType
 from app.shared.security.auth import require_role
 from app.shared.security.crypto import normalize_resource_payload
@@ -60,21 +61,54 @@ async def process_batch(
                 payload = normalize_resource_payload(op.resource_type, payload)
             if op.action == BatchOpType.delete and record:
                 await db.delete(record)
+                from sqlalchemy import delete as sql_delete
+
+                await db.execute(
+                    sql_delete(ResourceHistory).where(
+                        ResourceHistory.account_id == acct_id,
+                        ResourceHistory.resource_type == op.resource_type,
+                        ResourceHistory.name == op.name,
+                    )
+                )
             elif op.action in [BatchOpType.write, BatchOpType.create]:
+                now = datetime.now(timezone.utc)
                 rc = record or model(account_id=acct_id, name=op.name)
-                rc.content = json.dumps(payload, ensure_ascii=False)
-                rc.version = (getattr(rc, "version", None) or 0) + 1
-                rc.updated_at = datetime.now(timezone.utc)
+                serialized = json.dumps(payload, ensure_ascii=False)
+                next_ver = (getattr(rc, "version", None) or 0) + 1
+                rc.content = serialized
+                rc.version = next_ver
+                rc.updated_at = now
                 db.add(rc)
+                await record_resource_history(
+                    db,
+                    account_id=acct_id,
+                    resource_type=op.resource_type,
+                    name=op.name,
+                    version=next_ver,
+                    content=serialized,
+                    created_at=now,
+                )
             elif op.action == BatchOpType.update and record:
+                now = datetime.now(timezone.utc)
                 cur = json.loads(record.content) if record.content else {}
                 merged = normalize_resource_payload(
                     op.resource_type, dict_deep_merge(cur, payload)
                 )
                 validate_payload(merged)
-                record.content = json.dumps(merged, ensure_ascii=False)
-                record.version = (record.version or 0) + 1
-                record.updated_at = datetime.now(timezone.utc)
+                serialized = json.dumps(merged, ensure_ascii=False)
+                next_ver = (record.version or 0) + 1
+                record.content = serialized
+                record.version = next_ver
+                record.updated_at = now
+                await record_resource_history(
+                    db,
+                    account_id=acct_id,
+                    resource_type=op.resource_type,
+                    name=op.name,
+                    version=next_ver,
+                    content=serialized,
+                    created_at=now,
+                )
             res.append({"action": op.action, "name": op.name, "status": "success"})
         await db.commit()
         return {"status": "success", "results": res}

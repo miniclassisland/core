@@ -53,6 +53,7 @@ class UserRegisterRequest(BaseModel):
     display_name: str = Field(default="", max_length=128)
     role_code: Optional[str] = Field(default=None, max_length=32)
     can_create_account: Optional[bool] = None
+    cf_turnstile_response: Optional[str] = Field(default=None, max_length=4096)
 
     @field_validator("password")
     @classmethod
@@ -82,6 +83,7 @@ class UserLoginRequest(BaseModel):
 
     email: EmailStr = Field(..., description="Login email address")
     password: str = Field(..., max_length=128)
+    cf_turnstile_response: Optional[str] = Field(default=None, max_length=4096)
 
 
 class UserOut(BaseModel):
@@ -101,6 +103,8 @@ class UserOut(BaseModel):
 class UserUpdateRequest(BaseModel):
     """Super admin update user profile request."""
 
+    username: Optional[str] = Field(None, max_length=64)
+    email: Optional[EmailStr] = None
     display_name: Optional[str] = Field(None, max_length=128)
     role_code: Optional[str] = Field(None, max_length=32)
     is_active: Optional[bool] = None

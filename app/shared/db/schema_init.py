@@ -6,10 +6,32 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.shared.db.models import ClientProfile, MODEL_MAP
+from app.shared.db.models import ClientProfile, MODEL_MAP, ResourceHistory
 from app.shared.literals import DEFAULT_RESOURCES
 
 _SEED_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def record_resource_history(
+    db: AsyncSession,
+    account_id: str,
+    resource_type: str,
+    name: str,
+    version: int,
+    content: str,
+    created_at: datetime,
+) -> None:
+    """Append an immutable version snapshot for a tenant configuration resource."""
+    db.add(
+        ResourceHistory(
+            account_id=account_id,
+            resource_type=resource_type,
+            name=name,
+            version=version,
+            content=content,
+            created_at=created_at,
+        )
+    )
 
 
 async def seed_account_defaults(
@@ -46,14 +68,24 @@ async def seed_account_defaults(
                     )
                 ).scalar_one_or_none()
                 if not existing:
+                    serialized = json.dumps(content_dict, ensure_ascii=False)
                     db.add(
                         model(
                             account_id=account_id,
                             name=name,
-                            content=json.dumps(content_dict, ensure_ascii=False),
+                            content=serialized,
                             version=1,
                             updated_at=now,
                         )
+                    )
+                    await record_resource_history(
+                        db,
+                        account_id=account_id,
+                        resource_type=resource_type,
+                        name=name,
+                        version=1,
+                        content=serialized,
+                        created_at=now,
                     )
                     added = True
 
