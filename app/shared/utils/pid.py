@@ -2,12 +2,13 @@
 
 import os
 import logging
-from pathlib import Path
+
+from app.shared.utils.config import CONFIG_DIR
 
 logger = logging.getLogger(__name__)
 
 # Default PID path
-_PID = Path(".miniclassisland") / "miniclassisland.pid"
+_PID = CONFIG_DIR / "miniclassisland.pid"
 
 
 class PID:

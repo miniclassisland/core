@@ -521,11 +521,22 @@ WantedBy=multi-user.target
     local_path.write_text(service_content, encoding="utf-8")
     logger.info("Service file generated: %s", local_path)
 
+    prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
+    venv_cli = Path(work_dir) / ".venv" / "bin" / "miniclassisland"
+    if venv_cli.exists():
+        for bin_path in ("/usr/local/bin/miniclassisland", "/usr/bin/miniclassisland"):
+            try:
+                subprocess.run(
+                    prefix + ["ln", "-sf", str(venv_cli), bin_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+
     systemd_path = "/etc/systemd/system/miniclassisland-backend.service"
     try:
-        prefix = (
-            [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
-        )
         result = subprocess.run(
             prefix + ["cp", str(local_path), systemd_path],
             capture_output=True,
@@ -535,6 +546,12 @@ WantedBy=multi-user.target
         if result.returncode == 0:
             subprocess.run(
                 prefix + ["systemctl", "daemon-reload"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            subprocess.run(
+                prefix + ["systemctl", "enable", "miniclassisland-backend"],
                 capture_output=True,
                 text=True,
                 timeout=5,

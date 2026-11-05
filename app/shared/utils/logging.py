@@ -9,18 +9,19 @@ import sys
 import time
 from datetime import datetime, timezone
 from logging.handlers import TimedRotatingFileHandler
-from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.shared.utils.config import CONFIG_DIR
+
 if TYPE_CHECKING:
     pass
 
 # ---- Log Configuration Constants ----
-_LOG_DIR = Path(".miniclassisland") / "logs"
+_LOG_DIR = CONFIG_DIR / "logs"
 _LOG_FORMAT = "%(asctime)s.%(msecs)03d | %(levelname)-5s | %(port_tag)s | %(name)-30s | %(message)s"
 _LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
 

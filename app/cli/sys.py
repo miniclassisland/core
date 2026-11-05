@@ -5,7 +5,6 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 import click
 import typer
@@ -306,7 +305,9 @@ def monit_logs():
             return
 
     # Fallback to tail -f
-    log_dir = Path(".miniclassisland") / "logs"
+    from app.shared.utils.config import CONFIG_DIR
+
+    log_dir = CONFIG_DIR / "logs"
     if not log_dir.exists():
         print(
             "❌ Log directory does not exist. Please start service first: miniclassisland start"
