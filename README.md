@@ -1,5 +1,12 @@
 # MINI ClassIsland Backend Core (`miniclassisland-core`)
 
+<p align="center">
+  <a href="https://miniclassisland.com" target="_blank" rel="noopener noreferrer">
+    <img src="assets/miniclassisland.png" alt="MINI ClassIsland Logo" width="128" height="128" />
+  </a>
+</p>
+
+
 > **MINI ClassIsland** 集控核心后端 — Python 异步实现  
 > 完整实现 [Cyrene_MSP 协议 v2.0.0.0](https://github.com/ClassIsland/ClassIsland/tree/master/doc/Design/Cyrene_MSP)，面向千级租户、万级并发终端场景。
 
