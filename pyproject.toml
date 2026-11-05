@@ -3,7 +3,7 @@ name = "miniclassisland-core"
 version = "2.0.34a19"
 description = "MINI ClassIsland Core"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "psycopg[binary]~=3.3.0",
     "redis[hiredis]~=7.3.0",
@@ -13,7 +13,7 @@ dependencies = [
     "grpcio-tools~=1.78.0",
     "grpcio~=1.78.0",
     "protobuf~=6.33.0",
-    "pydantic-settings~=2.13.0",
+    "pydantic-settings~=2.16.0",
     "pydantic~=2.12.0",
     "sqlalchemy~=2.0.48",
     "uvicorn[standard]~=0.41.0",
@@ -88,6 +88,11 @@ extend-exclude = "app/Protobuf"
 [tool.ruff]
 target-version = "py312"
 extend-exclude = ["app/Protobuf"]
+
+# Ruff >= 0.16 expands the default rule set; pin the project's existing rules
+# so dependency upgrades do not introduce unrelated lint churn.
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
 
 [tool.pyright]
 venvPath = "."

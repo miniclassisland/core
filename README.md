@@ -10,7 +10,7 @@
 > **MINI ClassIsland** 集控核心后端 — Python 异步实现  
 > 完整实现 [Cyrene_MSP 协议 v2.0.0.0](https://github.com/ClassIsland/ClassIsland/tree/master/doc/Design/Cyrene_MSP)，面向千级租户、万级并发终端场景。
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![Test Coverage: 100%](https://img.shields.io/badge/coverage-100%25-brightgreen)](tests/)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-green)](LICENSE)
 

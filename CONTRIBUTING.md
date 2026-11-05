@@ -6,7 +6,7 @@
 
 ## 1. 开发环境准备
 
-- **Python 版本**：Python `>= 3.10`（推荐使用 Python `3.12`）。
+- **Python 版本**：Python `>= 3.11`（推荐使用 Python `3.12`）。
 - **包管理器**：[uv](https://docs.astral.sh/uv/)。
 - **基础设施依赖**：
   - PostgreSQL `14+`（需确保本地存在测试数据库 `miniclassisland_test`，`conftest.py` 会在测试时自动管理表结构）。
