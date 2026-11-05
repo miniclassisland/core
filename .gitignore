@@ -71,7 +71,11 @@ miniclassisland_server.key*
 
 # IDE & OS
 .vscode/
-.idea/
+# IDE project identity (shared name and icon)
+.idea/*
+!.idea/.name
+!.idea/icon.png
+!.idea/icon.svg
 .DS_Store
 Thumbs.db
 desktop.ini
