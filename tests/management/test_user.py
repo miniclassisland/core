@@ -395,18 +395,116 @@ async def test_management_user_endpoints(test_superadmin_user):
         )
         assert r_rec_ok.status_code == 200
         assert "token" in r_rec_ok.json()
+        assert r_rec_ok.json()["remaining_recovery_codes"] == 7
+        assert r_rec_ok.json()["require_totp_reset"] is False
 
-        # Disable 2FA (wrong password -> 401, right password -> 200)
+        # Test second-to-last recovery code triggering require_totp_reset=True
+        for idx in range(1, 6):
+            r_login_tmp = await client.post(
+                "/user/auth",
+                json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
+            )
+            r_rec_tmp = await client.post(
+                "/user/2fa/totp/recover",
+                json={
+                    "temp_token": r_login_tmp.json()["temp_token"],
+                    "recovery_code": recovery_codes[idx],
+                },
+            )
+            assert r_rec_tmp.status_code == 200
+
+        # Now 2 recovery codes remain (index 6 and 7). Using index 6 (second-to-last) leaves 1 -> require_totp_reset=True
+        r_login_second_last = await client.post(
+            "/user/auth",
+            json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
+        )
+        r_rec_second_last = await client.post(
+            "/user/2fa/totp/recover",
+            json={
+                "temp_token": r_login_second_last.json()["temp_token"],
+                "recovery_code": recovery_codes[6],
+            },
+        )
+        assert r_rec_second_last.status_code == 200
+        assert r_rec_second_last.json()["remaining_recovery_codes"] == 1
+        assert r_rec_second_last.json()["require_totp_reset"] is True
+
+        # Reset 2FA via /user/2fa/totp/enable?reset=true so we have fresh recovery codes
+        r_en_reset = await client.post(
+            "/user/2fa/totp/enable?reset=true", headers=headers
+        )
+        assert r_en_reset.status_code == 200
+        secret = r_en_reset.json()["secret"]
+        recovery_codes = r_en_reset.json()["recovery_codes"]
+        valid_reset_code = pyotp.TOTP(secret).now()
+        assert (
+            await client.post(
+                "/user/2fa/totp/confirm",
+                json={"code": valid_reset_code},
+                headers=headers,
+            )
+        ).status_code == 200
+        await get_redis(REDIS_DB_AUTH).delete(f"totp_used:{uid}:{valid_reset_code}")
+
+        # Disable 2FA: single factor only -> 400
+        r_dis_single = await client.post(
+            "/user/2fa/totp/disable",
+            json={"password": "MgmtPassword123!"},
+            headers=headers,
+        )
+        assert r_dis_single.status_code == 400
+
+        # Disable 2FA: wrong password + recovery_code -> 401
         r_dis_bad = await client.post(
             "/user/2fa/totp/disable",
-            json={"password": "WrongPassword"},
+            json={"password": "WrongPassword", "recovery_code": recovery_codes[0]},
             headers=headers,
         )
         assert r_dis_bad.status_code == 401
 
+        # Disable 2FA: password + invalid recovery_code -> 401
+        r_dis_bad_rc = await client.post(
+            "/user/2fa/totp/disable",
+            json={"password": "MgmtPassword123!", "recovery_code": "INVALIDCODE"},
+            headers=headers,
+        )
+        assert r_dis_bad_rc.status_code == 401
+
+        # Disable 2FA: password + invalid totp_code -> 401
+        r_dis_bad_totp = await client.post(
+            "/user/2fa/totp/disable",
+            json={"password": "MgmtPassword123!", "totp_code": "000000"},
+            headers=headers,
+        )
+        assert r_dis_bad_totp.status_code == 401
+
+        # Disable 2FA: two valid recovery codes -> 200
+        r_dis_two_rc = await client.post(
+            "/user/2fa/totp/disable",
+            json={
+                "recovery_code": recovery_codes[0],
+                "second_recovery_code": recovery_codes[1],
+                "recovery_codes": [recovery_codes[0], recovery_codes[1]],
+            },
+            headers=headers,
+        )
+        assert r_dis_two_rc.status_code == 200
+
+        # Re-enable and test disable with password + totp_code -> 200
+        r_en2 = await client.post("/user/2fa/totp/enable", headers=headers)
+        secret2 = r_en2.json()["secret"]
+        code2 = pyotp.TOTP(secret2).now()
+        await client.post(
+            "/user/2fa/totp/confirm", json={"code": code2}, headers=headers
+        )
+        await get_redis(REDIS_DB_AUTH).delete(f"totp_used:{uid}:{code2}")
+
         r_dis_ok = await client.post(
             "/user/2fa/totp/disable",
-            json={"password": "MgmtPassword123!"},
+            json={
+                "password": "MgmtPassword123!",
+                "totp_code": pyotp.TOTP(secret2).now(),
+            },
             headers=headers,
         )
         assert r_dis_ok.status_code == 200

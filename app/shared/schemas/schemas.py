@@ -109,6 +109,7 @@ class UserUpdateRequest(BaseModel):
     role_code: Optional[str] = Field(None, max_length=32)
     is_active: Optional[bool] = None
     can_create_account: Optional[bool] = None
+    totp_enabled: Optional[bool] = None
 
 
 # ---- 3. Account (Multi-Tenant) Schemas ----
@@ -401,9 +402,20 @@ class TotpVerifyRequest(BaseModel):
 
 
 class TotpDisableRequest(BaseModel):
-    """Disable 2FA request schema."""
+    """Disable 2FA request schema.
 
-    password: str
+    Supports any of the following factor combinations:
+    1. password + totp_code
+    2. password + recovery_code
+    3. totp_code + recovery_code
+    4. recovery_code + second_recovery_code (or recovery_codes with >= 2 items)
+    """
+
+    password: Optional[str] = Field(default=None, max_length=128)
+    totp_code: Optional[str] = Field(default=None, max_length=32)
+    recovery_code: Optional[str] = Field(default=None, max_length=64)
+    second_recovery_code: Optional[str] = Field(default=None, max_length=64)
+    recovery_codes: Optional[List[str]] = Field(default=None, max_length=8)
 
 
 class TotpRecoverRequest(BaseModel):

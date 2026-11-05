@@ -143,6 +143,9 @@ async def test_recovery_codes():
     codes = ["CODE1", "CODE2", "CODE3"]
     await crypto.store_recovery_codes(user_id, codes)
     assert await crypto.get_remaining_recovery_count(user_id) == 3
+    assert await crypto.check_recovery_code(user_id, "code1") is True
+    assert await crypto.check_recovery_code(user_id, "") is False
+    assert await crypto.check_recovery_code(user_id, "NONEXISTENT") is False
 
     assert await crypto.use_recovery_code(user_id, "code1") is True
     assert await crypto.get_remaining_recovery_count(user_id) == 2

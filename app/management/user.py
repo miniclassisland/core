@@ -37,7 +37,9 @@ from app.shared.security.crypto import (
     generate_recovery_codes,
     store_recovery_codes,
     delete_recovery_codes,
+    check_recovery_code,
     use_recovery_code,
+    get_remaining_recovery_count,
 )
 from app.shared.services.user import (
     register_user,
@@ -353,12 +355,16 @@ async def reset_password(
 
 @router.post("/2fa/totp/enable", response_model=TotpEnableResponse, tags=["2FA"])
 async def enable_2fa(
+    reset: bool = Query(
+        False,
+        description="Allow regenerating secret and recovery codes when 2FA is already enabled",
+    ),
     uid: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Generate TOTP secret key and recovery codes for current user."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if user.totp_enabled:
+    if user.totp_enabled and not reset:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="2FA is already enabled"
         )
@@ -404,12 +410,72 @@ async def disable_2fa(
     uid: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
-    """Disable TOTP 2FA for current user (requires password verification)."""
+    """Disable TOTP 2FA for current user.
+
+    Requires any of the following dual-factor combinations:
+    - Password + TOTP code
+    - Password + 1 recovery code
+    - TOTP code + 1 recovery code
+    - At least 2 distinct valid recovery codes
+    """
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if not await verify_password_async(body.password, user.hashed_password):
+
+    raw_codes: list[str] = []
+    if body.recovery_code and body.recovery_code.strip():
+        raw_codes.append(body.recovery_code.strip().upper())
+    if body.second_recovery_code and body.second_recovery_code.strip():
+        raw_codes.append(body.second_recovery_code.strip().upper())
+    if body.recovery_codes:
+        for rc in body.recovery_codes:
+            if rc and rc.strip():
+                raw_codes.append(rc.strip().upper())
+
+    # Deduplicate recovery codes while preserving order
+    unique_recovery_codes: list[str] = list(dict.fromkeys(raw_codes))
+
+    has_pwd = bool(body.password and body.password.strip())
+    has_totp = bool(body.totp_code and body.totp_code.strip())
+    num_rec = len(unique_recovery_codes)
+
+    valid_combination = (
+        (has_pwd and has_totp)
+        or (has_pwd and num_rec >= 1)
+        or (has_totp and num_rec >= 1)
+        or (num_rec >= 2)
+    )
+    if not valid_combination:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Disabling 2FA requires at least two recovery codes, "
+                "or one recovery code + one TOTP code, "
+                "or password + TOTP code, "
+                "or password + one recovery code"
+            ),
         )
+
+    if has_pwd:
+        if not await verify_password_async(body.password or "", user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect password"
+            )
+
+    if num_rec > 0:
+        for rc in unique_recovery_codes:
+            if not await check_recovery_code(uid, rc):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or used recovery code",
+                )
+
+    if has_totp:
+        if not await verify_totp_once(
+            uid, user.totp_secret or "", body.totp_code or ""
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code"
+            )
+
     user.totp_enabled = False
     user.totp_secret = None
     await db.commit()
@@ -441,5 +507,11 @@ async def recover_2fa(body: TotpRecoverRequest):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or used recovery code",
         )
+    remaining = await get_remaining_recovery_count(uid)
     token = await create_session_token(uid)
-    return {"token": token, "user_id": uid}
+    return {
+        "token": token,
+        "user_id": uid,
+        "remaining_recovery_codes": remaining,
+        "require_totp_reset": remaining <= 1,
+    }

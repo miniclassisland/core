@@ -336,6 +336,18 @@ async def delete_recovery_codes(user_id: str) -> None:
     await rd.delete(f"{_RECOVERY_KEY_PREFIX}:{user_id}")
 
 
+async def check_recovery_code(user_id: str, code: str) -> bool:
+    """Check if a recovery code is valid for user without consuming it."""
+    if not code or not code.strip():
+        return False
+    rd = get_redis(REDIS_DB_AUTH)
+    key = f"{_RECOVERY_KEY_PREFIX}:{user_id}"
+    hashed = _hash_recovery_code(code)
+    if await rd.sismember(key, hashed):
+        return True
+    return bool(await rd.sismember(key, code.strip().upper()))
+
+
 async def use_recovery_code(user_id: str, code: str) -> bool:
     """Verify and consume a one-time recovery code (supports hashed and legacy raw entries)."""
     rd = get_redis(REDIS_DB_AUTH)

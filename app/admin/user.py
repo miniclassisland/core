@@ -16,7 +16,11 @@ from app.shared.security.auth import require_role, revoke_all_user_sessions
 from app.shared.security.crypto import (
     hash_password_async,
     verify_password_async,
+    generate_totp_secret,
+    generate_recovery_codes,
+    store_recovery_codes,
     delete_recovery_codes,
+    get_remaining_recovery_count,
 )
 from app.shared.services.user import (
     list_users,
@@ -189,11 +193,28 @@ async def update_user_info(
                 detail="Username is already taken",
             )
         body.username = cleaned_uname
-    updated = await update_user(user_id, db, **body.model_dump(exclude_none=True))
+    update_fields = body.model_dump(exclude_none=True)
+    totp_flag = update_fields.pop("totp_enabled", None)
+    updated = await update_user(user_id, db, **update_fields)
     if not updated:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
+    if totp_flag is not None:
+        if totp_flag is False:
+            updated.totp_enabled = False
+            updated.totp_secret = None
+            await db.commit()
+            await db.refresh(updated)
+            await delete_recovery_codes(user_id)
+        else:
+            if not updated.totp_secret:
+                updated.totp_secret = generate_totp_secret()
+            updated.totp_enabled = True
+            await db.commit()
+            await db.refresh(updated)
+            if await get_remaining_recovery_count(user_id) == 0:
+                await store_recovery_codes(user_id, generate_recovery_codes())
     if not updated.is_active or updated.role_code in ("banned", "pending"):
         await revoke_all_user_sessions(user_id)
     return _to_out(updated)

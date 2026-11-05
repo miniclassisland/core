@@ -97,11 +97,21 @@ async def test_admin_user_and_2fa_endpoints(test_superadmin_user):
                 "display_name": "Teacher A Updated",
                 "role_code": "normal",
                 "is_active": False,
+                "totp_enabled": True,
             },
             headers=headers,
         )
         assert r_upd.status_code == 200
         assert r_upd.json()["display_name"] == "Teacher A Updated"
+        assert r_upd.json()["totp_enabled"] is True
+
+        r_upd_disable_totp = await client.post(
+            f"/user/{uid}",
+            json={"totp_enabled": False},
+            headers=headers,
+        )
+        assert r_upd_disable_totp.status_code == 200
+        assert r_upd_disable_totp.json()["totp_enabled"] is False
 
         assert (
             await client.post(
