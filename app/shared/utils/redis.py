@@ -4,6 +4,7 @@ import asyncio
 import os
 import logging
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit
 import redis.asyncio as aioredis
 from app.shared.utils.config import REDIS_URL
 
@@ -16,6 +17,12 @@ _max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "2000"))
 
 def _build_url(db: int) -> str:
     """Replace logical database ID in connection URL."""
+    # Unix domain socket: unix:///run/redis/redis-server.sock?db=0
+    if REDIS_URL.startswith("unix://"):
+        parts = urlsplit(REDIS_URL)
+        query = dict(parse_qsl(parts.query))
+        query["db"] = str(db)
+        return f"{parts.scheme}://{parts.netloc}{parts.path}?{urlencode(query)}"
     # e.g., redis://localhost:6379/0 -> redis://localhost:6379/{db}
     if "/" in REDIS_URL:
         base = REDIS_URL.rsplit("/", 1)[0]

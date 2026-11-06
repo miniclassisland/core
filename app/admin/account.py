@@ -414,8 +414,10 @@ def _validate_oobe_inputs(
     if not db_u.startswith(("postgresql", "postgres")):
         raise ValueError("Database URL must start with postgresql")
     rd_u = redis_url.strip()
-    if not rd_u.startswith(("redis://", "rediss://")):
-        raise ValueError("Redis URL must start with redis:// or rediss://")
+    if not rd_u.startswith(("redis://", "rediss://", "unix://")):
+        raise ValueError(
+            "Redis URL must start with redis://, rediss://, or unix://"
+        )
     uname = username.strip().lower()
     if not re.match(r"^[a-z0-9_]{3,64}$", uname):
         raise ValueError(
