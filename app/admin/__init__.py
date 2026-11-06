@@ -9,6 +9,7 @@ from .settings import router as settings_router
 from .ticket import router as ticket_router
 from .totp import router as totp_router
 from .user import router as user_router
+from app.shared.version import router as version_router
 
 router = APIRouter()
 
@@ -19,5 +20,6 @@ router.include_router(settings_router)
 router.include_router(community_router)
 router.include_router(ticket_router)
 router.include_router(bulk_router)
+router.include_router(version_router)
 
 from .app import admin_app as admin_app  # noqa: E402

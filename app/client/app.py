@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app import __version__
 from app.client import router as client_router
 from app.client import token_get_router
 from app.shared.fonts import router as fonts_router
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Client App instance with bound lifespan hooks
 client_app = FastAPI(
     title="MINI ClassIsland Client API",
-    version="0.3.0",
+    version=__version__,
     lifespan=app_lifespan,
 )
 

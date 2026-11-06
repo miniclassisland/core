@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app import __version__
 from app.management import router as mgr_router
 from app.client import token_get_router
 from app.shared.fonts import router as fonts_router
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 management_app = FastAPI(
     title="MINI ClassIsland Management API",
-    version="0.3.0",
+    version=__version__,
     redirect_slashes=False,
 )
 

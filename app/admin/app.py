@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
+from app import __version__
 from app.admin import router as admin_router
 from app.management.account import router as mgr_account_router
 from app.management.token import router as mgr_token_router
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 admin_app = FastAPI(
     title="MINI ClassIsland Admin API",
-    version="0.3.0",
+    version=__version__,
     redirect_slashes=False,
 )
 

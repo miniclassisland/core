@@ -9,6 +9,7 @@ from .site import router as site_router
 from .ticket import router as ticket_router
 from .token import router as token_router
 from .user import router as user_router
+from app.shared.version import router as version_router
 
 router = APIRouter()
 
@@ -19,5 +20,6 @@ router.include_router(site_router)
 router.include_router(ticket_router)
 router.include_router(token_router)
 router.include_router(user_router)
+router.include_router(version_router)
 
 from .app import management_app as management_app  # noqa: E402
