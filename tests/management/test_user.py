@@ -113,15 +113,24 @@ async def test_management_user_endpoints(test_superadmin_user):
         assert r_apply_dup.status_code == 400
 
         # 2. Availability checks
-        r_mail_taken = await client.get(
-            "/user/availability/mail", params={"value": "mgmt@school.com"}
+        r_mail_taken = await client.post(
+            "/user/availability/mail", json={"email": "mgmt@school.com"}
         )
         assert r_mail_taken.json()["available"] is False
 
-        r_mail_free = await client.get(
-            "/user/availability/mail", params={"value": "free@school.com"}
+        r_mail_free = await client.post(
+            "/user/availability/mail", json={"email": "free@school.com"}
         )
         assert r_mail_free.json()["available"] is True
+
+        r_mail_turnstile_fail = await client.post(
+            "/user/availability/mail",
+            json={
+                "email": "free@school.com",
+                "cf_turnstile_response": "INVALID_TURNSTILE_TOKEN",
+            },
+        )
+        assert r_mail_turnstile_fail.status_code == 400
 
         r_u_bad = await client.get(
             "/user/availability/username", params={"value": "BAD FORMAT!"}

@@ -86,6 +86,13 @@ class UserLoginRequest(BaseModel):
     cf_turnstile_response: Optional[str] = Field(default=None, max_length=4096)
 
 
+class EmailAvailabilityRequest(BaseModel):
+    """Email availability check request schema."""
+
+    email: EmailStr = Field(..., description="Email address to check")
+    cf_turnstile_response: Optional[str] = Field(default=None, max_length=4096)
+
+
 class UserOut(BaseModel):
     """User profile output payload."""
 

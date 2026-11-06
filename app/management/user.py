@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
-from pydantic import EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +8,7 @@ from app.shared.schemas.schemas import (
     UserOut,
     UserLoginRequest,
     UserRegisterRequest,
+    EmailAvailabilityRequest,
     EmailUpdate,
     UsernameUpdate,
     DisplayNameUpdate,
@@ -133,13 +133,20 @@ async def apply_user(
     )
 
 
-@router.get("/availability/mail", tags=["Availability"])
+@router.post("/availability/mail", tags=["Availability"])
 async def check_mail_availability(
-    value: EmailStr = Query(..., description="Email address to check"),
+    request: Request,
+    payload: EmailAvailabilityRequest = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Real-time email availability check."""
-    result = await db.execute(select(User.id).where(User.email == value))
+    """Real-time email availability check with Turnstile verification."""
+    client_ip = (
+        get_client_ip_from_request(request) if hasattr(request, "headers") else ""
+    )
+    await require_turnstile_verification(
+        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+    )
+    result = await db.execute(select(User.id).where(User.email == payload.email))
     exists = result.scalar_one_or_none() is not None
     return {"available": not exists}
 
