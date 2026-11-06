@@ -379,6 +379,7 @@ async def _init_system_config(config: dict) -> None:
         ("require_approval", "true"),
         ("max_accounts_per_user", "5"),
         ("default_role", "normal"),
+        ("announcement_title", ""),
         ("motd", ""),
     ]
     async with AsyncSessionLocal() as db:

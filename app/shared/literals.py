@@ -91,6 +91,7 @@ ALLOWED_SETTINGS_KEYS = {
     "require_approval",
     "max_accounts_per_user",
     "default_role",
+    "announcement_title",
     "motd",
     "turnstile_secret_key",
 }

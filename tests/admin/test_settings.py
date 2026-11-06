@@ -29,7 +29,13 @@ async def test_admin_settings_endpoints(test_superadmin_user):
         # Insert new settings
         r_post1 = await client.post(
             "/settings",
-            json={"items": {"motd": "Hello World", "registration_open": "true"}},
+            json={
+                "items": {
+                    "announcement_title": "Welcome",
+                    "motd": "Hello World",
+                    "registration_open": "true",
+                }
+            },
             headers=headers,
         )
         assert r_post1.status_code == 200
@@ -37,7 +43,12 @@ async def test_admin_settings_endpoints(test_superadmin_user):
         # Update existing setting
         r_post2 = await client.post(
             "/settings",
-            json={"items": {"motd": "Updated MOTD"}},
+            json={
+                "items": {
+                    "announcement_title": "Updated announcement",
+                    "motd": "Updated MOTD",
+                }
+            },
             headers=headers,
         )
         assert r_post2.status_code == 200
@@ -46,5 +57,6 @@ async def test_admin_settings_endpoints(test_superadmin_user):
         r_get = await client.get("/settings", headers=headers)
         assert r_get.status_code == 200
         data = r_get.json()
+        assert data["announcement_title"] == "Updated announcement"
         assert data["motd"] == "Updated MOTD"
         assert data["registration_open"] == "true"
