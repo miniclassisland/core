@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,14 +18,36 @@ from app.shared.schemas.schemas import (
     TicketReplyCreate,
 )
 from app.shared.security.auth import get_current_user_id
-from app.shared.services.ticket import message_to_out, ticket_to_out
+from app.shared.services.ticket import (
+    TICKET_CREATE_LIMIT_PER_HOUR,
+    TICKET_REPLY_LIMIT_PER_HOUR,
+    enforce_ticket_write_limit,
+    is_unsafe_ticket_id,
+    message_to_out,
+    ticket_to_out,
+)
 
-router = APIRouter(prefix="/ticket", tags=["Ticket"])
+
+def _no_store(response: Response) -> None:
+    """Prevent ticket content from being cached by browsers or proxies."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
+router = APIRouter(
+    prefix="/ticket",
+    tags=["Ticket"],
+    dependencies=[Depends(_no_store)],
+)
 
 _MSG_TICKET_NOT_FOUND = "工单不存在"
 
 
 async def _get_own_ticket(db: AsyncSession, ticket_id: str, user_id: str) -> Ticket:
+    if is_unsafe_ticket_id(ticket_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_TICKET_NOT_FOUND
+        )
     ticket = (
         await db.execute(
             select(Ticket).where(Ticket.id == ticket_id, Ticket.user_id == user_id)
@@ -45,6 +67,7 @@ async def create_ticket(
     user_id: str = Depends(get_current_user_id),
 ):
     """Create a support ticket owned by the current user."""
+    await enforce_ticket_write_limit(user_id, "create", TICKET_CREATE_LIMIT_PER_HOUR)
     now = datetime.now(timezone.utc)
     ticket = Ticket(
         user_id=user_id,
@@ -136,7 +159,9 @@ async def list_tickets(
 
     return TicketListOut(
         total=int(total),
-        items=[ticket_to_out(t, counts.get(t.id, 0)) for t in rows],
+        items=[
+            ticket_to_out(t, counts.get(t.id, 0), mask_staff_ids=True) for t in rows
+        ],
     )
 
 
@@ -165,9 +190,9 @@ async def get_ticket(
         await db.refresh(ticket)
 
     return TicketDetailOut(
-        **ticket_to_out(ticket, len(messages)).model_dump(),
+        **ticket_to_out(ticket, len(messages), mask_staff_ids=True).model_dump(),
         content=ticket.content,
-        messages=[message_to_out(m) for m in messages],
+        messages=[message_to_out(m, mask_staff_ids=True) for m in messages],
     )
 
 
@@ -184,6 +209,7 @@ async def reply_to_ticket(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="工单已关闭，无法继续回复"
         )
+    await enforce_ticket_write_limit(user_id, "reply", TICKET_REPLY_LIMIT_PER_HOUR)
 
     now = datetime.now(timezone.utc)
     message = TicketMessage(

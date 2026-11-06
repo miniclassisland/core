@@ -495,6 +495,16 @@ class AccountNameUpdate(BaseModel):
 # ---- 11. Support Ticket Schemas ----
 
 
+def _clean_ticket_text(value: str) -> str:
+    """Trim user text and reject NUL/control bytes that break DB storage."""
+    cleaned = value.strip()
+    if not cleaned:
+        raise ValueError("不能为空")
+    if any((ord(ch) < 32 and ch not in "\t\n\r") or ord(ch) == 127 for ch in cleaned):
+        raise ValueError("包含非法控制字符")
+    return cleaned
+
+
 class TicketCreate(BaseModel):
     """Create a support ticket request schema."""
 
@@ -506,10 +516,7 @@ class TicketCreate(BaseModel):
     @field_validator("subject", "content")
     @classmethod
     def _strip_required_text(cls, v: str) -> str:
-        value = v.strip()
-        if not value:
-            raise ValueError("不能为空")
-        return value
+        return _clean_ticket_text(v)
 
     @field_validator("category")
     @classmethod
@@ -536,10 +543,7 @@ class TicketReplyCreate(BaseModel):
     @field_validator("content")
     @classmethod
     def _strip_reply(cls, v: str) -> str:
-        value = v.strip()
-        if not value:
-            raise ValueError("回复内容不能为空")
-        return value
+        return _clean_ticket_text(v)
 
 
 class TicketAdminUpdate(BaseModel):

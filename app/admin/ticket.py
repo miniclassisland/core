@@ -3,7 +3,7 @@
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,9 +18,25 @@ from app.shared.schemas.schemas import (
     TicketReplyCreate,
 )
 from app.shared.security.auth import require_role
-from app.shared.services.ticket import message_to_out, ticket_to_out
+from app.shared.services.ticket import (
+    has_unsafe_control,
+    is_unsafe_ticket_id,
+    message_to_out,
+    ticket_to_out,
+)
 
-router = APIRouter(prefix="/ticket", tags=["Ticket"])
+
+def _no_store(response: Response) -> None:
+    """Prevent ticket content from being cached by browsers or proxies."""
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+
+router = APIRouter(
+    prefix="/ticket",
+    tags=["Ticket"],
+    dependencies=[Depends(_no_store)],
+)
 _sa = require_role(100)
 
 _MSG_TICKET_NOT_FOUND = "工单不存在"
@@ -29,6 +45,10 @@ _MSG_TICKET_NOT_FOUND = "工单不存在"
 async def _get_ticket_with_user(
     db: AsyncSession, ticket_id: str
 ) -> tuple[Ticket, Optional[User]]:
+    if is_unsafe_ticket_id(ticket_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_TICKET_NOT_FOUND
+        )
     row = (
         await db.execute(
             select(Ticket, User)
@@ -96,6 +116,11 @@ async def list_all_tickets(
     if unread_only:
         filters.append(Ticket.admin_unread.is_(True))
     if q.strip():
+        if has_unsafe_control(q):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="搜索关键词包含非法控制字符",
+            )
         term = f"%{q.strip()}%"
         filters.append(
             or_(
