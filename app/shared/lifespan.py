@@ -17,6 +17,10 @@ from app.shared.utils.config import (
 )
 from app.shared.utils.redis import init_redis, close_redis
 from app.shared.db.session import init_db
+from app.shared.security.turnstile import (
+    close_turnstile_client,
+    get_turnstile_client,
+)
 from app.shared.utils.logging import get_port_logger, PORT_TAG_GRPC
 from app.shared.runtime import runtime_hub
 
@@ -46,6 +50,8 @@ async def _startup(app: FastAPI):
     await init_db()
     logger.info("Initializing Redis connection pool...")
     await init_redis()
+    logger.info("Initializing Turnstile HTTP client...")
+    get_turnstile_client()
 
     # Dynamically import serve_grpc to prevent compilation issues when protobufs are missing
     try:
@@ -85,6 +91,8 @@ async def _shutdown(app: FastAPI):
     runtime_hub.command_servicer = None
     logger.info("Closing Redis connection pool...")
     await close_redis()
+    logger.info("Closing Turnstile HTTP client...")
+    await close_turnstile_client()
     executor = getattr(app.state, "thread_executor", None)
     if executor:
         executor.shutdown(wait=False)

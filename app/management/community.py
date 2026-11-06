@@ -33,6 +33,9 @@ async def issue_community_code(
         get_client_ip_from_request(request) if hasattr(request, "headers") else ""
     )
     await require_turnstile_verification(
-        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+        payload.cf_turnstile_response,
+        remote_ip=client_ip,
+        db=db,
+        expected_action="community_code",
     )
     return {"code": get_community_code()}

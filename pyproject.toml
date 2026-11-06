@@ -25,6 +25,7 @@ dependencies = [
     "python-multipart~=0.0.18",
     "click~=8.3.3",
     "typer~=0.25.1",
+    "httpx~=0.28.0",
 ]
 
 [project.scripts]
@@ -33,7 +34,6 @@ miniclassisland = "app.main:main"
 [dependency-groups]
 dev = [
     "black",
-    "httpx",
     "pyright",
     "pytest",
     "pytest-asyncio",

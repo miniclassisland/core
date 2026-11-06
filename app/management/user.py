@@ -68,7 +68,10 @@ async def apply_user(
         get_client_ip_from_request(request) if hasattr(request, "headers") else ""
     )
     await require_turnstile_verification(
-        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+        payload.cf_turnstile_response,
+        remote_ip=client_ip,
+        db=db,
+        expected_action="register",
     )
     cfg_rows = (
         (
@@ -144,7 +147,10 @@ async def check_mail_availability(
         get_client_ip_from_request(request) if hasattr(request, "headers") else ""
     )
     await require_turnstile_verification(
-        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+        payload.cf_turnstile_response,
+        remote_ip=client_ip,
+        db=db,
+        expected_action="email_availability",
     )
     result = await db.execute(select(User.id).where(User.email == payload.email))
     exists = result.scalar_one_or_none() is not None
@@ -183,7 +189,10 @@ async def user_login(
         get_client_ip_from_request(request) if hasattr(request, "headers") else ""
     )
     await require_turnstile_verification(
-        payload.cf_turnstile_response, remote_ip=client_ip, db=db
+        payload.cf_turnstile_response,
+        remote_ip=client_ip,
+        db=db,
+        expected_action="login",
     )
     try:
         token, user, needs_2fa = await login_user(payload.email, payload.password, db)

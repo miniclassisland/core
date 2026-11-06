@@ -1130,6 +1130,7 @@ dependencies = [
     { name = "grpcio" },
     { name = "grpcio-reflection" },
     { name = "grpcio-tools" },
+    { name = "httpx" },
     { name = "pgpy" },
     { name = "protobuf" },
     { name = "psycopg", extra = ["binary"] },
@@ -1147,7 +1148,6 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "black" },
-    { name = "httpx" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -1164,6 +1164,7 @@ requires-dist = [
     { name = "grpcio", specifier = "~=1.78.0" },
     { name = "grpcio-reflection", specifier = "~=1.78.0" },
     { name = "grpcio-tools", specifier = "~=1.78.0" },
+    { name = "httpx", specifier = "~=0.28.0" },
     { name = "pgpy", specifier = "~=0.6.0" },
     { name = "protobuf", specifier = "~=6.33.0" },
     { name = "psycopg", extras = ["binary"], specifier = "~=3.3.0" },
@@ -1182,7 +1183,6 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "black" },
-    { name = "httpx" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
