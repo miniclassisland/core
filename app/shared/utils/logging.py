@@ -25,6 +25,15 @@ _LOG_DIR = CONFIG_DIR / "logs"
 _LOG_FORMAT = "%(asctime)s.%(msecs)03d | %(levelname)-5s | %(port_tag)s | %(name)-30s | %(message)s"
 _LOG_DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
+# Keep the fixed-width level column compact: WARNING is displayed as WARN.
+_LEVEL_DISPLAY_NAMES = {"WARNING": "WARN"}
+
+
+def _display_level_name(levelname: str) -> str:
+    """Return the compact display name for a logging level."""
+    return _LEVEL_DISPLAY_NAMES.get(levelname, levelname)
+
+
 PORT_TAG_CLIENT = "CLIENT"
 PORT_TAG_MGMT = "MGMT"
 PORT_TAG_ADMIN = "ADMIN"
@@ -141,7 +150,9 @@ class _ColorFormatter(logging.Formatter):
 
         padded_tag = f"{tag:<7}"
         record.port_tag = f"{tag_color}{padded_tag}{self._RESET}"
-        record.levelname = f"{level_color}{record.levelname}{self._RESET}"
+        record.levelname = (
+            f"{level_color}{_display_level_name(original_levelname)}{self._RESET}"
+        )
 
         result = super().format(record)
 
@@ -151,6 +162,18 @@ class _ColorFormatter(logging.Formatter):
             delattr(record, "port_tag")
         record.levelname = original_levelname
         return result
+
+
+class _ShortLevelFormatter(logging.Formatter):
+    """Plain formatter that abbreviates long level names such as WARNING."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        original_levelname = record.levelname
+        record.levelname = _display_level_name(original_levelname)
+        try:
+            return super().format(record)
+        finally:
+            record.levelname = original_levelname
 
 
 # ---- Logging Initialization ----
@@ -184,7 +207,7 @@ def setup_logging(*, level: int = logging.INFO) -> None:
         utc=True,
     )
     file_handler.setLevel(level)
-    file_fmt = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FMT)
+    file_fmt = _ShortLevelFormatter(_LOG_FORMAT, datefmt=_LOG_DATE_FMT)
     file_handler.setFormatter(file_fmt)
     file_handler.addFilter(_PortTagFilter(PORT_TAG_SYSTEM))
     root.addHandler(file_handler)

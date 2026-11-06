@@ -30,6 +30,36 @@ def test_custom_formatter():
     assert "Hello log" in formatted
 
 
+def test_warning_level_is_abbreviated():
+    """WARNING should render as WARN in both plain and color formatters."""
+    record = logging.LogRecord(
+        name="test_log",
+        level=logging.WARNING,
+        pathname="test.py",
+        lineno=10,
+        msg="Warning log",
+        args=(),
+        exc_info=None,
+    )
+    record.port_tag = "SYSTEM"
+
+    plain = log_util._ShortLevelFormatter(
+        log_util._LOG_FORMAT, datefmt=log_util._LOG_DATE_FMT
+    )
+    plain_output = plain.format(record)
+    assert "WARN" in plain_output
+    assert "WARNING" not in plain_output
+    assert record.levelname == "WARNING"
+
+    color = log_util._ColorFormatter(
+        log_util._LOG_FORMAT, datefmt=log_util._LOG_DATE_FMT
+    )
+    color_output = color.format(record)
+    assert "WARN" in color_output
+    assert "WARNING" not in color_output
+    assert record.levelname == "WARNING"
+
+
 def test_get_client_ip_from_request():
     """测试从 HTTP 请求中提取对端 IP（含反向代理头分支）。"""
     req1 = MagicMock(spec=Request)
