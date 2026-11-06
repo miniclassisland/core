@@ -8,6 +8,8 @@ import secrets
 import time
 import logging
 from typing import Any
+
+from app.shared.security import warning_filters  # noqa: F401  # must precede pgpy
 import pgpy
 from pgpy.constants import (
     PubKeyAlgorithm,
