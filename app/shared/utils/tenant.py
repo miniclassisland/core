@@ -97,7 +97,7 @@ async def get_cached_account(slug: str) -> Optional[Account]:
             slug=data["slug"],
             api_key=data["api_key"],
             is_active=data["is_active"],
-            registration_mode=data.get("registration_mode", "open"),
+            registration_mode=data.get("registration_mode", "pairing"),
         )
         if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:  # pragma: no cover
             _LOCAL_ACCOUNT_CACHE.clear()
@@ -119,7 +119,7 @@ async def set_cached_account(slug: str, account: Account) -> None:
             slug=account.slug,
             api_key=account.api_key,
             is_active=account.is_active,
-            registration_mode=getattr(account, "registration_mode", "open") or "open",
+            registration_mode=getattr(account, "registration_mode", "pairing") or "pairing",
         ),
     )
     try:
@@ -133,8 +133,8 @@ async def set_cached_account(slug: str, account: Account) -> None:
                     "slug": account.slug,
                     "api_key": account.api_key,
                     "is_active": account.is_active,
-                    "registration_mode": getattr(account, "registration_mode", "open")
-                    or "open",
+                    "registration_mode": getattr(account, "registration_mode", "pairing")
+                    or "pairing",
                 }
             ),
             ex=ACCOUNT_CACHE_TTL,

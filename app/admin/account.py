@@ -73,7 +73,7 @@ def _acct_out(a: Account) -> AccountOut:
         slug=a.slug,
         api_key=a.api_key,
         is_active=a.is_active,
-        registration_mode=getattr(a, "registration_mode", "open") or "open",
+        registration_mode=getattr(a, "registration_mode", "pairing") or "pairing",
         created_at=(
             a.created_at.isoformat()
             if hasattr(a.created_at, "isoformat")

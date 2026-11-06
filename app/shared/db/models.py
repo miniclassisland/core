@@ -77,7 +77,7 @@ class Account(Base):
     slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     api_key: Mapped[str] = mapped_column(String(256))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    registration_mode: Mapped[str] = mapped_column(String(32), default="open")
+    registration_mode: Mapped[str] = mapped_column(String(32), default="pairing")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

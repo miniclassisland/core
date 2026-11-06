@@ -203,7 +203,7 @@ def _account_out(a: Account, *, include_api_key: bool = True) -> AccountOut:
         slug=a.slug,
         api_key=a.api_key if include_api_key else "",
         is_active=a.is_active,
-        registration_mode=getattr(a, "registration_mode", "open") or "open",
+        registration_mode=getattr(a, "registration_mode", "pairing") or "pairing",
         created_at=(
             a.created_at.isoformat()
             if hasattr(a.created_at, "isoformat")
@@ -1247,7 +1247,7 @@ async def get_pairing_status(
     acct = (
         await db.execute(select(Account).where(Account.id == account_id))
     ).scalar_one_or_none()
-    mode = (getattr(acct, "registration_mode", "open") if acct else "open") or "open"
+    mode = (getattr(acct, "registration_mode", "pairing") if acct else "pairing") or "pairing"
     return {
         "enabled": mode == "pairing",
         "registration_mode": mode,
@@ -1265,7 +1265,7 @@ async def set_registration_mode(
     db: AsyncSession = Depends(get_db),
 ):
     """Update device registration mode ('open' | 'pairing' | 'pre_reg') for the account."""
-    mode = str(body.get("registration_mode") or body.get("mode") or "open").strip()
+    mode = str(body.get("registration_mode") or body.get("mode") or "pairing").strip()
     if mode not in ("open", "pairing", "pre_reg"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid registration_mode"

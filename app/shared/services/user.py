@@ -242,7 +242,7 @@ async def _create_default_account(user: User, db: AsyncSession) -> Account:
         slug=slug,
         api_key=secrets.token_urlsafe(32),
         is_active=True,
-        registration_mode="open",
+        registration_mode="pairing",
         created_at=now,
     )
     db.add(account)
@@ -318,7 +318,7 @@ async def create_account(
         slug=slug,
         api_key=secrets.token_urlsafe(32),
         is_active=True,
-        registration_mode="open",
+        registration_mode="pairing",
         created_at=now,
     )
     db.add(account)

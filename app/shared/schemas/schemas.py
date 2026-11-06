@@ -170,7 +170,7 @@ class AccountOut(BaseModel):
     slug: str
     api_key: str
     is_active: bool
-    registration_mode: str = "open"
+    registration_mode: str = "pairing"
     created_at: str
 
 

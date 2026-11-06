@@ -171,6 +171,7 @@ async def test_user_and_account_services():
             name="Auto Slug School", user_id=owner.id, db=db, slug=None
         )
         assert acc_auto.slug.startswith("org-")
+        assert acc_auto.registration_mode == "pairing"
 
         acc = await user_service.create_account(
             name="Alpha School",
@@ -179,6 +180,7 @@ async def test_user_and_account_services():
             slug="alpha-school",
         )
         assert acc.slug == "alpha-school"
+        assert acc.registration_mode == "pairing"
 
         with pytest.raises(ValueError, match="Slug format invalid"):
             await user_service.create_account(

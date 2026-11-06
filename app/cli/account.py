@@ -48,7 +48,7 @@ def list_accounts():
                 print("No account records found")
                 return
             for a in rows:
-                reg_mode = getattr(a, "registration_mode", "open") or "open"
+                reg_mode = getattr(a, "registration_mode", "pairing") or "pairing"
                 print(f"  {a.slug} ({a.name}) [active={a.is_active} mode={reg_mode}]")
 
     asyncio.run(_run())
@@ -126,7 +126,7 @@ def create_account_cmd(
                 slug=actual_slug,
                 api_key=secrets.token_urlsafe(32),
                 is_active=True,
-                registration_mode="open",
+                registration_mode="pairing",
                 created_at=datetime.now(timezone.utc),
             )
             db.add(acct)
@@ -237,7 +237,7 @@ def set_reg_mode_cmd(
             if not acct:
                 print(f"❌ Account {slug} does not exist")
                 return
-            acct.registration_mode = mode or "open"
+            acct.registration_mode = mode or "pairing"
             await db.commit()
             await invalidate_cached_account(acct.slug)
             print(f"✅ Account {slug} registration mode set to {mode}")

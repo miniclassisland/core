@@ -429,7 +429,7 @@ async def _create_superadmin(config: dict, db) -> None:
         ),
         api_key=secrets.token_urlsafe(32),
         is_active=True,
-        registration_mode="open",
+        registration_mode="pairing",
         created_at=now,
     )
     db.add(account)
