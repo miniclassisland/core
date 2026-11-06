@@ -345,6 +345,43 @@ class Invitation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class Ticket(Base):
+    """User-submitted support ticket."""
+
+    __tablename__ = "tickets"
+
+    id: Mapped[str] = mapped_column(
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    subject: Mapped[str] = mapped_column(String(200))
+    content: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(32), default="other")
+    priority: Mapped[str] = mapped_column(String(16), default="normal")
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    last_reply_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_reply_by: Mapped[str] = mapped_column(String(64), default="")
+    admin_unread: Mapped[bool] = mapped_column(Boolean, default=True)
+    user_unread: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class TicketMessage(Base):
+    """Reply message in a support ticket thread."""
+
+    __tablename__ = "ticket_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticket_id: Mapped[str] = mapped_column(String(64), index=True)
+    author_id: Mapped[str] = mapped_column(String(64))
+    author_role: Mapped[str] = mapped_column(String(16))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 # Resource type to database model mapping table
 MODEL_MAP = {
     "ClassPlan": CPFile,

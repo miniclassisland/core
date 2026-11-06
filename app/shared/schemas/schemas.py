@@ -11,6 +11,9 @@ from app.shared.literals import (
     PWD_UPPER,
     SCHEMA_SLUG_RE,
     SCHEMA_USERNAME_RE,
+    TICKET_CATEGORIES,
+    TICKET_PRIORITIES,
+    TICKET_STATUSES,
 )
 
 # Username and password validation regex
@@ -487,3 +490,123 @@ class AccountNameUpdate(BaseModel):
 
     name: str = Field(..., min_length=1, max_length=128)
     registration_mode: Optional[str] = Field(default=None, max_length=32)
+
+
+# ---- 11. Support Ticket Schemas ----
+
+
+class TicketCreate(BaseModel):
+    """Create a support ticket request schema."""
+
+    subject: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=1, max_length=5000)
+    category: str = Field(default="other", max_length=32)
+    priority: str = Field(default="normal", max_length=16)
+
+    @field_validator("subject", "content")
+    @classmethod
+    def _strip_required_text(cls, v: str) -> str:
+        value = v.strip()
+        if not value:
+            raise ValueError("不能为空")
+        return value
+
+    @field_validator("category")
+    @classmethod
+    def _check_category(cls, v: str) -> str:
+        value = v.strip().lower()
+        if value not in TICKET_CATEGORIES:
+            raise ValueError("无效的工单分类")
+        return value
+
+    @field_validator("priority")
+    @classmethod
+    def _check_priority(cls, v: str) -> str:
+        value = v.strip().lower()
+        if value not in TICKET_PRIORITIES:
+            raise ValueError("无效的优先级")
+        return value
+
+
+class TicketReplyCreate(BaseModel):
+    """Reply to a support ticket request schema."""
+
+    content: str = Field(..., min_length=1, max_length=5000)
+
+    @field_validator("content")
+    @classmethod
+    def _strip_reply(cls, v: str) -> str:
+        value = v.strip()
+        if not value:
+            raise ValueError("回复内容不能为空")
+        return value
+
+
+class TicketAdminUpdate(BaseModel):
+    """Super-admin update to a support ticket."""
+
+    status: Optional[str] = Field(default=None, max_length=32)
+    priority: Optional[str] = Field(default=None, max_length=16)
+
+    @field_validator("status")
+    @classmethod
+    def _check_status(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        value = v.strip().lower()
+        if value not in TICKET_STATUSES:
+            raise ValueError("无效的工单状态")
+        return value
+
+    @field_validator("priority")
+    @classmethod
+    def _check_priority(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        value = v.strip().lower()
+        if value not in TICKET_PRIORITIES:
+            raise ValueError("无效的优先级")
+        return value
+
+
+class TicketMessageOut(BaseModel):
+    """Serialized ticket reply message."""
+
+    id: int
+    author_id: str
+    author_role: str
+    content: str
+    created_at: str
+
+
+class TicketOut(BaseModel):
+    """Serialized support ticket list item."""
+
+    id: str
+    user_id: str
+    subject: str
+    category: str
+    priority: str
+    status: str
+    created_at: str
+    updated_at: str
+    last_reply_at: Optional[str] = None
+    last_reply_by: str = ""
+    admin_unread: bool = False
+    user_unread: bool = False
+    message_count: int = 0
+    user: Optional[Dict[str, Any]] = None
+
+
+class TicketListOut(BaseModel):
+    """Paginated support ticket list."""
+
+    total: int
+    items: List[TicketOut]
+
+
+class TicketDetailOut(TicketOut):
+    """Support ticket with initial content and replies."""
+
+    content: str
+    messages: List[TicketMessageOut] = Field(default_factory=list)

@@ -79,6 +79,12 @@ ROLE_ADMIN = "admin"
 ROLE_SUPERADMIN = "superadmin"
 
 
+# ---- 3.1 Support Tickets ----
+TICKET_STATUSES = ("open", "in_progress", "resolved", "closed")
+TICKET_PRIORITIES = ("low", "normal", "high", "urgent")
+TICKET_CATEGORIES = ("account", "client", "bug", "feature", "other")
+
+
 # ---- 4. Schemas ----
 SCHEMA_USERNAME_RE = re.compile(r"^[a-z0-9_]{3,64}$")
 SCHEMA_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,62}[a-z0-9]$")
