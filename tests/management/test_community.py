@@ -458,3 +458,62 @@ async def test_community_code_ttl_expiration(test_superadmin_user):
             test_superadmin_user, db, ttl_seconds=-1
         )
     assert await get_active_user_for_code(code) is None
+
+
+@pytest.mark.asyncio
+async def test_snowluma_zero_requester_uin_resolution(test_superadmin_user):
+    """When SnowLuma returns requester_uin=0, approval still succeeds and resolves UIN via member list diff."""
+    async with AsyncSessionLocal() as db:
+        code, _ = await issue_user_community_code(test_superadmin_user, db)
+
+    member_list_call_count = 0
+    onebot_calls: list[tuple[str, dict]] = []
+
+    async def fake_zero_uin_onebot(action: str, params: dict):
+        nonlocal member_list_call_count
+        onebot_calls.append((action, params))
+        if action == "get_group_system_msg":
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": [
+                    {
+                        "group_id": COMMUNITY_QQ_GROUP_ID,
+                        "group_name": "This is MINI ClassIsland",
+                        "request_id": 1794025078906375,
+                        "requester_uin": 0,
+                        "requester_nick": "",
+                        "invitor_uin": 0,
+                        "invitor_nick": "",
+                        "message": f"问题：请提供访问密钥\n答案：{code}",
+                        "checked": False,
+                        "flag": "slreq:1:1794025078906375:1131427434:2:0",
+                    }
+                ],
+            }
+        if action == "get_group_member_list":
+            member_list_call_count += 1
+            if member_list_call_count == 1:
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"user_id": 1480708359, "role": "admin"}],
+                }
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": [
+                    {"user_id": 1480708359, "role": "admin"},
+                    {"user_id": 3177219551, "role": "member", "join_time": 1794025500},
+                ],
+            }
+        return {"status": "ok", "retcode": 0, "data": None}
+
+    results = await poll_snowluma_group_requests_once(
+        onebot_caller=fake_zero_uin_onebot
+    )
+    assert len(results) == 1
+    assert results[0]["approved"] is True
+    assert results[0]["qq_uin"] == "3177219551"
+    assert results[0]["private_sent"] is True
+    assert results[0]["user_id"] == test_superadmin_user

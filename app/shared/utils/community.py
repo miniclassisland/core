@@ -885,18 +885,69 @@ async def sync_group_member_bindings(
     return 0  # pragma: no cover
 
 
+async def _fetch_group_member_uins(
+    target_group_id: int,
+    *,
+    no_cache: bool = False,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> tuple[set[str], list[dict[str, Any]]]:
+    """Fetch current QQ group members and return ``(uin_set, raw_member_dicts)``."""
+    params: dict[str, Any] = {"group_id": target_group_id}
+    if no_cache:
+        params["no_cache"] = True
+    try:
+        res = await _call_onebot(
+            "get_group_member_list",
+            params,
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+    except Exception:  # pragma: no cover
+        return set(), []
+    if res.get("status") != "ok" or res.get("retcode", -1) != 0:  # pragma: no cover
+        return set(), []
+    data = res.get("data")
+    if not isinstance(data, list):  # pragma: no cover
+        return set(), []
+    members = [m for m in data if isinstance(m, dict) and m.get("user_id") is not None]
+    uins = {
+        str(m.get("user_id")).strip()
+        for m in members
+        if str(m.get("user_id")).strip() not in ("", "0")
+    }
+    return uins, members
+
+
 async def _approve_and_notify_member(
     flag: str,
     requester_uin: str,
     target_group_id: int,
     user: User,
     *,
+    db: Optional[AsyncSession] = None,
     base_url: Optional[str] = None,
     token: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
     onebot_caller: Optional[OneBotCaller] = None,
-) -> tuple[bool, bool, str]:
-    """Approve a pending group join request and send the binding reminder private message."""
+) -> tuple[bool, bool, str, str]:
+    """Approve a pending group join request, resolve UIN if needed, and send the binding reminder PM."""
+    resolved_uin = "" if requester_uin.strip() in ("", "0") else requester_uin.strip()
+    before_uins: set[str] = set()
+    if not resolved_uin:
+        before_uins, _ = await _fetch_group_member_uins(
+            target_group_id,
+            no_cache=True,
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+
     approve_params: dict[str, Any] = {
         "flag": flag,
         "sub_type": "add",
@@ -920,60 +971,94 @@ async def _approve_and_notify_member(
             flag,
             user.display_name or user.username,
             user.id,
-            mask_qq_uin(requester_uin) or requester_uin,
+            mask_qq_uin(resolved_uin) or resolved_uin or "未知",
             approve_res,
         )
-        return False, False, ""
+        return False, False, "", ""
 
-    reminder = format_binding_reminder(user)
-    private_sent = False
-    try:
-        pm_params: dict[str, Any] = {
-            "user_id": int(requester_uin),
-            "message": reminder,
-        }
-        if onebot_caller is None:  # pragma: no cover
-            pm_params["auto_escape"] = True
-        pm_res = await _call_onebot(
-            "send_private_msg",
-            pm_params,
+    if not resolved_uin:
+        after_uins, after_members = await _fetch_group_member_uins(
+            target_group_id,
+            no_cache=True,
             base_url=base_url,
             token=token,
             client=client,
             onebot_caller=onebot_caller,
         )
-        if pm_res.get("retcode", 0) == 0:
-            private_sent = True
-        else:  # pragma: no cover
-            pm_res2 = await _call_onebot(
+        bound_uins: set[str] = set()
+        if db is not None:
+            existing_rows = (
+                (await db.execute(select(CommunityBinding.qq_uin))).scalars().all()
+            )
+            bound_uins = {str(r).strip() for r in existing_rows if str(r).strip()}
+        diff_uins = [u for u in (after_uins - before_uins) if u not in bound_uins]
+        if diff_uins:
+            resolved_uin = sorted(diff_uins)[0]
+        elif after_members:  # pragma: no cover
+            unbound_members = [
+                m
+                for m in after_members
+                if str(m.get("user_id")).strip() not in bound_uins
+                and str(m.get("role") or "member") == "member"
+            ]
+            if unbound_members:
+                newest = max(
+                    unbound_members,
+                    key=lambda m: int(m.get("join_time") or 0),
+                )
+                if int(newest.get("join_time") or 0) > 0:
+                    resolved_uin = str(newest.get("user_id")).strip()
+
+    reminder = format_binding_reminder(user)
+    private_sent = False
+    if resolved_uin:
+        try:
+            pm_params: dict[str, Any] = {
+                "user_id": int(resolved_uin),
+                "message": reminder,
+            }
+            if onebot_caller is None:  # pragma: no cover
+                pm_params["auto_escape"] = True
+            pm_res = await _call_onebot(
                 "send_private_msg",
-                {
-                    "user_id": int(requester_uin),
-                    "group_id": target_group_id,
-                    "message": reminder,
-                    "auto_escape": True,
-                },
+                pm_params,
                 base_url=base_url,
                 token=token,
                 client=client,
                 onebot_caller=onebot_caller,
             )
-            private_sent = pm_res2.get("retcode", 0) == 0
-    except Exception as exc:  # pragma: no cover
-        logger.warning(
-            "[QQ群控] 发送绑定私聊提醒失败 → QQ=%s: %s",
-            mask_qq_uin(requester_uin) or requester_uin,
-            exc,
-        )
+            if pm_res.get("retcode", 0) == 0:
+                private_sent = True
+            else:  # pragma: no cover
+                pm_res2 = await _call_onebot(
+                    "send_private_msg",
+                    {
+                        "user_id": int(resolved_uin),
+                        "group_id": target_group_id,
+                        "message": reminder,
+                        "auto_escape": True,
+                    },
+                    base_url=base_url,
+                    token=token,
+                    client=client,
+                    onebot_caller=onebot_caller,
+                )
+                private_sent = pm_res2.get("retcode", 0) == 0
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "[QQ群控] 发送绑定私聊提醒失败 → QQ=%s: %s",
+                mask_qq_uin(resolved_uin) or resolved_uin,
+                exc,
+            )
     logger.info(
         "[QQ群控] 已自动批准入群并绑定 → 群=%d 用户=%s(%s) QQ=%s 私聊通知=%s",
         target_group_id,
         user.display_name or user.username,
         user.username,
-        mask_qq_uin(requester_uin) or requester_uin,
+        mask_qq_uin(resolved_uin) or resolved_uin or "未知",
         "已送达" if private_sent else "未送达",
     )
-    return True, private_sent, reminder
+    return True, private_sent, reminder, resolved_uin
 
 
 async def poll_snowluma_group_requests_once(
@@ -1023,54 +1108,61 @@ async def poll_snowluma_group_requests_once(
             continue
 
         flag = str(item.get("flag") or "")
-        requester_uin = str(item.get("requester_uin") or "").strip()
+        raw_uin = str(item.get("requester_uin") or "").strip()
+        requester_uin = "" if raw_uin in ("", "0") else raw_uin
         message = str(item.get("message") or "")
-        if not flag or not requester_uin:  # pragma: no cover
+        if not flag:  # pragma: no cover
             continue
 
         # Case 1: Manually pre-bound QQ by Super Admin — any password/message is accepted!
-        existing_qq_bind = (
-            await db.execute(
-                select(CommunityBinding).where(CommunityBinding.qq_uin == requester_uin)
-            )
-        ).scalar_one_or_none()
-        if existing_qq_bind is not None:
-            bound_user = (
+        if requester_uin:
+            existing_qq_bind = (
                 await db.execute(
-                    select(User).where(User.id == existing_qq_bind.user_id)
+                    select(CommunityBinding).where(
+                        CommunityBinding.qq_uin == requester_uin
+                    )
                 )
             ).scalar_one_or_none()
-            if (
-                bound_user
-                and bound_user.role_code != "banned"
-                and (bound_user.role_code == "pending" or bound_user.is_active)
-            ):
-                approved, private_sent, reminder = await _approve_and_notify_member(
-                    flag,
-                    requester_uin,
-                    target_group_id,
-                    bound_user,
-                    base_url=base_url,
-                    token=token,
-                    client=client,
-                    onebot_caller=onebot_caller,
-                )
-                if approved:
-                    existing_qq_bind.is_joined = True
-                    existing_qq_bind.group_id = str(target_group_id)
-                    await db.commit()
-                    await invalidate_user_community_code(bound_user.id)
-                    results.append(
-                        {
-                            "handled": True,
-                            "approved": True,
-                            "private_sent": private_sent,
-                            "user_id": bound_user.id,
-                            "qq_uin": requester_uin,
-                            "message": reminder,
-                        }
+            if existing_qq_bind is not None:
+                bound_user = (
+                    await db.execute(
+                        select(User).where(User.id == existing_qq_bind.user_id)
                     )
-            continue
+                ).scalar_one_or_none()
+                if (
+                    bound_user
+                    and bound_user.role_code != "banned"
+                    and (bound_user.role_code == "pending" or bound_user.is_active)
+                ):
+                    approved, private_sent, reminder, _ = (
+                        await _approve_and_notify_member(
+                            flag,
+                            requester_uin,
+                            target_group_id,
+                            bound_user,
+                            db=db,
+                            base_url=base_url,
+                            token=token,
+                            client=client,
+                            onebot_caller=onebot_caller,
+                        )
+                    )
+                    if approved:
+                        existing_qq_bind.is_joined = True
+                        existing_qq_bind.group_id = str(target_group_id)
+                        await db.commit()
+                        await invalidate_user_community_code(bound_user.id)
+                        results.append(
+                            {
+                                "handled": True,
+                                "approved": True,
+                                "private_sent": private_sent,
+                                "user_id": bound_user.id,
+                                "qq_uin": requester_uin,
+                                "message": reminder,
+                            }
+                        )
+                continue
 
         # Case 2: Normal per-user join code verification
         if not message:  # pragma: no cover
@@ -1097,29 +1189,33 @@ async def poll_snowluma_group_requests_once(
         if existing_user_bind:  # pragma: no cover
             continue
 
-        approved, private_sent, reminder = await _approve_and_notify_member(
-            flag,
-            requester_uin,
-            target_group_id,
-            user,
-            base_url=base_url,
-            token=token,
-            client=client,
-            onebot_caller=onebot_caller,
+        approved, private_sent, reminder, resolved_uin = (
+            await _approve_and_notify_member(
+                flag,
+                requester_uin,
+                target_group_id,
+                user,
+                db=db,
+                base_url=base_url,
+                token=token,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
         )
         if not approved:  # pragma: no cover
             continue
 
-        binding = CommunityBinding(
-            user_id=user.id,
-            qq_uin=requester_uin,
-            group_id=str(target_group_id),
-            is_manual=False,
-            is_joined=True,
-            bound_at=datetime.now(timezone.utc),
-        )
-        db.add(binding)
-        await db.commit()
+        if resolved_uin:
+            binding = CommunityBinding(
+                user_id=user.id,
+                qq_uin=resolved_uin,
+                group_id=str(target_group_id),
+                is_manual=False,
+                is_joined=True,
+                bound_at=datetime.now(timezone.utc),
+            )
+            db.add(binding)
+            await db.commit()
 
         results.append(
             {
@@ -1127,7 +1223,7 @@ async def poll_snowluma_group_requests_once(
                 "approved": True,
                 "private_sent": private_sent,
                 "user_id": user.id,
-                "qq_uin": requester_uin,
+                "qq_uin": resolved_uin,
                 "message": reminder,
             }
         )
@@ -1172,7 +1268,7 @@ async def _snowluma_poll_loop() -> None:  # pragma: no cover
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.debug("[QQ群控] 轮询周期异常: %s", exc)
+            logger.warning("[QQ群控] 轮询周期异常: %s", exc)
         await asyncio.sleep(interval)
 
 
@@ -1180,6 +1276,7 @@ def start_snowluma_poller() -> Optional[asyncio.Task]:  # pragma: no cover
     """Start the background SnowLuma polling task if SNOWLUMA_ONEBOT_TOKEN is configured."""
     global _snowluma_poller_task
     if not SNOWLUMA_ONEBOT_TOKEN:
+        logger.warning("[QQ群控] 未配置 SNOWLUMA_ONEBOT_TOKEN，群聊控制轮询未启动")
         return None
     if _snowluma_poller_task is not None and not _snowluma_poller_task.done():
         return _snowluma_poller_task

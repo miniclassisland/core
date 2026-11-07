@@ -2,9 +2,11 @@
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.admin import user
 from app.admin.app import admin_app
+from app.shared.db.models import User
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.security import auth
 from app.shared.services.user import ensure_system_roles
@@ -112,6 +114,51 @@ async def test_admin_user_and_2fa_endpoints(test_superadmin_user):
         )
         assert r_upd_disable_totp.status_code == 200
         assert r_upd_disable_totp.json()["totp_enabled"] is False
+
+        # Updating a user whose current username is a reserved internal name (e.g. "admin")
+        # without changing their username must succeed without "Name is reserved by system"
+        async with AsyncSessionLocal() as db:
+            sa_user = (
+                await db.execute(select(User).where(User.id == test_superadmin_user))
+            ).scalar_one()
+            sa_user.username = "admin"
+            await db.commit()
+
+        r_upd_self_reserved = await client.post(
+            f"/user/{test_superadmin_user}",
+            json={
+                "username": "admin",
+                "display_name": "Super Admin Updated",
+                "role_code": "superadmin",
+                "is_active": True,
+            },
+            headers=headers,
+        )
+        assert r_upd_self_reserved.status_code == 200
+        assert r_upd_self_reserved.json()["display_name"] == "Super Admin Updated"
+
+        r_ren_same_reserved = await client.post(
+            f"/user/{test_superadmin_user}/rename",
+            json={"name": "admin"},
+            headers=headers,
+        )
+        assert r_ren_same_reserved.status_code == 200
+
+        async with AsyncSessionLocal() as db:
+            sa_user = (
+                await db.execute(select(User).where(User.id == test_superadmin_user))
+            ).scalar_one()
+            sa_user.username = "superadmin_test"
+            await db.commit()
+
+        # Changing another user's username to a reserved name is still rejected
+        r_upd_to_reserved = await client.post(
+            f"/user/{uid}",
+            json={"username": "system"},
+            headers=headers,
+        )
+        assert r_upd_to_reserved.status_code == 400
+        assert "reserved" in r_upd_to_reserved.json()["detail"].lower()
 
         assert (
             await client.post(

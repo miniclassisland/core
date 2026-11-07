@@ -280,27 +280,30 @@ async def change_username(
     uid: str = Depends(get_current_user_id),
 ):
     """Update current user's username."""
-    if not validate_username_format(body.username):
+    cleaned_uname = body.username.strip().lower()
+    if not validate_username_format(cleaned_uname):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid"
-        )
-    if await is_name_reserved(body.username, db):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Name is reserved by system"
-        )
-    dup = await db.execute(
-        select(User).where(User.username == body.username, User.id != uid)
-    )
-    if dup.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Username is already taken"
         )
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
-    user.username = body.username
+    if cleaned_uname != (user.username or "").strip().lower():
+        if await is_name_reserved(cleaned_uname, db):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Name is reserved by system",
+            )
+    dup = await db.execute(
+        select(User).where(User.username == cleaned_uname, User.id != uid)
+    )
+    if dup.scalar_one_or_none():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Username is already taken"
+        )
+    user.username = cleaned_uname
     await db.commit()
     return {"status": "ok", "message": "Username updated"}
 

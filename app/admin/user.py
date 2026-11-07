@@ -196,6 +196,11 @@ async def update_user_info(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role_code"
             )
+    target_user = await get_user_by_id(user_id, db)
+    if not target_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
     if body.email is not None:  # pragma: no cover
         dup_email = (
             await db.execute(
@@ -214,11 +219,12 @@ async def update_user_info(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Username format invalid",
             )
-        if await is_name_reserved(cleaned_uname, db):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Name is reserved by system",
-            )
+        if cleaned_uname != (target_user.username or "").strip().lower():
+            if await is_name_reserved(cleaned_uname, db):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Name is reserved by system",
+                )
         dup_uname = (
             await db.execute(
                 select(User.id).where(
@@ -236,10 +242,7 @@ async def update_user_info(
     totp_flag = update_fields.pop("totp_enabled", None)
     qq_uin_field = update_fields.pop("qq_uin", None)
     updated = await update_user(user_id, db, **update_fields)
-    if not updated:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
-        )
+    assert updated is not None
     if totp_flag is not None:
         if totp_flag is False:
             updated.totp_enabled = False
@@ -327,15 +330,17 @@ async def rename_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
-    new_name = body.name.strip()
+    new_name = body.name.strip().lower()
     if not validate_username_format(new_name):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Username format invalid"
         )
-    if await is_name_reserved(new_name, db):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="Name is reserved by system"
-        )
+    if new_name != (user.username or "").strip().lower():
+        if await is_name_reserved(new_name, db):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Name is reserved by system",
+            )
     dup = (
         await db.execute(
             select(User.id).where(User.username == new_name, User.id != user_id)
