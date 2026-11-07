@@ -153,19 +153,30 @@ async def test_community_code_endpoint_and_snowluma_binding_flow(test_superadmin
         assert res["qq_uin"] == "88888888"
         assert res["message"] == "您已被绑定到用户 Super Admin Test（superadmin_test）"
 
-        # Verify OneBot actions called: get_group_system_msg -> set_group_add_request -> send_private_msg
+        # Verify OneBot actions called:
+        # 1) get_group_system_msg
+        # 2) set_group_add_request (reject invalid code1 with reason="无效的验证码")
+        # 3) set_group_add_request (approve valid code2)
+        # 4) send_private_msg
         actions = [a for a, _ in onebot_calls]
         assert actions == [
             "get_group_system_msg",
             "set_group_add_request",
+            "set_group_add_request",
             "send_private_msg",
         ]
         assert onebot_calls[1][1] == {
+            "flag": "slreq:1:1001:1131427434:1:0",
+            "sub_type": "add",
+            "approve": False,
+            "reason": "无效的验证码",
+        }
+        assert onebot_calls[2][1] == {
             "flag": "slreq:1:1002:1131427434:1:0",
             "sub_type": "add",
             "approve": True,
         }
-        assert onebot_calls[2][1] == {
+        assert onebot_calls[3][1] == {
             "user_id": 88888888,
             "message": "您已被绑定到用户 Super Admin Test（superadmin_test）",
         }

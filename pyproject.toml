@@ -1,6 +1,6 @@
 [project]
 name = "miniclassisland-core"
-version = "2.3.1"
+version = "2.3.2"
 description = "MINI ClassIsland Core"
 readme = "README.md"
 requires-python = ">=3.11"

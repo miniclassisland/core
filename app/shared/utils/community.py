@@ -38,7 +38,7 @@ DEFAULT_QQ_GROUP_ID = int(SNOWLUMA_QQ_GROUP_ID or COMMUNITY_QQ_GROUP_ID or 11314
 MSG_CODE_PROMPT = "密码有效期 15 分钟。加入后将自动绑定您的 QQ 到本用户"
 MSG_ALREADY_BOUND = (
     "您已经绑定过一个 QQ 了，如果需要换绑，请直接退出群聊；"
-    "如果需要继续加入群聊，您可以考虑新注册一个用户或者练习管理员"
+    "如果需要继续加入群聊，您可以考虑新注册一个用户或者联系管理员"
 )
 
 _QQ_UIN_RE = re.compile(r"^[1-9][0-9]{4,19}$")
@@ -211,6 +211,9 @@ async def get_user_community_binding(
 async def get_user_community_status(user_id: str, db: AsyncSession) -> dict[str, Any]:
     """Return the community binding status and prompt message for ``user_id``."""
     binding = await get_user_community_binding(user_id, db)
+    if binding is not None and SNOWLUMA_ONEBOT_TOKEN:  # pragma: no cover
+        await sync_group_member_bindings(db)
+        binding = await get_user_community_binding(user_id, db)
     if not binding:
         return {
             "bound": False,
@@ -255,6 +258,9 @@ async def issue_user_community_code(
     """
     effective_ttl = int(ttl_seconds if ttl_seconds is not None else ttl)
     binding = await get_user_community_binding(user_id, db)
+    if binding is not None and SNOWLUMA_ONEBOT_TOKEN:  # pragma: no cover
+        await sync_group_member_bindings(db)
+        binding = await get_user_community_binding(user_id, db)
     if binding is not None:
         is_manual = bool(getattr(binding, "is_manual", False))
         is_joined = bool(getattr(binding, "is_joined", True))
@@ -822,9 +828,12 @@ async def sync_group_member_bindings(
         return 0
 
     target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
+    member_params: dict[str, Any] = {"group_id": target_group_id}
+    if onebot_caller is None:  # pragma: no cover
+        member_params["no_cache"] = True
     res = await _call_onebot(
         "get_group_member_list",
-        {"group_id": target_group_id},
+        member_params,
         base_url=base_url,
         token=token,
         client=client,
@@ -921,6 +930,60 @@ async def _fetch_group_member_uins(
         if str(m.get("user_id")).strip() not in ("", "0")
     }
     return uins, members
+
+
+async def _reject_group_request(
+    flag: str,
+    target_group_id: int,
+    requester_uin: str = "",
+    reason: str = "无效的验证码",
+    *,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Reject a pending group join request with ``reason``."""
+    reject_params: dict[str, Any] = {
+        "flag": flag,
+        "sub_type": "add",
+        "approve": False,
+        "reason": reason,
+    }
+    try:
+        res = await _call_onebot(
+            "set_group_add_request",
+            reject_params,
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        ok = res.get("status") == "ok" and res.get("retcode", 0) == 0
+        if ok:
+            logger.info(
+                "[QQ群控] 已拒绝入群申请 → 群=%d QQ=%s 原因=%s",
+                target_group_id,
+                mask_qq_uin(requester_uin) or requester_uin or "未知",
+                reason,
+            )
+        else:  # pragma: no cover
+            logger.warning(
+                "[QQ群控] 拒绝入群申请失败 → flag=%s 群=%d QQ=%s 响应=%s",
+                flag,
+                target_group_id,
+                mask_qq_uin(requester_uin) or requester_uin or "未知",
+                res,
+            )
+        return ok
+    except Exception as exc:  # pragma: no cover
+        logger.warning(
+            "[QQ群控] 拒绝入群申请异常 → flag=%s 群=%d: %s",
+            flag,
+            target_group_id,
+            exc,
+        )
+        return False
 
 
 async def _approve_and_notify_member(
@@ -1162,13 +1225,32 @@ async def poll_snowluma_group_requests_once(
                                 "message": reminder,
                             }
                         )
+                    else:  # pragma: no cover
+                        await _reject_group_request(
+                            flag,
+                            target_group_id,
+                            requester_uin,
+                            "无效的验证码",
+                            base_url=base_url,
+                            token=token,
+                            client=client,
+                            onebot_caller=onebot_caller,
+                        )
                 continue
 
         # Case 2: Normal per-user join code verification
-        if not message:  # pragma: no cover
-            continue
-        user_id = await match_and_consume_community_code(message)
+        user_id = await match_and_consume_community_code(message) if message else None
         if not user_id:
+            await _reject_group_request(
+                flag,
+                target_group_id,
+                requester_uin,
+                "无效的验证码",
+                base_url=base_url,
+                token=token,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
             continue
 
         user = (
@@ -1179,6 +1261,16 @@ async def poll_snowluma_group_requests_once(
             or user.role_code == "banned"
             or (user.role_code != "pending" and not user.is_active)
         ):  # pragma: no cover
+            await _reject_group_request(
+                flag,
+                target_group_id,
+                requester_uin,
+                "无效的验证码",
+                base_url=base_url,
+                token=token,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
             continue
 
         existing_user_bind = (
@@ -1187,6 +1279,16 @@ async def poll_snowluma_group_requests_once(
             )
         ).scalar_one_or_none()
         if existing_user_bind:  # pragma: no cover
+            await _reject_group_request(
+                flag,
+                target_group_id,
+                requester_uin,
+                "无效的验证码",
+                base_url=base_url,
+                token=token,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
             continue
 
         approved, private_sent, reminder, resolved_uin = (
@@ -1268,7 +1370,11 @@ async def _snowluma_poll_loop() -> None:  # pragma: no cover
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning("[QQ群控] 轮询周期异常: %s", exc)
+            logger.warning(
+                "[QQ群控] 轮询周期异常 (%s): %s",
+                type(exc).__name__,
+                str(exc) or repr(exc),
+            )
         await asyncio.sleep(interval)
 
 
