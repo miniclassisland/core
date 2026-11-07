@@ -442,10 +442,20 @@ async def match_and_consume_community_code(message: str) -> Optional[str]:
     return None
 
 
-def format_binding_reminder(user: User) -> str:
-    """Format the QQ private message reminder sent after binding a user."""
+def format_binding_reminder(user: User, qq_uin: str = "") -> str:
+    """Format the QQ message sent when a new member joins the group and is bound."""
     display = (user.display_name or "").strip() or user.username
-    return f"您已被绑定到用户 {display}（{user.username}）"
+    qq_part = f" {qq_uin.strip()}" if qq_uin and qq_uin.strip() else ""
+    return (
+        f"欢迎 {display} ({user.username}) 加入交流群，"
+        f"您的 QQ{qq_part} 已自动绑定。如需解绑，请直接退出群聊或者联系运维"
+    )
+
+
+def format_admin_manual_bind_reminder(user: User, qq_uin: str) -> str:
+    """Format the QQ message sent when an existing group member is manually bound by an admin."""
+    display = (user.display_name or "").strip() or user.username
+    return f"管理员已将您的 QQ {qq_uin.strip()} 与 {display} ({user.username}) 绑定"
 
 
 def format_ban_reminder(user: User) -> str:
@@ -454,10 +464,11 @@ def format_ban_reminder(user: User) -> str:
     return f"您（{display}）已被封禁"
 
 
-def format_unbind_reminder(user: User) -> str:
+def format_unbind_reminder(user: User, qq_uin: str = "") -> str:
     """Format the QQ private message reminder sent when a user's QQ is unbound or rebound."""
     display = (user.display_name or "").strip() or user.username
-    return f"您的 QQ 已与您（{display}）解绑"
+    qq_part = f" {qq_uin.strip()}" if qq_uin and qq_uin.strip() else ""
+    return f"管理员已将您的 QQ{qq_part} 与 {display} ({user.username}) 解绑"
 
 
 def get_snowluma_client() -> httpx.AsyncClient:  # pragma: no cover
@@ -496,6 +507,59 @@ async def _call_onebot(
     return resp.json()  # pragma: no cover
 
 
+async def _send_private_msg(
+    qq_uin: str,
+    target_group_id: int,
+    message: str,
+    *,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Send a private message to ``qq_uin`` (with temporary session fallback via ``target_group_id``)."""
+    auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
+    if (
+        not auth_token and client is None and base_url is None and onebot_caller is None
+    ):  # pragma: no cover
+        return False
+
+    try:
+        pm_res = await _call_onebot(
+            "send_private_msg",
+            {
+                "user_id": int(qq_uin),
+                "message": message,
+                "auto_escape": True,
+            },
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        if pm_res.get("retcode", 0) == 0:
+            return True
+        pm_res2 = await _call_onebot(
+            "send_private_msg",
+            {
+                "user_id": int(qq_uin),
+                "group_id": target_group_id,
+                "message": message,
+                "auto_escape": True,
+            },
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        return pm_res2.get("retcode", 0) == 0
+    except Exception as exc:  # pragma: no cover
+        logger.warning(
+            "[QQ群控] 私聊发送失败 → QQ=%s: %s", mask_qq_uin(qq_uin) or qq_uin, exc
+        )
+        return False
+
+
 async def _send_private_msg_and_kick(
     qq_uin: str,
     target_group_id: int,
@@ -513,37 +577,15 @@ async def _send_private_msg_and_kick(
     ):  # pragma: no cover
         return
 
-    try:
-        pm_res = await _call_onebot(
-            "send_private_msg",
-            {
-                "user_id": int(qq_uin),
-                "message": message,
-                "auto_escape": True,
-            },
-            base_url=base_url,
-            token=token,
-            client=client,
-            onebot_caller=onebot_caller,
-        )
-        if pm_res.get("retcode", 0) != 0:  # pragma: no cover
-            await _call_onebot(
-                "send_private_msg",
-                {
-                    "user_id": int(qq_uin),
-                    "group_id": target_group_id,
-                    "message": message,
-                    "auto_escape": True,
-                },
-                base_url=base_url,
-                token=token,
-                client=client,
-                onebot_caller=onebot_caller,
-            )
-    except Exception as exc:  # pragma: no cover
-        logger.warning(
-            "[QQ群控] 私聊发送失败 → QQ=%s: %s", mask_qq_uin(qq_uin) or qq_uin, exc
-        )
+    await _send_private_msg(
+        qq_uin,
+        target_group_id,
+        message,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
 
     try:
         await _call_onebot(
@@ -698,11 +740,22 @@ async def admin_bind_or_rebind_user_qq(
 
     if existing is not None:
         if str(existing.qq_uin).strip() == cleaned_qq:  # pragma: no cover
+            was_joined = bool(getattr(existing, "is_joined", False))
             existing.is_manual = True
             if already_in_group:
                 existing.is_joined = True
             await db.commit()
             await db.refresh(existing)
+            if already_in_group and not was_joined:
+                await _send_private_msg(
+                    cleaned_qq,
+                    target_group_id,
+                    format_admin_manual_bind_reminder(user, cleaned_qq),
+                    base_url=base_url,
+                    token=token,
+                    client=client,
+                    onebot_caller=onebot_caller,
+                )
             return existing
         old_qq_to_kick = str(existing.qq_uin).strip()
         old_group_id = int(existing.group_id or target_group_id)
@@ -735,7 +788,7 @@ async def admin_bind_or_rebind_user_qq(
             mask_qq_uin(cleaned_qq) or cleaned_qq,
             already_in_group,
         )
-        unbind_msg = format_unbind_reminder(user)
+        unbind_msg = format_unbind_reminder(user, old_qq_to_kick)
         await _send_private_msg_and_kick(
             old_qq_to_kick,
             old_group_id,
@@ -754,6 +807,17 @@ async def admin_bind_or_rebind_user_qq(
             already_in_group,
         )
 
+    if already_in_group:
+        await _send_private_msg(
+            cleaned_qq,
+            target_group_id,
+            format_admin_manual_bind_reminder(user, cleaned_qq),
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+
     return binding
 
 
@@ -769,7 +833,7 @@ async def admin_unbind_user_qq(
 ) -> bool:
     """Manually unbind a user's QQ number (Super Admin action).
 
-    Sends private message ``您的 QQ 已与您（显示名称）解绑`` first, then removes from the group.
+    Sends private message ``管理员已将您的 QQ {qq_uin} 与 {display} ({username}) 解绑`` first, then removes from the group.
     """
     await invalidate_user_community_code(user.id)
     binding = (
@@ -784,7 +848,7 @@ async def admin_unbind_user_qq(
     target_group_id = int(
         group_id if group_id is not None else (binding.group_id or SNOWLUMA_QQ_GROUP_ID)
     )
-    unbind_msg = format_unbind_reminder(user)
+    unbind_msg = format_unbind_reminder(user, old_qq)
 
     await db.delete(binding)
     await db.commit()
@@ -1072,7 +1136,7 @@ async def _approve_and_notify_member(
                 if int(newest.get("join_time") or 0) > 0:
                     resolved_uin = str(newest.get("user_id")).strip()
 
-    reminder = format_binding_reminder(user)
+    reminder = format_binding_reminder(user, resolved_uin)
     private_sent = False
     if resolved_uin:
         try:

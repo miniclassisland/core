@@ -22,6 +22,8 @@ from app.shared.schemas.schemas import (
     TotpDisableRequest,
     TotpVerifyRequest,
     TotpRecoverRequest,
+    CertificateIssueRequest,
+    CertificateRevokeRequest,
 )
 from app.shared.security.auth import (
     get_current_user_id,
@@ -29,6 +31,10 @@ from app.shared.security.auth import (
     create_2fa_temp_token,
     pop_2fa_temp_token,
     revoke_all_user_sessions,
+    issue_login_certificate_and_exchange_code,
+    list_user_certificates,
+    revoke_user_certificate,
+    revoke_all_user_certificates,
 )
 from app.shared.security.crypto import (
     hash_password_async,
@@ -575,3 +581,84 @@ async def recover_2fa(body: TotpRecoverRequest):
         "remaining_recovery_codes": remaining,
         "require_totp_reset": remaining <= 1,
     }
+
+
+# ---- 5. Login Security Certificate Issuance & Management ----
+
+
+@router.post("/certificate/issue", tags=["UserInfo"])
+async def issue_login_certificate(
+    body: CertificateIssueRequest,
+    request: Request,
+    uid: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify account password (and 2FA if enabled) and issue a 7-day Login Security Certificate + 5-minute exchange code."""
+    user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
+    if not user or not user.is_active or user.role_code == "banned":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User account is inactive or banned",
+        )
+    client_ip = get_client_ip_from_request(request) or "unknown"
+    if not await verify_password_async(body.password, user.hashed_password):
+        await record_ip_failure_async(client_ip)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect password",
+        )
+
+    if user.totp_enabled:
+        totp_code = (body.totp_code or "").strip()
+        rec_code = (body.recovery_code or "").strip().upper()
+        if not totp_code and not rec_code:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="2FA verification code or recovery code is required",
+            )
+        if totp_code:
+            if not await verify_totp_once(uid, user.totp_secret or "", totp_code):
+                await record_ip_failure_async(client_ip)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid TOTP code",
+                )
+        else:
+            if not await use_recovery_code(uid, rec_code):
+                await record_ip_failure_async(client_ip)
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid or used recovery code",
+                )
+
+    result = await issue_login_certificate_and_exchange_code(
+        uid, device_name=body.device_name or ""
+    )
+    return result
+
+
+@router.get("/certificate/list", tags=["UserInfo"])
+async def get_user_certificates(
+    uid: str = Depends(get_current_user_id),
+):
+    """List active Login Security Certificates for the current user."""
+    items = await list_user_certificates(uid)
+    return {"items": items}
+
+
+@router.post("/certificate/revoke", tags=["UserInfo"])
+async def revoke_certificate(
+    body: CertificateRevokeRequest = Body(default=CertificateRevokeRequest()),
+    uid: str = Depends(get_current_user_id),
+):
+    """Revoke a specific Login Security Certificate or all certificates for the current user."""
+    if body.revoke_all or not body.cert_id:
+        await revoke_all_user_certificates(uid)
+        return {"status": "ok", "message": "All security certificates revoked"}
+    ok = await revoke_user_certificate(uid, body.cert_id)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Certificate not found",
+        )
+    return {"status": "ok", "message": "Security certificate revoked"}

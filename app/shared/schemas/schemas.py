@@ -625,3 +625,51 @@ class TicketDetailOut(TicketOut):
 
     content: str
     messages: List[TicketMessageOut] = Field(default_factory=list)
+
+
+# ---- 12. Login Security Certificate Schemas ----
+
+
+class CertificateIssueRequest(BaseModel):
+    """Issue a 7-day Login Security Certificate and 5-minute exchange code."""
+
+    password: str = Field(..., min_length=1, max_length=128)
+    totp_code: Optional[str] = Field(default=None, max_length=32)
+    recovery_code: Optional[str] = Field(default=None, max_length=64)
+    device_name: Optional[str] = Field(default="", max_length=64)
+
+
+class CertificateRedeemRequest(BaseModel):
+    """Redeem a 5-minute exchange code or DeepLink URI for a Login Security Certificate."""
+
+    code: str = Field(..., min_length=1, max_length=512)
+
+
+class CertificateSessionRequest(BaseModel):
+    """Request a short-lived session token (<= 1 hour) using a Login Security Certificate."""
+
+    cert_id: str = Field(..., min_length=1, max_length=128)
+    cert_secret: str = Field(..., min_length=1, max_length=256)
+    ttl: int = Field(default=3600, ge=60, le=3600)
+
+
+class CertificateRotateRequest(BaseModel):
+    """Rotate a Login Security Certificate to the next generation when remaining validity < 24h."""
+
+    cert_id: str = Field(..., min_length=1, max_length=128)
+    cert_secret: str = Field(..., min_length=1, max_length=256)
+
+
+class CertificateRevokeRequest(BaseModel):
+    """Revoke a specific Login Security Certificate (or all if cert_id is omitted)."""
+
+    cert_id: Optional[str] = Field(default=None, max_length=128)
+    revoke_all: bool = Field(default=False)
+
+
+class QrLoginAuthorizeRequest(BaseModel):
+    """Authorize a pending Web QR login session from an authenticated mobile app."""
+
+    code: str = Field(..., min_length=1, max_length=512)
+    cert_id: Optional[str] = Field(default=None, max_length=128)
+    cert_secret: Optional[str] = Field(default=None, max_length=256)

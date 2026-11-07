@@ -33,6 +33,9 @@ _CC_PROTECTED_KEYWORDS = (
     "/user/auth",
     "/user/apply",
     "/user/2fa/",
+    "/user/certificate/",
+    "/token/certificate/",
+    "/token/qr-login/",
     "/oobe/",
 )
 
@@ -182,6 +185,12 @@ _EXEMPT = {
     "/user/2fa/totp/verify",
     "/user/2fa/totp/recover",
     "/token/redeem",
+    "/token/certificate/redeem",
+    "/token/certificate/session",
+    "/token/certificate/rotate",
+    "/token/qr-login/create",
+    "/token/qr-login/poll",
+    "/token/qr-login/authorize",
     "/oobe/verify",
     "/oobe/configure",
     "/api/oobe/verify",
@@ -192,6 +201,9 @@ _EXEMPT_PREFIXES = ("/user/availability/", "/fonts/", "/api/v1/fonts/")
 
 _PENDING_USER_ALLOWED_PATHS = {
     "/user/info",
+    "/user/certificate/issue",
+    "/user/certificate/list",
+    "/user/certificate/revoke",
     "/community/code",
     "/community/status",
     "/invitation/accept",

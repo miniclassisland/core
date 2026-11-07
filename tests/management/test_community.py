@@ -151,7 +151,10 @@ async def test_community_code_endpoint_and_snowluma_binding_flow(test_superadmin
         assert res["private_sent"] is True
         assert res["user_id"] == test_superadmin_user
         assert res["qq_uin"] == "88888888"
-        assert res["message"] == "您已被绑定到用户 Super Admin Test（superadmin_test）"
+        assert (
+            res["message"]
+            == "欢迎 Super Admin Test (superadmin_test) 加入交流群，您的 QQ 88888888 已自动绑定。如需解绑，请直接退出群聊或者联系运维"
+        )
 
         # Verify OneBot actions called:
         # 1) get_group_system_msg
@@ -178,7 +181,7 @@ async def test_community_code_endpoint_and_snowluma_binding_flow(test_superadmin
         }
         assert onebot_calls[3][1] == {
             "user_id": 88888888,
-            "message": "您已被绑定到用户 Super Admin Test（superadmin_test）",
+            "message": "欢迎 Super Admin Test (superadmin_test) 加入交流群，您的 QQ 88888888 已自动绑定。如需解绑，请直接退出群聊或者联系运维",
         }
 
         # Code2 is now consumed/invalidated
@@ -375,10 +378,10 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
         assert join_res[0]["approved"] is True
         assert (
             join_res[0]["message"]
-            == "您已被绑定到用户 Pending Member（pending_member）"
+            == "欢迎 Pending Member (pending_member) 加入交流群，您的 QQ 1234567890 已自动绑定。如需解绑，请直接退出群聊或者联系运维"
         )
 
-        # 5. Super Admin rebinds (换绑) to 9876543210 -> bot sends unbind PM and kicks old QQ 1234567890
+        # 5. Super Admin rebinds (换绑) to 9876543210 (already in group!) -> bot sends unbind PM and kicks old QQ 1234567890, and sends manual bind PM to 9876543210
         from app.shared.utils.community import (
             admin_bind_or_rebind_user_qq,
             admin_unbind_user_qq,
@@ -389,6 +392,12 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
 
         async def fake_rebind_onebot(action: str, params: dict):
             rebind_calls.append((action, params))
+            if action == "get_group_member_list":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [{"user_id": 9876543210}],
+                }
             return {"status": "ok", "retcode": 0, "data": []}
 
         async with AsyncSessionLocal() as db:
@@ -403,7 +412,7 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
             "send_private_msg",
             {
                 "user_id": 1234567890,
-                "message": "您的 QQ 已与您（Pending Member）解绑",
+                "message": "管理员已将您的 QQ 1234567890 与 Pending Member (pending_member) 解绑",
                 "auto_escape": True,
             },
         ) in rebind_calls
@@ -413,6 +422,14 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
                 "group_id": COMMUNITY_QQ_GROUP_ID,
                 "user_id": 1234567890,
                 "reject_add_request": False,
+            },
+        ) in rebind_calls
+        assert (
+            "send_private_msg",
+            {
+                "user_id": 9876543210,
+                "message": "管理员已将您的 QQ 9876543210 与 Pending Member (pending_member) 绑定",
+                "auto_escape": True,
             },
         ) in rebind_calls
 
@@ -431,7 +448,10 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
             assert ok is True
 
         assert [a for a, _ in unbind_calls] == ["send_private_msg", "set_group_kick"]
-        assert unbind_calls[0][1]["message"] == "您的 QQ 已与您（Pending Member）解绑"
+        assert (
+            unbind_calls[0][1]["message"]
+            == "管理员已将您的 QQ 9876543210 与 Pending Member (pending_member) 解绑"
+        )
         assert unbind_calls[1][1]["user_id"] == 9876543210
 
         # 7. Re-bind and then ban user -> bot sends ban PM "您（Pending Member）已被封禁" and kicks from group
