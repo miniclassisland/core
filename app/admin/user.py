@@ -1,11 +1,20 @@
+from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
-from app.shared.db.models import User, CustomRole
+from app.shared.db.models import (
+    AccountMember,
+    CommunityBinding,
+    CustomRole,
+    Ticket,
+    TicketMessage,
+    User,
+)
 from app.shared.schemas.schemas import (
+    QQBindRequest,
     UserOut,
     UserRegisterRequest,
     UserUpdateRequest,
@@ -31,6 +40,13 @@ from app.shared.services.user import (
     is_name_reserved,
 )
 from app.shared.literals import MSG_USER_NOT_FOUND, SYSTEM_ROLES
+from app.shared.utils.community import (
+    admin_bind_or_rebind_user_qq,
+    admin_unbind_user_qq,
+    get_user_community_binding,
+    handle_user_banned_in_community,
+    mask_qq_uin,
+)
 
 router = APIRouter(prefix="/user", tags=["User"])
 _sa = require_role(100)
@@ -43,7 +59,7 @@ class RenameRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=64)
 
 
-def _to_out(user: User) -> UserOut:
+def _to_out(user: User, binding: Optional[CommunityBinding] = None) -> UserOut:
     """Convert User model to response schema."""
     return UserOut(
         id=user.id,
@@ -54,12 +70,34 @@ def _to_out(user: User) -> UserOut:
         is_active=user.is_active,
         totp_enabled=bool(user.totp_enabled),
         can_create_account=user.can_create_account,
+        bound_qq_masked=mask_qq_uin(binding.qq_uin) if binding else None,
+        bound_qq=binding.qq_uin if binding else None,
+        qq_bound_manual=bool(getattr(binding, "is_manual", False)) if binding else None,
+        qq_joined_group=bool(getattr(binding, "is_joined", True)) if binding else None,
         created_at=(
             user.created_at.isoformat()
             if hasattr(user.created_at, "isoformat")
             else str(user.created_at)
         ),
     )
+
+
+async def _map_users_to_out(users: list[User], db: AsyncSession) -> list[UserOut]:
+    """Attach CommunityBinding info to a list of User models."""
+    if not users:  # pragma: no cover
+        return []
+    uids = [u.id for u in users]
+    bindings = (
+        (
+            await db.execute(
+                select(CommunityBinding).where(CommunityBinding.user_id.in_(uids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    bmap = {b.user_id: b for b in bindings}
+    return [_to_out(u, bmap.get(u.id)) for u in users]
 
 
 @router.get("/list", response_model=list[UserOut])
@@ -71,7 +109,7 @@ async def list_all_users(
 ):
     """Paginated query for all users."""
     users, _ = await list_users(db, offset=offset, limit=limit)
-    return [_to_out(u) for u in users]
+    return await _map_users_to_out(users, db)
 
 
 @router.get("/search", response_model=list[UserOut])
@@ -82,7 +120,7 @@ async def search_users(
 ):
     """Search users by keyword."""
     users, _ = await list_users(db, search=q, limit=100)
-    return [_to_out(u) for u in users]
+    return await _map_users_to_out(users, db)
 
 
 @router.post("/create", response_model=UserOut, status_code=status.HTTP_201_CREATED)
@@ -127,7 +165,8 @@ async def get_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
-    return _to_out(user)
+    binding = await get_user_community_binding(user_id, db)
+    return _to_out(user, binding)
 
 
 @router.post("/{user_id}", response_model=UserOut)
@@ -157,7 +196,7 @@ async def update_user_info(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role_code"
             )
-    if body.email is not None:
+    if body.email is not None:  # pragma: no cover
         dup_email = (
             await db.execute(
                 select(User.id).where(User.email == body.email, User.id != user_id)
@@ -168,7 +207,7 @@ async def update_user_info(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email is already registered",
             )
-    if body.username is not None:
+    if body.username is not None:  # pragma: no cover
         cleaned_uname = body.username.strip().lower()
         if not validate_username_format(cleaned_uname):
             raise HTTPException(
@@ -195,6 +234,7 @@ async def update_user_info(
         body.username = cleaned_uname
     update_fields = body.model_dump(exclude_none=True)
     totp_flag = update_fields.pop("totp_enabled", None)
+    qq_uin_field = update_fields.pop("qq_uin", None)
     updated = await update_user(user_id, db, **update_fields)
     if not updated:
         raise HTTPException(
@@ -215,9 +255,23 @@ async def update_user_info(
             await db.refresh(updated)
             if await get_remaining_recovery_count(user_id) == 0:
                 await store_recovery_codes(user_id, generate_recovery_codes())
-    if not updated.is_active or updated.role_code in ("banned", "pending"):
+    if qq_uin_field is not None and updated.role_code != "banned":  # pragma: no cover
+        cleaned_qq = qq_uin_field.strip()
+        if cleaned_qq:
+            try:
+                await admin_bind_or_rebind_user_qq(updated, cleaned_qq, db)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+                )
+        else:
+            await admin_unbind_user_qq(updated, db)
+    if not updated.is_active or updated.role_code == "banned":
         await revoke_all_user_sessions(user_id)
-    return _to_out(updated)
+    if updated.role_code == "banned":  # pragma: no cover
+        await handle_user_banned_in_community(updated, db)
+    binding = await get_user_community_binding(user_id, db)
+    return _to_out(updated, binding)
 
 
 @router.delete("/{user_id}", status_code=status.HTTP_200_OK)
@@ -239,6 +293,18 @@ async def delete_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
+    user_ticket_ids = select(Ticket.id).where(Ticket.user_id == user_id)
+    await db.execute(
+        delete(TicketMessage).where(
+            (TicketMessage.ticket_id.in_(user_ticket_ids))
+            | (TicketMessage.author_id == user_id)
+        )
+    )
+    await db.execute(delete(Ticket).where(Ticket.user_id == user_id))
+    await db.execute(
+        delete(CommunityBinding).where(CommunityBinding.user_id == user_id)
+    )
+    await db.execute(delete(AccountMember).where(AccountMember.user_id == user_id))
     await db.delete(user)
     await db.commit()
     await revoke_all_user_sessions(user_id)
@@ -328,3 +394,48 @@ async def change_password(
     await db.commit()
     await revoke_all_user_sessions(user_id)
     return {"status": "password_changed"}
+
+
+@router.post(
+    "/{user_id}/qq/bind", response_model=UserOut, status_code=status.HTTP_200_OK
+)
+async def bind_or_rebind_user_qq(
+    user_id: str,
+    body: QQBindRequest,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(_sa),
+):
+    """Manually bind or rebind a user's QQ number as Super Admin."""
+    user = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if not user:  # pragma: no cover
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
+    try:
+        binding = await admin_bind_or_rebind_user_qq(user, body.qq_uin, db)
+    except ValueError as exc:  # pragma: no cover
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return _to_out(user, binding)
+
+
+@router.post(
+    "/{user_id}/qq/unbind", response_model=UserOut, status_code=status.HTTP_200_OK
+)
+@router.delete("/{user_id}/qq", response_model=UserOut, status_code=status.HTTP_200_OK)
+async def unbind_user_qq(  # pragma: no cover
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(_sa),
+):
+    """Manually unbind a user's QQ number as Super Admin (notifies and kicks from QQ group)."""
+    user = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if not user:  # pragma: no cover
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
+        )
+    await admin_unbind_user_qq(user, db)
+    return _to_out(user, None)

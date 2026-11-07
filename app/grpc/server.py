@@ -278,13 +278,18 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                 Retcode=Retcode_pb2.InvalidRequest
             )
 
-        decrypted = await asyncio.to_thread(
-            self._sm.decrypt_challenge, request.ChallengeTokenEncrypted
-        )
+        raw_cipher = request.ChallengeTokenEncrypted or ""
+        if not raw_cipher or len(raw_cipher) > 16384:  # pragma: no cover
+            return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
+                Retcode=Retcode_pb2.ServerInternalError
+            )
+
+        decrypted = await asyncio.to_thread(self._sm.decrypt_challenge, raw_cipher)
         if (
             decrypted is None
             or not str(decrypted).strip()
             or len(str(decrypted)) > _MAX_CHALLENGE_TOKEN_LEN
+            or any(ord(c) < 32 or ord(c) == 127 for c in str(decrypted))
         ):
             return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
                 Retcode=Retcode_pb2.ServerInternalError
@@ -316,6 +321,14 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                 await db.execute(select(ClientRecord).where(ClientRecord.uid == cuid))
             ).scalar_one_or_none()
             if client:
+                if (
+                    tenant_id
+                    and client.account_id
+                    and client.account_id not in (tenant_id, "default")
+                ):  # pragma: no cover
+                    return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
+                        Retcode=Retcode_pb2.InvalidRequest
+                    )
                 if getattr(client, "is_disabled", False):
                     return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
                         Retcode=Retcode_pb2.InvalidRequest
@@ -344,7 +357,13 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                 )
 
             if client:
-                client.ip = peer_ip or client.ip
+                is_currently_online = await self._sm.is_client_online(
+                    effective_tid, cuid
+                )
+                if peer_ip and (
+                    not client.ip or client.ip == peer_ip or not is_currently_online
+                ):
+                    client.ip = peer_ip
                 client.last_seen_at = datetime.now(timezone.utc)
                 await db.commit()
 
@@ -424,6 +443,25 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                 )
                 matched_pre_reg = (await db.execute(pre_stmt)).scalars().first()
 
+            acct_id = tid or (
+                matched_pre_reg.account_id if matched_pre_reg else "default"
+            )
+            if (
+                existing_record is not None
+                and existing_record.account_id
+                and existing_record.account_id not in (acct_id, "default")
+            ):
+                return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
+                    Retcode=Retcode_pb2.InvalidRequest,
+                    Message="ClientUid is already registered to another account.",
+                )
+            if existing_record is None and acct_id and acct_id != "default":
+                if not await check_quota(acct_id, "max_clients", db):
+                    return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
+                        Retcode=Retcode_pb2.InvalidRequest,
+                        Message="Account registered device quota (max_clients) exceeded.",
+                    )
+
             if existing_record is None and matched_pre_reg is None:
                 if reg_mode == "pre_reg":
                     return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
@@ -449,24 +487,6 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                         )
 
             # Write or update physical client record
-            acct_id = tid or (
-                matched_pre_reg.account_id if matched_pre_reg else "default"
-            )
-            if (
-                existing_record is not None
-                and existing_record.account_id
-                and existing_record.account_id not in (acct_id, "default")
-            ):
-                return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
-                    Retcode=Retcode_pb2.InvalidRequest,
-                    Message="ClientUid is already registered to another account.",
-                )
-            if existing_record is None and acct_id and acct_id != "default":
-                if not await check_quota(acct_id, "max_clients", db):
-                    return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
-                        Retcode=Retcode_pb2.InvalidRequest,
-                        Message="Account registered device quota (max_clients) exceeded.",
-                    )
 
             record = existing_record or ClientRecord(
                 uid=cuid,
@@ -870,16 +890,23 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                     Retcode=Retcode_pb2.InvalidRequest, Message="Session expired"
                 )
 
-            db.add(
-                ConfigUploadRecord(
-                    request_guid=req_guid_str or f"upload-{int(time.time() * 1000)}",
-                    account_id=tid or "default",
-                    client_uid=real_cuid,
-                    status="completed",
-                    payload=payload_str,
-                    uploaded_at=datetime.now(timezone.utc),
+            if existing is not None:  # pragma: no cover
+                existing.payload = payload_str
+                existing.status = "completed"
+                existing.uploaded_at = datetime.now(timezone.utc)
+                existing.client_uid = real_cuid
+            else:
+                db.add(
+                    ConfigUploadRecord(
+                        request_guid=req_guid_str
+                        or f"upload-{int(time.time() * 1000)}",
+                        account_id=tid or "default",
+                        client_uid=real_cuid,
+                        status="completed",
+                        payload=payload_str,
+                        uploaded_at=datetime.now(timezone.utc),
+                    )
                 )
-            )
             await db.commit()
 
         return ConfigUploadScRsp_pb2.ConfigUploadScRsp(

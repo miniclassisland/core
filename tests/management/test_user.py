@@ -152,12 +152,25 @@ async def test_management_user_endpoints(test_superadmin_user):
         )
         assert r_u_free.json()["available"] is True
 
-        # 3. Login before approval -> 401
+        # 3. Login before approval -> allowed with restricted pending permissions (no default account)
         r_login_pending = await client.post(
             "/user/auth",
             json={"email": "mgmt@school.com", "password": "MgmtPassword123!"},
         )
-        assert r_login_pending.status_code == 401
+        assert r_login_pending.status_code == 200
+        pending_sid = r_login_pending.json()["token"]
+        pending_headers = {"Authorization": f"Bearer {pending_sid}"}
+
+        # Pending user has no default account and cannot create one or modify profile
+        r_pending_accts = await client.get("/account/list", headers=pending_headers)
+        assert r_pending_accts.status_code == 200
+        assert r_pending_accts.json() == []
+        r_pending_forbidden = await client.post(
+            "/user/info/display-name",
+            json={"display_name": "Blocked While Pending"},
+            headers=pending_headers,
+        )
+        assert r_pending_forbidden.status_code == 403
 
         # Approve user in DB and create a second user to test conflict cases
         async with AsyncSessionLocal() as db:

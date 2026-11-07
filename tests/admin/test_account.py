@@ -198,6 +198,21 @@ async def test_admin_root_and_account_endpoints(test_superadmin_user):
         assert r_set_quota.status_code == 200
         assert r_set_quota.json()["max_value"] == 500
 
+        # 7.5 Global client list
+        r_all_clients = await client.get("/client/list", headers=headers)
+        assert r_all_clients.status_code == 200
+        assert any(
+            c["uid"] == "client-for-quota" and c["account_id"] == acct_id
+            for c in r_all_clients.json()
+        )
+        r_filtered_clients = await client.get(
+            "/client/list",
+            params={"account_id": acct_id, "q": "client-for-quota"},
+            headers=headers,
+        )
+        assert r_filtered_clients.status_code == 200
+        assert len(r_filtered_clients.json()) == 1
+
         # 8. Delete account
         r_del_404 = await client.delete("/account/non-existent", headers=headers)
         assert r_del_404.status_code == 404

@@ -21,6 +21,10 @@ from app.shared.security.turnstile import (
     close_turnstile_client,
     get_turnstile_client,
 )
+from app.shared.utils.community import (
+    start_snowluma_poller,
+    stop_snowluma_poller,
+)
 from app.shared.utils.logging import get_port_logger, PORT_TAG_GRPC
 from app.shared.runtime import runtime_hub
 
@@ -52,6 +56,7 @@ async def _startup(app: FastAPI):
     await init_redis()
     logger.info("Initializing Turnstile HTTP client...")
     get_turnstile_client()
+    start_snowluma_poller()
 
     # Dynamically import serve_grpc to prevent compilation issues when protobufs are missing
     try:
@@ -93,6 +98,7 @@ async def _shutdown(app: FastAPI):
     await close_redis()
     logger.info("Closing Turnstile HTTP client...")
     await close_turnstile_client()
+    await stop_snowluma_poller()
     executor = getattr(app.state, "thread_executor", None)
     if executor:
         executor.shutdown(wait=False)

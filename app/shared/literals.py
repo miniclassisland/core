@@ -53,7 +53,7 @@ PAIRING_CODE_LEN = 8
 
 # ---- 3. Services Configuration ----
 USERNAME_RE = re.compile(r"^[a-z0-9_]{3,64}$")
-SLUG_RE = re.compile(r"^[a-z0-9\-]{3,64}$")
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{1,62}[a-z0-9]$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[a-z0-9_\-]+$")
 
 DEFAULT_QUOTAS = [
@@ -87,7 +87,7 @@ TICKET_CATEGORIES = ("account", "client", "bug", "feature", "other")
 
 # ---- 4. Schemas ----
 SCHEMA_USERNAME_RE = re.compile(r"^[a-z0-9_]{3,64}$")
-SCHEMA_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,62}[a-z0-9]$")
+SCHEMA_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{1,62}[a-z0-9]$")
 PWD_UPPER = re.compile(r"[A-Z]")
 PWD_LOWER = re.compile(r"[a-z]")
 PWD_DIGIT = re.compile(r"[0-9]")

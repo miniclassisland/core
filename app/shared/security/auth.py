@@ -71,13 +71,15 @@ async def revoke_all_user_sessions(
     rd = get_redis(REDIS_DB_AUTH)
     user_set_key = f"{_USER_SESSIONS_PREFIX}:{user_id}"
     tokens = await rd.smembers(user_set_key)
+    pipe = rd.pipeline(transaction=False)
     for tok in tokens or ():
         if except_token and tok == except_token:
             continue
-        await rd.delete(f"session:{tok}")
-        await rd.srem(user_set_key, tok)
+        pipe.delete(f"session:{tok}")
+        pipe.srem(user_set_key, tok)
     if not except_token:
-        await rd.delete(user_set_key)
+        pipe.delete(user_set_key)
+    await pipe.execute()
 
 
 # ---- Short-Lived SSO Exchange Code Management ----
@@ -143,8 +145,12 @@ async def get_current_user(
 ) -> User:
     """FastAPI dependency: query full user entity from database."""
     user_id = await get_current_user_id(request)
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
+    cached_user = getattr(request.state, "current_user", None)
+    if isinstance(cached_user, User) and cached_user.id == user_id:
+        user = cached_user
+    else:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
     if not user or not user.is_active or user.role_code in ("banned", "pending"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -222,7 +228,9 @@ async def create_token(
     return token
 
 
-async def resolve_token(token: str) -> Optional[tuple[str, str, str, str]]:
+async def resolve_token(
+    token: str, *, req_ip: str = ""
+) -> Optional[tuple[str, str, str, str]]:
     """Atomically resolve token string to metadata and decrement remaining uses."""
     async with _res_token_lock:
         rd = get_redis()
@@ -231,6 +239,22 @@ async def resolve_token(token: str) -> Optional[tuple[str, str, str, str]]:
 
         if not data or "tenant_id" not in data:
             return None
+
+        token_ip = data.get("client_ip", "")
+        if (
+            token_ip
+            and req_ip
+            and token_ip not in _LOOPBACK_IPS
+            and req_ip not in _LOOPBACK_IPS
+            and token_ip != req_ip
+        ):
+            # Return metadata without consuming remaining_uses so caller raises 403
+            return (
+                data["tenant_id"],
+                data["resource_type"],
+                data["name"],
+                token_ip,
+            )
 
         new_remaining = await rd.hincrby(key, "remaining_uses", -1)
         if new_remaining <= 0:
@@ -242,7 +266,7 @@ async def resolve_token(token: str) -> Optional[tuple[str, str, str, str]]:
             data["tenant_id"],
             data["resource_type"],
             data["name"],
-            data.get("client_ip", ""),
+            token_ip,
         )
 
 
@@ -343,15 +367,15 @@ def verify_oobe_passcode(code: str, *, client_ip: str = "") -> bool:
                 OOBE_LOCKOUT_SECONDS,
             )
         _OOBE_IP_FAILS[client_ip] = (cnt, lock_until)
-    else:
-        OOBE_FAIL_COUNT += 1
-        if OOBE_FAIL_COUNT >= OOBE_MAX_FAILURES:
-            OOBE_LOCKOUT_UNTIL = time.monotonic() + OOBE_LOCKOUT_SECONDS
-            logger.warning(
-                "OOBE passcode failed %d times, entering %ds cooldown lockout",
-                OOBE_FAIL_COUNT,
-                OOBE_LOCKOUT_SECONDS,
-            )
+        return False
+    OOBE_FAIL_COUNT += 1
+    if OOBE_FAIL_COUNT >= OOBE_MAX_FAILURES:
+        OOBE_LOCKOUT_UNTIL = time.monotonic() + OOBE_LOCKOUT_SECONDS
+        logger.warning(
+            "OOBE passcode failed %d times, entering %ds cooldown lockout",
+            OOBE_FAIL_COUNT,
+            OOBE_LOCKOUT_SECONDS,
+        )
     return False
 
 

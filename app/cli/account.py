@@ -109,7 +109,7 @@ def create_account_cmd(
     """Create a new tenant account with default quotas and resources."""
     _require_args(name=name)
     name_str = name or ""
-    actual_slug = slug or name_str.replace("_", "-").replace(" ", "-").lower()
+    actual_slug = (slug or "").strip().lower() or f"account_{secrets.token_hex(4)}"
 
     async def _run():
         async with AsyncSessionLocal() as db:

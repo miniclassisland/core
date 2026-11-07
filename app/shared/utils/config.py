@@ -72,6 +72,15 @@ class AppSettings(BaseSettings):
     miniclassisland_key_file: str = DEFAULT_KEY_FILE
     miniclassisland_admin_secret: str = DEFAULT_ADMIN_SECRET
 
+    # SnowLuma OneBot 11 community integration
+    snowluma_onebot_url: str = "http://127.0.0.1:3000"
+    snowluma_onebot_http_url: str = "http://127.0.0.1:3000"
+    snowluma_onebot_token: str = ""
+    snowluma_qq_group_id: int = 1131427434
+    community_qq_group_id: int = 1131427434
+    community_code_ttl_seconds: int = 900
+    snowluma_poll_interval: float = 3.0
+
 
 _settings = AppSettings()
 
@@ -85,11 +94,27 @@ def is_initialized() -> bool:
     return CONFIG_FILE.exists()
 
 
+_CACHED_FILE_CFG: dict = {}
+_CACHED_FILE_MTIME: float = -1.0
+
+
 def _load_file_config() -> dict:
-    """Load local config overrides from .miniclassisland/config.json."""
+    """Load local config overrides from .miniclassisland/config.json with mtime caching."""
+    global _CACHED_FILE_CFG, _CACHED_FILE_MTIME
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        try:
+            mtime = CONFIG_FILE.stat().st_mtime
+            if mtime == _CACHED_FILE_MTIME and _CACHED_FILE_CFG:
+                return _CACHED_FILE_CFG
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            _CACHED_FILE_CFG = data if isinstance(data, dict) else {}
+            _CACHED_FILE_MTIME = mtime
+            return _CACHED_FILE_CFG
+        except Exception:  # pragma: no cover
+            return _CACHED_FILE_CFG
+    _CACHED_FILE_CFG = {}
+    _CACHED_FILE_MTIME = -1.0
     return {}
 
 
@@ -126,6 +151,29 @@ GRPC_PORT: int = _settings.miniclassisland_grpc_port
 
 # GPG key file name
 KEY_FILE: str = _settings.miniclassisland_key_file
+
+# SnowLuma OneBot 11 community integration constants
+SNOWLUMA_ONEBOT_URL: str = (
+    _file_cfg.get("snowluma_onebot_url")
+    or _file_cfg.get("snowluma_onebot_http_url")
+    or _settings.snowluma_onebot_url
+).rstrip("/")
+SNOWLUMA_ONEBOT_HTTP_URL: str = SNOWLUMA_ONEBOT_URL
+SNOWLUMA_ONEBOT_TOKEN: str = (
+    _file_cfg.get("snowluma_onebot_token") or _settings.snowluma_onebot_token
+)
+SNOWLUMA_QQ_GROUP_ID: int = int(
+    _file_cfg.get("snowluma_qq_group_id")
+    or _file_cfg.get("community_qq_group_id")
+    or _settings.snowluma_qq_group_id
+)
+COMMUNITY_QQ_GROUP_ID: int = SNOWLUMA_QQ_GROUP_ID
+COMMUNITY_CODE_TTL_SECONDS: int = int(
+    _file_cfg.get("community_code_ttl_seconds") or _settings.community_code_ttl_seconds
+)
+SNOWLUMA_POLL_INTERVAL: float = float(
+    _file_cfg.get("snowluma_poll_interval") or _settings.snowluma_poll_interval
+)
 
 
 def get_allowed_origins() -> list[str]:

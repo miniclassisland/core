@@ -135,9 +135,6 @@ async def get_client_manifest(
             detail="Client IP address mismatch",
         )
 
-    # Ensure default resources exist for this tenant
-    await seed_account_defaults(tenant_id, db, fast_check=True)
-
     # Resolve client-specific profile and account '__default__' fallback in a single query
     stmt = select(ClientProfile).where(
         ClientProfile.account_id == tenant_id,
@@ -145,6 +142,10 @@ async def get_client_manifest(
     )
     prof_rows = (await db.execute(stmt)).scalars().all()
     prof_map = {row.client_id: row for row in prof_rows}
+    if "__default__" not in prof_map:
+        await seed_account_defaults(tenant_id, db, fast_check=True)
+        prof_rows = (await db.execute(stmt)).scalars().all()
+        prof_map = {row.client_id: row for row in prof_rows}
     p = prof_map.get(client_uid) or prof_map.get("__default__") or ClientProfile()
 
     cp = p.class_plan if p.class_plan is not None else "default"

@@ -108,6 +108,11 @@ def test_get_client_ip_from_grpc():
     ctx_empty.peer.return_value = ""
     assert log_util.get_client_ip_from_grpc(ctx_empty) == ""
 
+    assert log_util._extract_grpc_peer_ip("ipv6:[::1]:54321") == "::1"
+    assert log_util._extract_grpc_peer_ip("ipv6:fe80::1:54321") == "fe80::1"
+    assert log_util._extract_grpc_peer_ip("unix:local") == "local"
+    assert log_util._extract_grpc_peer_ip("rawpeer") == "rawpeer"
+
 
 @pytest.mark.asyncio
 async def test_log_middleware():

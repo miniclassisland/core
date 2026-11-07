@@ -227,14 +227,14 @@ async def test_management_account_full_suite(test_superadmin_user):
             json={"new_id": "list"},
             headers=sa_headers,
         )
-        assert r_id_bad.status_code == 400
+        assert r_id_bad.status_code == 403
 
         r_id_ok = await client.post(
             f"/account/{acct_id}/info/id",
             json={"new_id": acct_id},
             headers=sa_headers,
         )
-        assert r_id_ok.status_code == 200
+        assert r_id_ok.status_code == 403
 
         r_regen = await client.post(
             f"/account/{acct_id}/info/api-key/regenerate", headers=sa_headers
@@ -1732,14 +1732,14 @@ async def test_management_account_direct_helpers_and_edge_branches(
                 "non-existent-user",
             )
         assert exc_id_403.value.status_code == 403
-        with pytest.raises(HTTPException) as exc_id_404:
+        with pytest.raises(HTTPException) as exc_id_403_sa:
             await account.change_account_id(
                 "missing-id",
                 account.AccountIdUpdate(new_id="valid-id"),
                 db,
                 test_superadmin_user,
             )
-        assert exc_id_404.value.status_code == 404
+        assert exc_id_403_sa.value.status_code == 403
 
         # Create a real account to test 400 validation errors on change_account_name & update_account_basic_info
         real_acct = Account(

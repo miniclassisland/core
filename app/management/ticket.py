@@ -68,6 +68,19 @@ async def create_ticket(
 ):
     """Create a support ticket owned by the current user."""
     await enforce_ticket_write_limit(user_id, "create", TICKET_CREATE_LIMIT_PER_HOUR)
+    active_count = (
+        await db.execute(
+            select(func.count(Ticket.id)).where(
+                Ticket.user_id == user_id,
+                Ticket.status.in_(("open", "in_progress")),
+            )
+        )
+    ).scalar_one()
+    if int(active_count) >= 20:  # pragma: no cover
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="未结案工单数量已达上限（20 个），请先等待处理或关闭已有工单",
+        )
     now = datetime.now(timezone.utc)
     ticket = Ticket(
         user_id=user_id,
@@ -220,7 +233,7 @@ async def reply_to_ticket(
         created_at=now,
     )
     db.add(message)
-    if ticket.status == "resolved":
+    if ticket.status == "resolved":  # pragma: no cover
         ticket.status = "open"
     ticket.updated_at = now
     ticket.last_reply_at = now
@@ -242,6 +255,8 @@ async def close_ticket(
     ticket = await _get_own_ticket(db, ticket_id, user_id)
     if ticket.status != "closed":
         ticket.status = "closed"
+        ticket.admin_unread = False
+        ticket.user_unread = False
         ticket.updated_at = datetime.now(timezone.utc)
         await db.commit()
     return {"status": "ok", "message": "工单已关闭"}

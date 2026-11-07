@@ -39,6 +39,7 @@ PORT_TAG_MGMT = "MGMT"
 PORT_TAG_ADMIN = "ADMIN"
 PORT_TAG_GRPC = "GRPC"
 PORT_TAG_SYSTEM = "SYSTEM"
+PORT_TAG_GROUP = "GROUP"
 
 
 # ---- Real IP Parsing Utilities ----
@@ -74,14 +75,28 @@ def get_client_ip_from_request(request: Request) -> str:
     return peer_host
 
 
+def _extract_grpc_peer_ip(peer: str) -> str:
+    """Clean and extract IPv4 or IPv6 address from a gRPC peer string."""
+    if not peer:
+        return ""
+    if peer.startswith("ipv4:"):
+        return peer[5:].rsplit(":", 1)[0]
+    if peer.startswith("ipv6:"):
+        inner = peer[5:]
+        if inner.startswith("[") and "]" in inner:
+            return inner[1 : inner.index("]")]
+        return inner.rsplit(":", 1)[0]
+    if ":" in peer:
+        parts = peer.split(":")
+        if len(parts) >= 2:
+            return parts[1]
+    return peer
+
+
 def get_client_ip_from_grpc(context: Any) -> str:
     """Parse real client IP from gRPC call invocation metadata."""
     peer = context.peer() or ""
-    peer_ip = ""
-    if peer and ":" in peer:
-        parts = peer.split(":")
-        if len(parts) >= 2:
-            peer_ip = parts[1]
+    peer_ip = _extract_grpc_peer_ip(peer)
 
     if peer_ip in _TRUSTED_PROXY_HOSTS:
         raw_md = context.invocation_metadata() or ()
@@ -129,6 +144,7 @@ class _ColorFormatter(logging.Formatter):
         PORT_TAG_ADMIN: "\033[35m",  # Magenta
         PORT_TAG_GRPC: "\033[32m",  # Green
         PORT_TAG_SYSTEM: "\033[37m",  # White
+        PORT_TAG_GROUP: "\033[94m",  # Bright Blue
     }
     _LEVEL_COLORS = {
         "DEBUG": "\033[90m",
@@ -219,7 +235,14 @@ def setup_logging(*, level: int = logging.INFO) -> None:
         uv_logger.propagate = True
 
     # Suppress noisy third-party loggers
-    for noisy in ("asyncio", "aiohttp", "sqlalchemy.engine", "grpc"):
+    for noisy in (
+        "asyncio",
+        "aiohttp",
+        "sqlalchemy.engine",
+        "grpc",
+        "httpx",
+        "httpcore",
+    ):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     root.info(

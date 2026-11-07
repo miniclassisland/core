@@ -24,6 +24,9 @@ async def test_slug_and_name_reservations():
         await db.commit()
 
         assert await user_service.is_name_reserved("reserved_word", db) is True
+        assert await user_service.is_name_reserved("admin", db) is True
+        assert await user_service.is_name_reserved("my-casino-org", db) is True
+        assert await user_service.is_name_reserved("org-sex-test", db) is True
         assert await user_service.is_name_reserved("normal_word", db) is False
 
 
@@ -104,8 +107,13 @@ async def test_user_and_account_services():
             username="beta_teacher",
         )
 
-        with pytest.raises(ValueError, match="Account is not active yet"):
-            await user_service.login_user("beta@school.com", "BetaPassword123!", db)
+        # Pending users can log in to User Center before approval
+        pending_token, pending_u, pending_2fa = await user_service.login_user(
+            "beta@school.com", "BetaPassword123!", db
+        )
+        assert pending_token is not None
+        assert pending_u.id == new_user.id
+        assert pending_2fa is False
 
         new_user.role_code = "banned"
         await db.commit()
@@ -170,7 +178,7 @@ async def test_user_and_account_services():
         acc_auto = await user_service.create_account(
             name="Auto Slug School", user_id=owner.id, db=db, slug=None
         )
-        assert acc_auto.slug.startswith("org-")
+        assert acc_auto.slug.startswith("account_")
         assert acc_auto.registration_mode == "pairing"
 
         acc = await user_service.create_account(
@@ -243,15 +251,24 @@ async def test_user_and_account_services():
                 acc.id, owner.id, db, slug="reserved-acct-name"
             )
 
-        with pytest.raises(ValueError, match="Account ID format invalid"):
+        with pytest.raises(
+            PermissionError,
+            match="Account ID is immutable and cannot be modified",
+        ):
             await user_service.update_account_info(acc.id, owner.id, db, new_id="list")
 
-        with pytest.raises(ValueError, match="Account ID is reserved by system"):
+        with pytest.raises(
+            PermissionError,
+            match="Account ID is immutable and cannot be modified",
+        ):
             await user_service.update_account_info(
                 acc.id, owner.id, db, new_id="reserved-acct-name"
             )
 
-        with pytest.raises(ValueError, match="Account ID is already taken"):
+        with pytest.raises(
+            PermissionError,
+            match="Account ID is immutable and cannot be modified",
+        ):
             await user_service.update_account_info(
                 acc.id, owner.id, db, new_id=acc_auto.id
             )
@@ -265,17 +282,16 @@ async def test_user_and_account_services():
             acc.id,
             owner.id,
             db,
-            new_id="alpha-custom-id-2026",
             name="Alpha Custom School",
             is_active=True,
             registration_mode="pairing",
         )
         assert updated_acct is not None
-        assert updated_acct.id == "alpha-custom-id-2026"
+        assert updated_acct.id == acc.id
         assert updated_acct.name == "Alpha Custom School"
         assert updated_acct.registration_mode == "pairing"
 
-        # Non-owner admin cannot change new_id or deactivate account (lines 409, 448)
+        # Non-owner admin cannot change Account ID or deactivate account
         from app.shared.db.models import AccountMember
         from datetime import datetime, timezone
         from unittest.mock import AsyncMock, MagicMock, patch
@@ -284,7 +300,7 @@ async def test_user_and_account_services():
             AccountMember(
                 id="mem-admin-only",
                 user_id=new_user.id,
-                account_id="alpha-custom-id-2026",
+                account_id=acc.id,
                 role_in_account="admin",
                 joined_at=datetime.now(timezone.utc),
             )
@@ -292,10 +308,10 @@ async def test_user_and_account_services():
         await db.commit()
         with pytest.raises(
             PermissionError,
-            match="Only account owner or Super Admin can change Account ID",
+            match="Account ID is immutable and cannot be modified",
         ):
             await user_service.update_account_info(
-                "alpha-custom-id-2026",
+                acc.id,
                 new_user.id,
                 db,
                 new_id="another-id-2026",
@@ -305,7 +321,7 @@ async def test_user_and_account_services():
             match="Only account owner or Super Admin can deactivate account",
         ):
             await user_service.update_account_info(
-                "alpha-custom-id-2026",
+                acc.id,
                 new_user.id,
                 db,
                 is_active=False,
@@ -321,10 +337,8 @@ async def test_user_and_account_services():
             patch("app.shared.runtime.get_session_manager", return_value=mock_sm),
             patch("app.shared.runtime.get_command_servicer", return_value=mock_srv),
         ):
-            await user_service.disconnect_account_clients("alpha-custom-id-2026", db)
-        mock_srv.disconnect_client.assert_awaited_once_with(
-            "alpha-custom-id-2026", "online-c1"
-        )
+            await user_service.disconnect_account_clients(acc.id, db)
+        mock_srv.disconnect_client.assert_awaited_once_with(acc.id, "online-c1")
 
         # When AccountMember exists for a deleted Account row -> returns None
 

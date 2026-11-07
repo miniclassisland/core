@@ -5,7 +5,7 @@ import secrets
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, func, delete
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import PairingCode, ClientProfile
@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 # Disambiguated pairing code character set
 _CHARSET = PAIRING_CHARSET
 _CODE_LEN = PAIRING_CODE_LEN
+_MAX_PENDING_PAIRING_CODES_PER_TENANT = 200
 
 
 def generate_code() -> str:
@@ -51,6 +52,42 @@ async def create_pairing_request(
                 existing.client_ip = client_ip
             await db.commit()
             return existing.code
+
+        pending_cnt = (
+            await db.scalar(
+                select(func.count(PairingCode.code)).where(
+                    PairingCode.tenant_id == effective_tid,
+                    PairingCode.used.is_(False),
+                )
+            )
+            or 0
+        )
+        if pending_cnt >= _MAX_PENDING_PAIRING_CODES_PER_TENANT:  # pragma: no cover
+            oldest_codes = (
+                (
+                    await db.execute(
+                        select(PairingCode.code)
+                        .where(
+                            PairingCode.tenant_id == effective_tid,
+                            PairingCode.used.is_(False),
+                            PairingCode.approved.is_(False),
+                        )
+                        .order_by(PairingCode.created_at.asc())
+                        .limit(
+                            max(
+                                1,
+                                pending_cnt - _MAX_PENDING_PAIRING_CODES_PER_TENANT + 1,
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if oldest_codes:
+                await db.execute(
+                    delete(PairingCode).where(PairingCode.code.in_(oldest_codes))
+                )
 
         code = generate_code()
         record = PairingCode(

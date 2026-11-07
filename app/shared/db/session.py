@@ -1,5 +1,6 @@
 """Database engine and async Session manager."""
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -28,9 +29,20 @@ AsyncSessionLocal = async_sessionmaker(
 
 
 async def init_db() -> None:
-    """Execute DDL to create public tables in the database."""
+    """Execute DDL to create public tables and ensure schema columns in the database."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "postgresql":
+            await conn.execute(
+                text(
+                    "ALTER TABLE community_bindings ADD COLUMN IF NOT EXISTS is_manual BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE community_bindings ADD COLUMN IF NOT EXISTS is_joined BOOLEAN NOT NULL DEFAULT TRUE"
+                )
+            )
 
 
 async def get_db():

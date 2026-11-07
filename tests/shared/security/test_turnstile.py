@@ -32,6 +32,7 @@ class _FakeClient:
         self.calls.append((url, data))
         if self.error:
             raise self.error
+        assert self.response is not None
         return self.response
 
 

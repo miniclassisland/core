@@ -37,28 +37,30 @@ async def process_batch(
     account_id: Optional[str] = None,
 ):
     """Execute a batch of resource operations sequentially and return results."""
-    from app.management.account import validate_payload
+    from app.management.account import _validate_resource_name, validate_payload
 
     acct_id = account_id or req.target_account_id or get_tenant_id_or_default()
     res = []
     try:
         for op in req.operations:
+            clean_name = _validate_resource_name(op.name)
             model = MODEL_MAP.get(op.resource_type)
             if not model:
-                res.append({"action": op.action, "name": op.name, "status": "skipped"})
+                res.append(
+                    {"action": op.action, "name": clean_name, "status": "skipped"}
+                )
                 continue
             record = (
                 await db.execute(
                     select(model).where(
                         model.account_id == acct_id,
-                        model.name == op.name,
+                        model.name == clean_name,
                     )
                 )
             ).scalar_one_or_none()
-            payload = op.payload or {}
-            if isinstance(payload, dict):
-                validate_payload(payload)
-                payload = normalize_resource_payload(op.resource_type, payload)
+            payload = op.payload if isinstance(op.payload, dict) else {}
+            validate_payload(payload)
+            payload = normalize_resource_payload(op.resource_type, payload)
             if op.action == BatchOpType.delete and record:
                 await db.delete(record)
                 from sqlalchemy import delete as sql_delete
@@ -67,12 +69,12 @@ async def process_batch(
                     sql_delete(ResourceHistory).where(
                         ResourceHistory.account_id == acct_id,
                         ResourceHistory.resource_type == op.resource_type,
-                        ResourceHistory.name == op.name,
+                        ResourceHistory.name == clean_name,
                     )
                 )
             elif op.action in [BatchOpType.write, BatchOpType.create]:
                 now = datetime.now(timezone.utc)
-                rc = record or model(account_id=acct_id, name=op.name)
+                rc = record or model(account_id=acct_id, name=clean_name)
                 serialized = json.dumps(payload, ensure_ascii=False)
                 next_ver = (getattr(rc, "version", None) or 0) + 1
                 rc.content = serialized
@@ -83,7 +85,7 @@ async def process_batch(
                     db,
                     account_id=acct_id,
                     resource_type=op.resource_type,
-                    name=op.name,
+                    name=clean_name,
                     version=next_ver,
                     content=serialized,
                     created_at=now,
@@ -104,13 +106,16 @@ async def process_batch(
                     db,
                     account_id=acct_id,
                     resource_type=op.resource_type,
-                    name=op.name,
+                    name=clean_name,
                     version=next_ver,
                     content=serialized,
                     created_at=now,
                 )
-            res.append({"action": op.action, "name": op.name, "status": "success"})
+            res.append({"action": op.action, "name": clean_name, "status": "success"})
         await db.commit()
+        from app.client.get import invalidate_resource_cache
+
+        invalidate_resource_cache(acct_id)
         return {"status": "success", "results": res}
     except HTTPException:
         await db.rollback()

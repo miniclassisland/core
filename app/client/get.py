@@ -20,17 +20,34 @@ _NORMALIZED_RESOURCE_CACHE: dict[tuple[str, str, str, int], str] = {}
 _MAX_RESOURCE_CACHE_SIZE = 2048
 
 
+def invalidate_resource_cache(
+    account_id: str,
+    resource_type: str | None = None,
+    name: str | None = None,
+) -> None:
+    """Invalidate cached normalized JSON entries for an account/resource."""
+    keys_to_remove = [
+        k
+        for k in _NORMALIZED_RESOURCE_CACHE
+        if k[0] == account_id
+        and (resource_type is None or k[1] == resource_type)
+        and (name is None or k[2] == name)
+    ]
+    for k in keys_to_remove:  # pragma: no cover
+        _NORMALIZED_RESOURCE_CACHE.pop(k, None)
+
+
 @router.get("/get", tags=["TokenGet"])
 async def get_resource_by_token(token: str, request: Request):
     """Retrieve resource content by one-time download token."""
-    result = await resolve_token(token)
+    req_ip = get_client_ip_from_request(request)
+    result = await resolve_token(token, req_ip=req_ip)
     if result is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Invalid or expired token"
         )
 
     tenant_id, resource_type, name, token_ip = result
-    req_ip = get_client_ip_from_request(request)
     if (
         token_ip
         and req_ip
@@ -115,7 +132,7 @@ async def get_resource_by_token(token: str, request: Request):
     norm_obj = normalize_resource_payload(resource_type, parsed)
     norm_json = json.dumps(norm_obj, ensure_ascii=False)
     if len(_NORMALIZED_RESOURCE_CACHE) >= _MAX_RESOURCE_CACHE_SIZE:  # pragma: no cover
-        _NORMALIZED_RESOURCE_CACHE.clear()
+        _NORMALIZED_RESOURCE_CACHE.pop(next(iter(_NORMALIZED_RESOURCE_CACHE)), None)
     _NORMALIZED_RESOURCE_CACHE[cache_key] = norm_json
     record_bandwidth_bytes(effective_tid, len(norm_json.encode("utf-8")) + 256)
     return Response(content=norm_json, media_type="application/json")

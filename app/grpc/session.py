@@ -64,8 +64,17 @@ class GPGKeyManager:
             ciphers=[SymmetricKeyAlgorithm.AES256],
         )
         self.private_key, self.public_key_armor = k, str(k.pubkey)
-        with open(self._key_file, "w") as f:
-            f.write(str(k))
+        try:
+            fd = os.open(
+                self._key_file,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            with os.fdopen(fd, "w") as f:
+                f.write(str(k))
+        except OSError:  # pragma: no cover
+            with open(self._key_file, "w") as f:
+                f.write(str(k))
         try:
             os.chmod(self._key_file, 0o600)
         except OSError:  # pragma: no cover
@@ -157,7 +166,7 @@ class SessionManager:
         await rd.hset(key, mapping={"cuid": cuid, "tenant_id": tenant_id})
         await rd.expire(key, SESSION_TTL)
         if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:  # pragma: no cover
-            _LOCAL_SESSION_CACHE.clear()
+            _LOCAL_SESSION_CACHE.pop(next(iter(_LOCAL_SESSION_CACHE)), None)
         _LOCAL_SESSION_CACHE[sid] = (
             time.monotonic() + _LOCAL_SESSION_TTL,
             cuid,
@@ -165,14 +174,25 @@ class SessionManager:
         )
         return sid
 
-    async def validate_session(self, sid: str) -> str | None:
-        """Retrieve corresponding client cuid from session ID."""
+    async def validate_session(
+        self, sid: str, *, tenant_id: str | None = None
+    ) -> str | None:
+        """Retrieve corresponding client cuid from session ID (with optional tenant verification)."""
         if not sid:
             return None
         now = time.monotonic()
         hit = _LOCAL_SESSION_CACHE.get(sid)
         if hit is not None and now < hit[0]:
-            return hit[1]
+            cached_cuid, cached_tid = hit[1], hit[2]
+            if (
+                tenant_id
+                and tenant_id != "default"
+                and cached_tid
+                and cached_tid != "default"
+                and cached_tid != tenant_id
+            ):  # pragma: no cover
+                return None
+            return cached_cuid
         rd = get_redis(REDIS_DB_SESSION)
         data = await rd.hgetall(f"session:{sid}")
         if not data or "cuid" not in data:
@@ -180,8 +200,16 @@ class SessionManager:
         cuid = data["cuid"]
         tid = data.get("tenant_id", "")
         if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:  # pragma: no cover
-            _LOCAL_SESSION_CACHE.clear()
+            _LOCAL_SESSION_CACHE.pop(next(iter(_LOCAL_SESSION_CACHE)), None)
         _LOCAL_SESSION_CACHE[sid] = (now + _LOCAL_SESSION_TTL, cuid, tid)
+        if (
+            tenant_id
+            and tenant_id != "default"
+            and tid
+            and tid != "default"
+            and tid != tenant_id
+        ):  # pragma: no cover
+            return None
         return cuid
 
     async def get_session_tenant(self, sid: str) -> str | None:
@@ -231,9 +259,11 @@ class SessionManager:
         rd = get_redis(REDIS_DB_SESSION)
         key = f"online:{tid}:{cuid}"
         if await rd.exists(key):
-            await rd.expire(key, ONLINE_TTL)
+            pipe = rd.pipeline(transaction=False)
+            pipe.expire(key, ONLINE_TTL)
             if tid:
-                await rd.expire(f"online_set:{tid}", SESSION_TTL)
+                pipe.expire(f"online_set:{tid}", SESSION_TTL)
+            await pipe.execute()
         else:
             await self.set_client_online(tid, cuid, "")
 

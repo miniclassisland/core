@@ -119,7 +119,8 @@ async def set_cached_account(slug: str, account: Account) -> None:
             slug=account.slug,
             api_key=account.api_key,
             is_active=account.is_active,
-            registration_mode=getattr(account, "registration_mode", "pairing") or "pairing",
+            registration_mode=getattr(account, "registration_mode", "pairing")
+            or "pairing",
         ),
     )
     try:
@@ -133,7 +134,9 @@ async def set_cached_account(slug: str, account: Account) -> None:
                     "slug": account.slug,
                     "api_key": account.api_key,
                     "is_active": account.is_active,
-                    "registration_mode": getattr(account, "registration_mode", "pairing")
+                    "registration_mode": getattr(
+                        account, "registration_mode", "pairing"
+                    )
                     or "pairing",
                 }
             ),

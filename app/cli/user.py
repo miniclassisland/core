@@ -2,10 +2,17 @@ import asyncio
 from typing import Optional
 import click
 import typer
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.shared.db.session import AsyncSessionLocal
-from app.shared.db.models import Account, AccountMember, User
+from app.shared.db.models import (
+    Account,
+    AccountMember,
+    CommunityBinding,
+    Ticket,
+    TicketMessage,
+    User,
+)
 from app.shared.security.auth import revoke_all_user_sessions
 from app.shared.security.crypto import hash_password
 from app.shared.services.user import (
@@ -15,6 +22,7 @@ from app.shared.services.user import (
     register_user,
     reject_user,
 )
+from app.shared.utils.community import handle_user_banned_in_community
 
 user_app = typer.Typer(help="User account management", no_args_is_help=True)
 
@@ -173,16 +181,19 @@ def create_user_cmd(
     async def _run():
         async with AsyncSessionLocal() as db:
             try:
+                effective_role = role or "normal"
+                is_approved_role = effective_role not in ("pending", "banned")
                 user = await register_user(
                     email or "",
                     password or "",
                     username or "",
                     db,
                     username=username,
+                    role_code=effective_role,
+                    is_active=is_approved_role,
+                    can_create_account=is_approved_role,
+                    create_default_account=False,
                 )
-                if role != "normal":
-                    user.role_code = role or "normal"
-                    await db.commit()
                 print(f"✅ User {user.username} created")
             except ValueError as exc:
                 print(f"❌ {exc}")
@@ -206,6 +217,18 @@ def delete_user_cmd(
                 print(f"❌ User {username} does not exist")
                 return
             uid = user.id
+            user_ticket_ids = select(Ticket.id).where(Ticket.user_id == uid)
+            await db.execute(
+                delete(TicketMessage).where(
+                    (TicketMessage.ticket_id.in_(user_ticket_ids))
+                    | (TicketMessage.author_id == uid)
+                )
+            )
+            await db.execute(delete(Ticket).where(Ticket.user_id == uid))
+            await db.execute(
+                delete(CommunityBinding).where(CommunityBinding.user_id == uid)
+            )
+            await db.execute(delete(AccountMember).where(AccountMember.user_id == uid))
             await db.delete(user)
             await db.commit()
             await revoke_all_user_sessions(uid)
@@ -232,6 +255,7 @@ def ban_user_cmd(
             user.role_code = "banned"
             await db.commit()
             await revoke_all_user_sessions(user.id)
+            await handle_user_banned_in_community(user, db)
             print(f"✅ User {username} banned")
 
     asyncio.run(_run())
@@ -354,6 +378,8 @@ def set_role_cmd(
             user.role_code = role or "normal"
             await db.commit()
             await revoke_all_user_sessions(user.id)
+            if user.role_code == "banned":  # pragma: no cover
+                await handle_user_banned_in_community(user, db)
             print(f"✅ User {username} role set to {role}")
 
     asyncio.run(_run())

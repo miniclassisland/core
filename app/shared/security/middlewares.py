@@ -114,8 +114,9 @@ async def record_ip_failure_async(ip: str) -> None:
         if is_initialized():
             r = get_redis(REDIS_DB_AUTH)
             key = f"cc:ip_fail:{ip}"
-            await r.incr(key)
-            await r.expire(key, IP_BLOCK_DURATION)
+            cnt = await r.incr(key)
+            if cnt == 1 or cnt == IP_FAILURE_LIMIT:  # pragma: no cover
+                await r.expire(key, IP_BLOCK_DURATION)
     except Exception:  # pragma: no cover
         pass
 
@@ -140,7 +141,11 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         ip = get_client_ip_from_request(request) or "unknown"
-        if await check_ip_blocked_async(ip):
+        path = request.url.path.lower()
+        is_client_delivery_path = path.startswith(
+            ("/api/v1/client/", "/v1/client/", "/get", "/fonts/", "/api/v1/fonts/")
+        )
+        if not is_client_delivery_path and await check_ip_blocked_async(ip):
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={
@@ -151,7 +156,6 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
 
         monitor_global_frequency()
 
-        path = request.url.path.lower()
         if get_cc_state() and any(k in path for k in _CC_PROTECTED_KEYWORDS):
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -162,9 +166,7 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
             )
 
         resp = await call_next(request)
-        if resp.status_code in (401, 403) and not path.startswith(
-            ("/api/v1/client/", "/get")
-        ):
+        if resp.status_code in (401, 403) and not is_client_delivery_path:
             await record_ip_failure_async(ip)
 
         return resp
@@ -186,6 +188,41 @@ _EXEMPT = {
     "/api/oobe/configure",
 }
 _EXEMPT_PREFIXES = ("/user/availability/", "/fonts/", "/api/v1/fonts/")
+
+
+_PENDING_USER_ALLOWED_PATHS = {
+    "/user/info",
+    "/community/code",
+    "/community/status",
+    "/invitation/accept",
+    "/account/invitation/accept",
+    "/account/list",
+    "/account/search",
+    "/token/refresh",
+    "/token/deactivate",
+    "/site/announcement",
+    "/version",
+    "/ticket/unread-count",
+    "/ticket/list",
+}
+
+
+def _is_pending_user_allowed_request(path: str, method: str) -> bool:
+    """Return True if a pending user is permitted to call the given Management API endpoint."""
+    if path in _PENDING_USER_ALLOWED_PATHS:
+        return True
+    path_lower = path.lower()
+    if _ACCOUNT_PATH_RE.match(path) and method in (
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    ):  # pragma: no cover
+        if (
+            not path_lower.endswith(("/create", "/delete", "/command/get-config"))
+            and "/credentials" not in path_lower
+        ):
+            return True
+    return False
 
 
 class AdminAuthMiddleware(BaseHTTPMiddleware):
@@ -224,7 +261,27 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
                 u = (
                     await db.execute(select(User).where(User.id == user_id))
                 ).scalar_one_or_none()
-                if not u or not u.is_active or u.role_code in ("banned", "pending"):
+                if not u or u.role_code == "banned":
+                    return JSONResponse(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        content={
+                            "code": "ERR_PERMISSION_DENIED",
+                            "msg": "User account is inactive or banned",
+                        },
+                    )
+                if u.role_code == "pending":
+                    if (
+                        self._require_superadmin
+                        or not _is_pending_user_allowed_request(path, request.method)
+                    ):
+                        return JSONResponse(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            content={
+                                "code": "ERR_PERMISSION_DENIED",
+                                "msg": "Account is awaiting administrator approval",
+                            },
+                        )
+                elif not u.is_active:  # pragma: no cover
                     return JSONResponse(
                         status_code=status.HTTP_403_FORBIDDEN,
                         content={
@@ -241,6 +298,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
                         },
                     )
             request.state.current_user_id = user_id
+            request.state.current_user = u
             return await call_next(request)
 
         client_ip = get_client_ip_from_request(request)
@@ -255,6 +313,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
 
 _ACCOUNT_PATH_RE = re.compile(r"^/accounts?/([^/]+)(?:/|$)")
 _ACCOUNT_RESERVED_SUBPATHS = {
+    "default",
     "list",
     "search",
     "apply",
@@ -315,6 +374,7 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                 )
             from app.shared.db.models import AccountMember, User
 
+            cached_u = getattr(request.state, "current_user", None)
             async with AsyncSessionLocal() as db:
                 result = await db.execute(
                     select(AccountMember).where(
@@ -323,13 +383,20 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                     )
                 )
                 member = result.scalar_one_or_none()
-                if member:
-                    role_in_account = member.role_in_account or "member"
-                else:
-                    # Allow superadmin to inspect/manage accounts if needed
-                    u = (
+                u = (
+                    cached_u
+                    if isinstance(cached_u, User) and cached_u.id == user_id
+                    else (
                         await db.execute(select(User).where(User.id == user_id))
                     ).scalar_one_or_none()
+                )
+                if member:
+                    if u and u.role_code == "pending":  # pragma: no cover
+                        role_in_account = "viewer"
+                    else:
+                        role_in_account = member.role_in_account or "member"
+                else:
+                    # Allow superadmin to inspect/manage accounts if needed
                     if not u or u.role_code != "superadmin":
                         return JSONResponse(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -345,6 +412,7 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
         try:
             request.state.tenant_id = account.id
             request.state.account_slug = account.slug
+            request.state.current_account = account
             request.state.role_in_account = role_in_account
             return await call_next(request)
         finally:

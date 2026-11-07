@@ -8,7 +8,7 @@ import secrets
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -192,6 +192,9 @@ class ResourceHistory(Base):
     """Immutable historical version snapshots for tenant configuration resource files."""
 
     __tablename__ = "resource_history"
+    __table_args__ = (
+        Index("ix_res_hist_lookup", "account_id", "resource_type", "name", "version"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(
@@ -251,6 +254,7 @@ class AuditLog(Base):
     """Persistent storage for client device event logs."""
 
     __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_account_id", "account_id", "id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     account_id: Mapped[str] = mapped_column(
@@ -380,6 +384,19 @@ class TicketMessage(Base):
     author_role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CommunityBinding(Base):
+    """Binding between a MINI ClassIsland user and a QQ group member."""
+
+    __tablename__ = "community_bindings"
+
+    user_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    qq_uin: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    group_id: Mapped[str] = mapped_column(String(32), default="1131427434")
+    is_manual: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_joined: Mapped[bool] = mapped_column(Boolean, default=True)
+    bound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 # Resource type to database model mapping table

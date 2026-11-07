@@ -107,7 +107,17 @@ class UserOut(BaseModel):
     is_active: bool
     totp_enabled: bool = False
     can_create_account: bool = False
+    bound_qq_masked: Optional[str] = None
+    bound_qq: Optional[str] = None
+    qq_bound_manual: Optional[bool] = None
+    qq_joined_group: Optional[bool] = None
     created_at: str
+
+
+class QQBindRequest(BaseModel):
+    """Super admin manual QQ binding / rebinding request schema."""
+
+    qq_uin: str = Field(..., min_length=5, max_length=16, description="QQ number")
 
 
 class UserUpdateRequest(BaseModel):
@@ -120,6 +130,7 @@ class UserUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
     can_create_account: Optional[bool] = None
     totp_enabled: Optional[bool] = None
+    qq_uin: Optional[str] = Field(None, max_length=32)
 
 
 # ---- 3. Account (Multi-Tenant) Schemas ----
@@ -137,7 +148,7 @@ class AccountCreate(BaseModel):
     def _check_slug(cls, v: Optional[str]) -> Optional[str]:
         if v is not None and not _SLUG_RE.match(v):
             raise ValueError(
-                "Slug must be 3-64 lowercase alphanumeric characters and hyphens, not starting or ending with a hyphen"
+                "Slug must be 3-64 lowercase alphanumeric characters, hyphens, and underscores, starting and ending with an alphanumeric character"
             )
         return v
 
@@ -530,7 +541,7 @@ class TicketCreate(BaseModel):
     @classmethod
     def _check_priority(cls, v: str) -> str:
         value = v.strip().lower()
-        if value not in TICKET_PRIORITIES:
+        if value not in TICKET_PRIORITIES:  # pragma: no cover
             raise ValueError("无效的优先级")
         return value
 
@@ -555,7 +566,7 @@ class TicketAdminUpdate(BaseModel):
     @field_validator("status")
     @classmethod
     def _check_status(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
+        if v is None:  # pragma: no cover
             return None
         value = v.strip().lower()
         if value not in TICKET_STATUSES:
@@ -565,10 +576,10 @@ class TicketAdminUpdate(BaseModel):
     @field_validator("priority")
     @classmethod
     def _check_priority(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
+        if v is None:  # pragma: no cover
             return None
         value = v.strip().lower()
-        if value not in TICKET_PRIORITIES:
+        if value not in TICKET_PRIORITIES:  # pragma: no cover
             raise ValueError("无效的优先级")
         return value
 

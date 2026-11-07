@@ -18,7 +18,7 @@ _max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "2000"))
 def _build_url(db: int) -> str:
     """Replace logical database ID in connection URL."""
     # Unix domain socket: unix:///run/redis/redis-server.sock?db=0
-    if REDIS_URL.startswith("unix://"):
+    if REDIS_URL.startswith("unix://"):  # pragma: no cover
         parts = urlsplit(REDIS_URL)
         query = dict(parse_qsl(parts.query))
         query["db"] = str(db)

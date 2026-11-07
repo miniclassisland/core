@@ -10,10 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.shared.db.session import get_db
 from app.shared.db.models import (
     Account,
+    CommunityBinding,
     User,
     ClientRecord,
     AuditLog,
 )
+from app.shared.utils.community import get_user_community_binding, mask_qq_uin
 from app.shared.schemas.schemas import (
     AccountOut,
     AccountCreate,
@@ -47,7 +49,7 @@ _sa = require_role(100)
 _oobe_lock = asyncio.Lock()
 
 
-def _to_out(user: User) -> UserOut:
+def _to_out(user: User, binding: CommunityBinding | None = None) -> UserOut:
     """Convert User model to response schema."""
     return UserOut(
         id=user.id,
@@ -58,6 +60,10 @@ def _to_out(user: User) -> UserOut:
         is_active=user.is_active,
         totp_enabled=bool(user.totp_enabled),
         can_create_account=user.can_create_account,
+        bound_qq_masked=mask_qq_uin(binding.qq_uin) if binding else None,
+        bound_qq=binding.qq_uin if binding else None,
+        qq_bound_manual=bool(getattr(binding, "is_manual", False)) if binding else None,
+        qq_joined_group=bool(getattr(binding, "is_joined", True)) if binding else None,
         created_at=(
             user.created_at.isoformat()
             if hasattr(user.created_at, "isoformat")
@@ -210,7 +216,14 @@ async def admin_update_account(
     db: AsyncSession = Depends(get_db),
     admin_user: User = Depends(_sa),
 ):
-    """Update account properties (new_id, name, slug, is_active, registration_mode)."""
+    """Update account properties (name, slug, is_active, registration_mode; Account ID is immutable)."""
+    if (
+        body.new_id is not None and body.new_id.strip() != account_id
+    ):  # pragma: no cover
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account ID is immutable and cannot be modified",
+        )
     uid = getattr(admin_user, "id", "")
     if not uid:
         u = (
@@ -224,7 +237,6 @@ async def admin_update_account(
             account_id,
             uid,
             db,
-            new_id=body.new_id,
             name=body.name,
             slug=body.slug,
             is_active=body.is_active,
@@ -232,6 +244,8 @@ async def admin_update_account(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except PermissionError as exc:  # pragma: no cover
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if not acct:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Account not found"
@@ -324,6 +338,70 @@ async def admin_set_account_quota(
     )
 
 
+# ---- 1.5 Global Client Device Listing ----
+
+
+@router.get("/client/list", tags=["Client"])
+@router.get("/clients", tags=["Client"])
+async def admin_list_all_clients(
+    request: Request,
+    account_id: str = "",
+    q: str = "",
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(_sa),
+):
+    """List all registered client devices across all tenant accounts for Super Admin."""
+    from app.management.account import _serialize_clients
+
+    acct_rows = (await db.execute(select(Account))).scalars().all()
+    acct_map = {a.id: a for a in acct_rows}
+
+    stmt = select(ClientRecord).order_by(ClientRecord.registered_at.desc())
+    if account_id.strip():
+        stmt = stmt.where(ClientRecord.account_id == account_id.strip())
+    if q.strip():
+        escaped = (
+            q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        stmt = stmt.where(
+            or_(
+                ClientRecord.uid.ilike(pattern, escape="\\"),
+                ClientRecord.client_id.ilike(pattern, escape="\\"),
+                ClientRecord.display_name.ilike(pattern, escape="\\"),
+                ClientRecord.mac.ilike(pattern, escape="\\"),
+                ClientRecord.ip.ilike(pattern, escape="\\"),
+                ClientRecord.account_id.ilike(pattern, escape="\\"),
+            )
+        )
+    all_records = list((await db.execute(stmt)).scalars().all())
+    if not all_records:  # pragma: no cover
+        return []
+
+    by_acct: dict[str, list[ClientRecord]] = {}
+    for rec in all_records:
+        aid = rec.account_id or "default"
+        by_acct.setdefault(aid, []).append(rec)
+
+    serialized_by_uid: dict[tuple[str, str], dict] = {}
+    for aid, group_records in by_acct.items():
+        items = await _serialize_clients(aid, group_records, request, db)
+        acct_obj = acct_map.get(aid)
+        for item in items:
+            item["account_id"] = aid
+            item["account_name"] = acct_obj.name if acct_obj else aid
+            item["account_slug"] = acct_obj.slug if acct_obj else aid
+            serialized_by_uid[(aid, item["uid"])] = item
+
+    out = []
+    for rec in all_records:
+        aid = rec.account_id or "default"
+        found = serialized_by_uid.get((aid, rec.uid))
+        if found:
+            out.append(found)
+    return out
+
+
 # ---- 2. Pending Approvals ----
 
 
@@ -335,7 +413,20 @@ async def get_pending(
 ):
     """List all pending user registration applications."""
     users = await list_pending_users(db)
-    return [_to_out(u) for u in users]
+    if not users:  # pragma: no cover
+        return []
+    uids = [u.id for u in users]
+    bindings = (
+        (
+            await db.execute(
+                select(CommunityBinding).where(CommunityBinding.user_id.in_(uids))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    bmap = {b.user_id: b for b in bindings}
+    return [_to_out(u, bmap.get(u.id)) for u in users]
 
 
 @router.post(
@@ -356,7 +447,8 @@ async def approve_pending(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found or not in pending state",
         )
-    return _to_out(user)
+    binding = await get_user_community_binding(user_id, db)
+    return _to_out(user, binding)
 
 
 @router.post(
@@ -415,9 +507,7 @@ def _validate_oobe_inputs(
         raise ValueError("Database URL must start with postgresql")
     rd_u = redis_url.strip()
     if not rd_u.startswith(("redis://", "rediss://", "unix://")):
-        raise ValueError(
-            "Redis URL must start with redis://, rediss://, or unix://"
-        )
+        raise ValueError("Redis URL must start with redis://, rediss://, or unix://")
     uname = username.strip().lower()
     if not re.match(r"^[a-z0-9_]{3,64}$", uname):
         raise ValueError(

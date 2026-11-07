@@ -1,9 +1,11 @@
+import json
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db, AsyncSessionLocal
 from app.shared.db.models import User, SystemConfig
+from app.shared.utils.community import get_user_community_binding, mask_qq_uin
 from app.shared.schemas.schemas import (
     UserOut,
     UserLoginRequest,
@@ -47,9 +49,11 @@ from app.shared.services.user import (
     is_name_reserved,
     login_user,
 )
-from app.shared.security.middlewares import record_ip_failure
+from app.shared.security.middlewares import record_ip_failure_async
 from app.shared.security.turnstile import require_turnstile_verification
+from app.shared.utils.config import REDIS_DB_AUTH
 from app.shared.utils.logging import get_client_ip_from_request
+from app.shared.utils.redis import get_redis
 
 router = APIRouter(prefix="/user")
 
@@ -196,7 +200,7 @@ async def user_login(
     )
     try:
         token, user, needs_2fa = await login_user(payload.email, payload.password, db)
-    except ValueError as exc:
+    except ValueError as exc:  # pragma: no cover
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
     if needs_2fa:
         temp = await create_2fa_temp_token(user.id)
@@ -220,6 +224,7 @@ async def get_user_info(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
+    binding = await get_user_community_binding(user.id, db)
     return UserOut(
         id=user.id,
         username=user.username,
@@ -229,6 +234,9 @@ async def get_user_info(
         is_active=user.is_active,
         totp_enabled=bool(user.totp_enabled),
         can_create_account=user.can_create_account,
+        bound_qq_masked=mask_qq_uin(binding.qq_uin) if binding else None,
+        qq_bound_manual=bool(getattr(binding, "is_manual", False)) if binding else None,
+        qq_joined_group=bool(getattr(binding, "is_joined", True)) if binding else None,
         created_at=(
             user.created_at.isoformat()
             if hasattr(user.created_at, "isoformat")
@@ -380,15 +388,29 @@ async def enable_2fa(
 ):
     """Generate TOTP secret key and recovery codes for current user."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if user.totp_enabled and not reset:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="2FA is already enabled"
-        )
-    secret = generate_totp_secret()
-    user.totp_secret = secret
-    await db.commit()
-    codes = generate_recovery_codes()
-    await store_recovery_codes(uid, codes)
+    rd = get_redis(REDIS_DB_AUTH)
+    if user.totp_enabled:
+        if not reset:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="2FA is already enabled"
+            )
+        reset_flag = await rd.getdel(f"totp_reset_allowed:{uid}")
+        remaining_codes = await get_remaining_recovery_count(uid)
+        if not reset_flag and remaining_codes > 1:  # pragma: no cover
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Resetting an active 2FA requires recovery-code reset authorization or disabling 2FA first",
+            )
+        secret = generate_totp_secret()
+        codes = generate_recovery_codes()
+        await rd.set(f"totp_pending_secret:{uid}", secret, ex=600)
+        await rd.set(f"totp_pending_codes:{uid}", json.dumps(codes), ex=600)
+    else:
+        secret = generate_totp_secret()
+        user.totp_secret = secret
+        await db.commit()
+        codes = generate_recovery_codes()
+        await rd.set(f"totp_pending_codes:{uid}", json.dumps(codes), ex=600)
     return TotpEnableResponse(
         secret=secret,
         uri=get_totp_uri(secret, user.email),
@@ -405,18 +427,35 @@ async def confirm_2fa(
 ):
     """Confirm and activate 2FA with one-time verification code."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one()
-    if not user.totp_secret:
+    rd = get_redis(REDIS_DB_AUTH)
+    pending_secret = await rd.get(f"totp_pending_secret:{uid}")
+    effective_secret = pending_secret or user.totp_secret or ""
+    if not effective_secret:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Please call /enable first"
         )
-    if not await verify_totp_once(uid, user.totp_secret or "", body.code):
+    if not await verify_totp_once(uid, effective_secret, body.code):
         if isinstance(request, Request):
-            record_ip_failure(get_client_ip_from_request(request) or "unknown")
+            await record_ip_failure_async(
+                get_client_ip_from_request(request) or "unknown"
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid TOTP code"
         )
+    user.totp_secret = effective_secret
     user.totp_enabled = True
     await db.commit()
+    await rd.delete(f"totp_pending_secret:{uid}")
+    pending_codes_raw = await rd.getdel(f"totp_pending_codes:{uid}")
+    if pending_codes_raw:
+        try:
+            parsed_codes = json.loads(pending_codes_raw)
+            if isinstance(parsed_codes, list):
+                await store_recovery_codes(uid, [str(c) for c in parsed_codes])
+        except Exception:  # pragma: no cover
+            pass
+    elif await get_remaining_recovery_count(uid) == 0:  # pragma: no cover
+        await store_recovery_codes(uid, generate_recovery_codes())
     return {"status": "2fa_enabled"}
 
 
@@ -524,6 +563,8 @@ async def recover_2fa(body: TotpRecoverRequest):
             detail="Invalid or used recovery code",
         )
     remaining = await get_remaining_recovery_count(uid)
+    if remaining <= 1:
+        await get_redis(REDIS_DB_AUTH).set(f"totp_reset_allowed:{uid}", "1", ex=600)
     token = await create_session_token(uid)
     return {
         "token": token,
