@@ -548,3 +548,24 @@ async def test_snowluma_zero_requester_uin_resolution(test_superadmin_user):
     assert results[0]["qq_uin"] == "3177219551"
     assert results[0]["private_sent"] is True
     assert results[0]["user_id"] == test_superadmin_user
+
+    # Also test _send_private_msg fallback to group temporary session when first send_private_msg fails
+    from app.shared.utils.community import _send_private_msg
+
+    pm_attempt = 0
+
+    async def fake_pm_fallback(action: str, params: dict):
+        nonlocal pm_attempt
+        pm_attempt += 1
+        if pm_attempt == 1:
+            return {"status": "failed", "retcode": 100}
+        return {"status": "ok", "retcode": 0}
+
+    ok_fallback = await _send_private_msg(
+        "3177219551",
+        COMMUNITY_QQ_GROUP_ID,
+        "test fallback",
+        onebot_caller=fake_pm_fallback,
+    )
+    assert ok_fallback is True
+    assert pm_attempt == 2

@@ -444,7 +444,10 @@ _CERT_IP_WINDOW_SECONDS = 60.0
 _CERT_IP_MAX_REQ_PER_WINDOW = 20
 _CERT_ID_MIN_SESSION_INTERVAL = 2.0  # Minimum seconds between session minting per cert
 _CERT_MAX_FAILURES_BEFORE_REVOKE = 5
+_QR_POLL_IP_WINDOW_SECONDS = 60.0
+_QR_POLL_IP_MAX_REQ_PER_WINDOW = 180  # Max 180 QR poll requests / min per IP
 _cert_ip_reqs: dict[str, deque[float]] = {}
+_qr_poll_ip_reqs: dict[str, deque[float]] = {}
 _cert_id_last_mint: dict[str, tuple[float, str, int]] = {}
 
 
@@ -507,6 +510,32 @@ def check_cert_ip_rate_limit(client_ip: str) -> bool:
     while dq and dq[0] < cutoff:
         dq.popleft()
     if len(dq) >= _CERT_IP_MAX_REQ_PER_WINDOW:
+        return False
+    dq.append(now)
+    return True
+
+
+def check_qr_poll_ip_rate_limit(client_ip: str) -> bool:
+    """Zero-I/O in-memory rate limiter dedicated to /token/qr-login/poll (returns True if allowed)."""
+    if not client_ip or client_ip in _LOOPBACK_IPS:
+        return True
+    now = time.monotonic()
+    cutoff = now - _QR_POLL_IP_WINDOW_SECONDS
+    if len(_qr_poll_ip_reqs) > 4096 and client_ip not in _qr_poll_ip_reqs:
+        stale_ips = [
+            ip for ip, dq in _qr_poll_ip_reqs.items() if not dq or dq[-1] < cutoff
+        ]
+        for ip in stale_ips:
+            _qr_poll_ip_reqs.pop(ip, None)
+        if len(_qr_poll_ip_reqs) > 4096:
+            _qr_poll_ip_reqs.pop(next(iter(_qr_poll_ip_reqs)), None)
+    dq = _qr_poll_ip_reqs.get(client_ip)
+    if dq is None:
+        dq = deque()
+        _qr_poll_ip_reqs[client_ip] = dq
+    while dq and dq[0] < cutoff:
+        dq.popleft()
+    if len(dq) >= _QR_POLL_IP_MAX_REQ_PER_WINDOW:
         return False
     dq.append(now)
     return True

@@ -35,7 +35,8 @@ _CC_PROTECTED_KEYWORDS = (
     "/user/2fa/",
     "/user/certificate/",
     "/token/certificate/",
-    "/token/qr-login/",
+    "/token/qr-login/create",
+    "/token/qr-login/authorize",
     "/oobe/",
 )
 

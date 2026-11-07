@@ -138,7 +138,11 @@ async def test_login_security_certificate_lifecycle_and_flood_protection(
         )
         assert r_redeem_again.status_code == 401
 
-        # 5. Request <= 1h session token using certificate
+        # Request <= 1h session token using certificate (also test last_used_at update when >5s old)
+        rd = get_redis(REDIS_DB_AUTH)
+        await rd.hset(
+            f"{_CERT_PREFIX}:{cert['cert_id']}", mapping={"last_used_at": "0"}
+        )
         r_sess = await client.post(
             "/token/certificate/session",
             json={
@@ -286,3 +290,347 @@ async def test_login_security_certificate_lifecycle_and_flood_protection(
         # Polling again after token consumption returns expired
         r_qr_poll_3 = await client.get(f"/token/qr-login/poll?code={qr_data['code']}")
         assert r_qr_poll_3.json()["status"] == "expired"
+
+
+@pytest.mark.asyncio
+async def test_certificate_and_qr_login_edge_branches(test_superadmin_user):
+    """Cover remaining edge branches in app/management/token.py, app/management/user.py, and app/shared/security/auth.py."""
+    import os
+    import time
+    from collections import deque
+    import pyotp
+    from app.shared.db.models import User
+    from app.shared.db.session import AsyncSessionLocal
+    from app.shared.security import auth
+    from app.shared.utils.config import REDIS_DB_AUTH
+    from app.shared.utils.redis import get_redis
+
+    # 1. Secret key env branch & stateless cert verification edge cases
+    old_sk = os.environ.get("SECRET_KEY")
+    os.environ["SECRET_KEY"] = "custom-test-secret-key-for-hmac"
+    assert auth._get_cert_mac_key() == b"custom-test-secret-key-for-hmac"
+    if old_sk is None:
+        os.environ.pop("SECRET_KEY", None)
+    else:
+        os.environ["SECRET_KEY"] = old_sk
+
+    assert auth._verify_cert_secret_stateless("", "sec") is False
+    assert auth._verify_cert_secret_stateless("not-a-uuid", "sec") is False
+    assert (
+        auth._verify_cert_secret_stateless(
+            "00000000-0000-0000-0000-000000000000", "bad-secret"
+        )
+        is False
+    )
+
+    # 2. Rate limiter table eviction & window cleanup for both cert and qr_poll
+    auth._cert_ip_reqs.clear()
+    now_m = time.monotonic()
+    for i in range(4098):
+        auth._cert_ip_reqs[f"10.10.{i // 256}.{i % 256}"] = deque([now_m - 100.0])
+    assert auth.check_cert_ip_rate_limit("203.0.113.1") is True
+    auth._cert_ip_reqs.clear()
+    for i in range(4098):
+        auth._cert_ip_reqs[f"10.11.{i // 256}.{i % 256}"] = deque([now_m])
+    auth._cert_ip_reqs["203.0.113.2"] = deque([now_m - 100.0, now_m])
+    assert auth.check_cert_ip_rate_limit("203.0.113.3") is True
+    assert auth.check_cert_ip_rate_limit("203.0.113.2") is True
+    auth._cert_ip_reqs.clear()
+
+    auth._qr_poll_ip_reqs.clear()
+    for i in range(4098):
+        auth._qr_poll_ip_reqs[f"10.12.{i // 256}.{i % 256}"] = deque([now_m - 100.0])
+    assert auth.check_qr_poll_ip_rate_limit("203.0.113.10") is True
+    auth._qr_poll_ip_reqs.clear()
+    for i in range(4098):
+        auth._qr_poll_ip_reqs[f"10.13.{i // 256}.{i % 256}"] = deque([now_m])
+    auth._qr_poll_ip_reqs["203.0.113.11"] = deque([now_m - 100.0, now_m])
+    assert auth.check_qr_poll_ip_rate_limit("203.0.113.12") is True
+    assert auth.check_qr_poll_ip_rate_limit("203.0.113.11") is True
+    auth._qr_poll_ip_reqs["203.0.113.13"] = deque(
+        [now_m] * auth._QR_POLL_IP_MAX_REQ_PER_WINDOW
+    )
+    assert auth.check_qr_poll_ip_rate_limit("203.0.113.13") is False
+    auth._qr_poll_ip_reqs.clear()
+
+    # 3. Direct Redis edge cases for redeem / verify / rotate / list / revoke / qr_login
+    rd = get_redis(REDIS_DB_AUTH)
+    assert await auth.redeem_certificate_exchange_code("bad") is None
+
+    # Replay on exchange code (used > 1)
+    ex_1 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    await rd.hset(f"{auth._CERT_EXCHANGE_PREFIX}:{ex_1['code']}", mapping={"used": "1"})
+    assert await auth.redeem_certificate_exchange_code(ex_1["code"]) is None
+
+    # Missing cert_data on exchange code
+    ex_2 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    await rd.delete(f"{auth._CERT_PREFIX}:{ex_2['cert_id']}")
+    assert await auth.redeem_certificate_exchange_code(ex_2["code"]) is None
+
+    # Expired cert_data on exchange code
+    ex_3 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    await rd.hset(
+        f"{auth._CERT_PREFIX}:{ex_3['cert_id']}", mapping={"expires_at": "100"}
+    )
+    assert await auth.redeem_certificate_exchange_code(ex_3["code"]) is None
+
+    # Verify cert: expired, hash mismatch & auto-revoke on 5 failures
+    ex_4 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    c4 = await auth.redeem_certificate_exchange_code(ex_4["code"])
+    assert c4 is not None
+    await rd.hset(f"{auth._CERT_PREFIX}:{c4['cert_id']}", mapping={"expires_at": "100"})
+    assert await auth.verify_login_certificate(c4["cert_id"], c4["cert_secret"]) is None
+
+    ex_5 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    c5 = await auth.redeem_certificate_exchange_code(ex_5["code"])
+    assert c5 is not None
+    await rd.hset(
+        f"{auth._CERT_PREFIX}:{c5['cert_id']}",
+        mapping={"secret_hash": "0" * 64, "fail_count": "4"},
+    )
+    assert await auth.verify_login_certificate(c5["cert_id"], c5["cert_secret"]) is None
+
+    # Rotate cert error branches: stateless fail, missing in Redis, expired, secret_hash mismatch
+    with pytest.raises(ValueError):
+        await auth.rotate_login_certificate("bad-id", "bad-sec")
+
+    ex_6 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    c6 = await auth.redeem_certificate_exchange_code(ex_6["code"])
+    assert c6 is not None
+    await rd.hset(f"{auth._CERT_PREFIX}:{c6['cert_id']}", mapping={"expires_at": "100"})
+    with pytest.raises(ValueError):
+        await auth.rotate_login_certificate(c6["cert_id"], c6["cert_secret"])
+    with pytest.raises(ValueError):
+        await auth.rotate_login_certificate(c6["cert_id"], c6["cert_secret"])
+
+    ex_7 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    c7 = await auth.redeem_certificate_exchange_code(ex_7["code"])
+    assert c7 is not None
+    await rd.hset(
+        f"{auth._CERT_PREFIX}:{c7['cert_id']}", mapping={"secret_hash": "0" * 64}
+    )
+    with pytest.raises(ValueError):
+        await auth.rotate_login_certificate(c7["cert_id"], c7["cert_secret"])
+
+    # List & revoke certificates edge cases
+    await auth.revoke_all_user_certificates(test_superadmin_user)
+    assert await auth.list_user_certificates(test_superadmin_user) == []
+
+    ex_8 = await auth.issue_login_certificate_and_exchange_code(test_superadmin_user)
+    await rd.hset(
+        f"{auth._CERT_PREFIX}:{ex_8['cert_id']}", mapping={"expires_at": "100"}
+    )
+    await rd.sadd(f"{auth._USER_CERTS_PREFIX}:{test_superadmin_user}", "ghost-cert-id")
+    assert await auth.list_user_certificates(test_superadmin_user) == []
+    assert await auth.revoke_user_certificate(test_superadmin_user, "") is False
+    assert (
+        await auth.revoke_user_certificate(test_superadmin_user, "non-existent")
+        is False
+    )
+
+    # QR login edge cases
+    assert (
+        await auth.authorize_qr_login_challenge("bad-code", test_superadmin_user)
+        is False
+    )
+    assert await auth.poll_qr_login_challenge("bad-code") == {"status": "expired"}
+
+    qr_exp = await auth.create_qr_login_challenge("127.0.0.1")
+    await rd.hset(
+        f"{auth._QR_LOGIN_PREFIX}:{qr_exp['code']}", mapping={"expires_at": "100"}
+    )
+    assert (
+        await auth.authorize_qr_login_challenge(qr_exp["code"], test_superadmin_user)
+        is False
+    )
+
+    qr_exp2 = await auth.create_qr_login_challenge("127.0.0.1")
+    await rd.hset(
+        f"{auth._QR_LOGIN_PREFIX}:{qr_exp2['code']}", mapping={"expires_at": "100"}
+    )
+    assert await auth.poll_qr_login_challenge(qr_exp2["code"]) == {"status": "expired"}
+
+    qr_missing = await auth.create_qr_login_challenge("127.0.0.1")
+    await rd.delete(f"{auth._QR_LOGIN_PREFIX}:{qr_missing['code']}")
+    assert (
+        await auth.authorize_qr_login_challenge(
+            qr_missing["code"], test_superadmin_user
+        )
+        is False
+    )
+
+    # 4. HTTP endpoint edge cases in app/management/token.py and app/management/user.py
+    sid = await auth.create_session_token(test_superadmin_user)
+    headers = {"Authorization": f"Bearer {sid}"}
+    transport = ASGITransport(app=management_app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Mint cache > 4096 clear branch
+        ex_m = await auth.issue_login_certificate_and_exchange_code(
+            test_superadmin_user
+        )
+        cm = await auth.redeem_certificate_exchange_code(ex_m["code"])
+        assert cm is not None
+        for i in range(4098):
+            auth._cert_id_last_mint[f"cid-{i}"] = (0.0, "tok", 3600)
+        r_m = await client.post(
+            "/token/certificate/session",
+            json={"cert_id": cm["cert_id"], "cert_secret": cm["cert_secret"]},
+        )
+        assert r_m.status_code == 200
+
+        # Invalid rotate -> 401
+        r_rot_401 = await client.post(
+            "/token/certificate/rotate",
+            json={"cert_id": cm["cert_id"], "cert_secret": "invalid"},
+        )
+        assert r_rot_401.status_code == 401
+
+        # QR authorize via certificate & invalid QR authorize (401 and 400)
+        qr_c = await auth.create_qr_login_challenge()
+        r_qr_cert = await client.post(
+            "/token/qr-login/authorize",
+            json={
+                "code": qr_c["code"],
+                "cert_id": cm["cert_id"],
+                "cert_secret": cm["cert_secret"],
+            },
+        )
+        assert r_qr_cert.status_code == 200
+
+        # Authorizing an already-authorized code -> 400
+        r_qr_400 = await client.post(
+            "/token/qr-login/authorize",
+            headers=headers,
+            json={"code": qr_c["code"]},
+        )
+        assert r_qr_400.status_code == 400
+
+        # Authorizing without token or valid cert -> 401
+        r_qr_401 = await client.post(
+            "/token/qr-login/authorize",
+            json={"code": qr_c["code"], "cert_id": "bad", "cert_secret": "bad"},
+        )
+        assert r_qr_401.status_code == 401
+
+        # Rate limit 429 branches on redeem, rotate, qr-login/create, qr-login/poll, qr-login/authorize
+        rl_ip = "198.51.100.250"
+        rl_headers = {"X-Real-IP": rl_ip}
+        auth._cert_ip_reqs[rl_ip] = deque([time.monotonic()] * 25)
+        auth._qr_poll_ip_reqs[rl_ip] = deque([time.monotonic()] * 200)
+
+        assert (
+            await client.post(
+                "/token/certificate/redeem", headers=rl_headers, json={"code": "x"}
+            )
+        ).status_code == 429
+        assert (
+            await client.post(
+                "/token/certificate/rotate",
+                headers=rl_headers,
+                json={"cert_id": "x", "cert_secret": "y"},
+            )
+        ).status_code == 429
+        assert (
+            await client.post("/token/qr-login/create", headers=rl_headers)
+        ).status_code == 429
+        assert (
+            await client.get("/token/qr-login/poll?code=x", headers=rl_headers)
+        ).status_code == 429
+        assert (
+            await client.post(
+                "/token/qr-login/authorize", headers=rl_headers, json={"code": "x"}
+            )
+        ).status_code == 429
+        auth._cert_ip_reqs.clear()
+        auth._qr_poll_ip_reqs.clear()
+
+        # Revoke all & revoke non-existent (404)
+        r_rev_all = await client.post(
+            "/user/certificate/revoke",
+            headers=headers,
+            json={"revoke_all": True},
+        )
+        assert r_rev_all.status_code == 200
+        r_rev_404 = await client.post(
+            "/user/certificate/revoke",
+            headers=headers,
+            json={"cert_id": "non-existent-id"},
+        )
+        assert r_rev_404.status_code == 404
+
+        # 2FA branches in /user/certificate/issue and banned user branch
+        totp_sec = pyotp.random_base32()
+        from app.shared.security.crypto import store_recovery_codes
+
+        async with AsyncSessionLocal() as db:
+            u = await db.get(User, test_superadmin_user)
+            assert u is not None
+            u.totp_enabled = True
+            u.totp_secret = totp_sec
+            await db.commit()
+        await store_recovery_codes(test_superadmin_user, ["RECOV-1234"])
+
+        # Missing 2FA code -> 400
+        assert (
+            await client.post(
+                "/user/certificate/issue",
+                headers=headers,
+                json={"password": "SuperAdmin123!"},
+            )
+        ).status_code == 400
+
+        # Invalid TOTP -> 401
+        assert (
+            await client.post(
+                "/user/certificate/issue",
+                headers=headers,
+                json={"password": "SuperAdmin123!", "totp_code": "000000"},
+            )
+        ).status_code == 401
+
+        # Valid TOTP -> 200
+        valid_totp = pyotp.TOTP(totp_sec).now()
+        assert (
+            await client.post(
+                "/user/certificate/issue",
+                headers=headers,
+                json={"password": "SuperAdmin123!", "totp_code": valid_totp},
+            )
+        ).status_code == 200
+
+        # Invalid recovery code -> 401
+        assert (
+            await client.post(
+                "/user/certificate/issue",
+                headers=headers,
+                json={"password": "SuperAdmin123!", "recovery_code": "WRONG-CODE"},
+            )
+        ).status_code == 401
+
+        # Valid recovery code -> 200
+        assert (
+            await client.post(
+                "/user/certificate/issue",
+                headers=headers,
+                json={"password": "SuperAdmin123!", "recovery_code": "RECOV-1234"},
+            )
+        ).status_code == 200
+
+        # Inactive user -> 403 (both via endpoint and direct call)
+        from app.management.user import CertificateIssueRequest, issue_login_certificate
+        from fastapi import HTTPException
+
+        async with AsyncSessionLocal() as db:
+            u = await db.get(User, test_superadmin_user)
+            assert u is not None
+            u.is_active = False
+            await db.commit()
+            with pytest.raises(HTTPException) as exc_info:
+                await issue_login_certificate(
+                    CertificateIssueRequest(password="SuperAdmin123!"),
+                    None,  # type: ignore[arg-type]
+                    uid=test_superadmin_user,
+                    db=db,
+                )
+            assert exc_info.value.status_code == 403

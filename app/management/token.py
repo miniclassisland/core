@@ -11,6 +11,7 @@ from app.shared.security.auth import (
     verify_login_certificate,
     rotate_login_certificate,
     check_cert_ip_rate_limit,
+    check_qr_poll_ip_rate_limit,
     create_qr_login_challenge,
     authorize_qr_login_challenge,
     poll_qr_login_challenge,
@@ -233,10 +234,10 @@ async def create_web_qr_login(request: Request):
 async def poll_web_qr_login(request: Request, code: str):
     """Poll status of a reverse Web QR login challenge."""
     client_ip = get_client_ip_from_request(request) or "unknown"
-    if not check_cert_ip_rate_limit(client_ip):
+    if not check_qr_poll_ip_rate_limit(client_ip):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="QR login rate limit exceeded",
+            detail="QR login poll rate limit exceeded",
         )
     return await poll_qr_login_challenge(code)
 

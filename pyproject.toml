@@ -51,7 +51,7 @@ packages = ["app"]
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "-W ignore::DeprecationWarning:imghdr"
+addopts = "-W ignore::DeprecationWarning:imghdr --cov=app --cov-report=term-missing"
 filterwarnings = [
     "error",
     "ignore::cryptography.utils.CryptographyDeprecationWarning",
