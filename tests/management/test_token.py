@@ -117,10 +117,10 @@ async def test_login_security_certificate_lifecycle_and_flood_protection(
         )
         deeplink = issue_data["deeplink"]
 
-        # 3. Redeem using full DeepLink URI
+        # 3. Redeem using full DeepLink URI (also verify exchange_code alias compatibility)
         r_redeem = await client.post(
             "/token/certificate/redeem",
-            json={"code": deeplink},
+            json={"exchange_code": deeplink},
         )
         assert r_redeem.status_code == 200
         red_data = r_redeem.json()

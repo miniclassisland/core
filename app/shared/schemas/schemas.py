@@ -642,7 +642,14 @@ class CertificateIssueRequest(BaseModel):
 class CertificateRedeemRequest(BaseModel):
     """Redeem a 5-minute exchange code or DeepLink URI for a Login Security Certificate."""
 
-    code: str = Field(..., min_length=1, max_length=512)
+    code: Optional[str] = Field(default=None, max_length=512)
+    exchange_code: Optional[str] = Field(default=None, max_length=512)
+    deeplink: Optional[str] = Field(default=None, max_length=512)
+
+    @property
+    def resolved_code(self) -> str:
+        """Return whichever code field the client provided."""
+        return (self.code or self.exchange_code or self.deeplink or "").strip()
 
 
 class CertificateSessionRequest(BaseModel):

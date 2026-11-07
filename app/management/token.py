@@ -106,7 +106,7 @@ async def redeem_certificate(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Certificate endpoint rate limit exceeded",
         )
-    cert = await redeem_certificate_exchange_code(body.code)
+    cert = await redeem_certificate_exchange_code(body.resolved_code)
     if not cert:
         await record_ip_failure_async(client_ip)
         raise HTTPException(
