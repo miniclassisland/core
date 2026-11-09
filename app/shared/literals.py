@@ -154,6 +154,7 @@ CONFIG_TYPE_NAMES: dict[int, str] = {
     4: "CurrentAutomation",
     5: "Logs",
     6: "PluginList",
+    100: "ExtendCommand",
 }
 
 

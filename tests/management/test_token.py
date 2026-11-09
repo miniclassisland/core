@@ -433,6 +433,13 @@ async def test_certificate_and_qr_login_edge_branches(test_superadmin_user):
         await auth.authorize_qr_login_challenge("bad-code", test_superadmin_user)
         is False
     )
+    valid_fmt_wrong_sig = f"{'a' * 43}.{'0' * 64}"
+    assert (
+        await auth.authorize_qr_login_challenge(
+            valid_fmt_wrong_sig, test_superadmin_user
+        )
+        is False
+    )
     assert await auth.poll_qr_login_challenge("bad-code") == {"status": "expired"}
 
     qr_exp = await auth.create_qr_login_challenge("127.0.0.1")

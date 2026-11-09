@@ -256,6 +256,11 @@ class ClientManifest(BaseModel):
     ServerKind: int = 1
     OrganizationName: str = "MINI ClassIsland Server"
     CoreVersion: str = "2.0.0.0"
+    ServerFlavor: str = "miniclassisland"
+    ServerSoftware: str = "MINI ClassIsland"
+    MiniClassIsland: bool = True
+    ClientDisplayName: str = ""
+    ClientIdentity: str = ""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -342,6 +347,21 @@ class NotificationPayload(BaseModel):
 
 class BroadcastNotificationPayload(NotificationPayload):
     """Broadcast or multi-target desktop notification payload."""
+
+    target_uids: Optional[List[str]] = None
+    client_uids: Optional[List[str]] = None
+
+
+class ExtendCommandRequest(BaseModel):
+    """Signed extended management command dispatch request."""
+
+    action: str = Field(..., min_length=1, max_length=128)
+    payload: Optional[Dict[str, Any]] = None
+    ttl_seconds: int = Field(default=120, ge=10, le=600)
+
+
+class BroadcastExtendCommandRequest(ExtendCommandRequest):
+    """Broadcast or multi-target signed extended management command dispatch request."""
 
     target_uids: Optional[List[str]] = None
     client_uids: Optional[List[str]] = None

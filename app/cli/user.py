@@ -13,7 +13,10 @@ from app.shared.db.models import (
     TicketMessage,
     User,
 )
-from app.shared.security.auth import revoke_all_user_sessions
+from app.shared.security.auth import (
+    authorize_qr_login_challenge,
+    revoke_all_user_sessions,
+)
 from app.shared.security.crypto import hash_password
 from app.shared.services.user import (
     approve_user,
@@ -387,5 +390,42 @@ def set_role_cmd(
             if user.role_code == "banned":  # pragma: no cover
                 await handle_user_banned_in_community(user, db)
             print(f"✅ User {username} role set to {role}")
+
+    asyncio.run(_run())
+
+
+@user_app.command("login")
+def login_user_qr_cmd(
+    username: Optional[str] = typer.Argument(None, help="Username or email"),
+    qr_code_or_uri: Optional[str] = typer.Argument(
+        None,
+        help="QR login deeplink (miniclassisland://qr-login/...) or challenge code",
+    ),
+):
+    """Authorize a Web QR login session directly for the specified user account."""
+    _require_args(username=username, qr_code_or_uri=qr_code_or_uri)
+
+    async def _run():
+        async with AsyncSessionLocal() as db:
+            user = (
+                await db.execute(
+                    select(User).where(
+                        (User.username == username) | (User.email == username)
+                    )
+                )
+            ).scalar_one_or_none()
+            if not user:
+                print(f"❌ User {username} does not exist")
+                return
+            if not user.is_active or user.role_code in ("banned", "pending"):
+                print(f"❌ User {user.username} is not active")
+                return
+            ok = await authorize_qr_login_challenge(
+                qr_code_or_uri or "", user.id, skip_stateless_verify=True
+            )
+            if not ok:
+                print("❌ QR login code invalid, expired, or already used")
+                return
+            print(f"✅ User {user.username} logged in to QR session")
 
     asyncio.run(_run())

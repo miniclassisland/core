@@ -62,6 +62,11 @@ def test_gpg_key_manager_lifecycle():
 
         res = km3.decrypt("INVALID ENCRYPTED DATA BLOB")
         assert res is None
+
+        sig = km3.sign_detached(
+            "MCI-EXTCMD-V1|1|req-1|uid-1|100|200|hardware.get_info|e3b0"
+        )
+        assert "BEGIN PGP SIGNATURE" in sig
     finally:
         if os.path.exists(temp_key_file):
             os.remove(temp_key_file)
@@ -85,6 +90,23 @@ async def test_session_manager_flows():
         sm._private_key = None
         assert sm.decrypt_challenge("any") is None
         sm._private_key = orig_pk
+
+        env_none = sm.build_signed_command_envelope(
+            "req-1", cuid, "Hardware.Get_Info", None, 120
+        )
+        assert env_none["action"] == "hardware.get_info"
+        assert env_none["payloadJson"] == "{}"
+        assert "BEGIN PGP SIGNATURE" in env_none["signature"]
+
+        env_dict = sm.build_signed_command_envelope(
+            "req-2", cuid, "profile.switch", {"fileName": "default.json"}, 60
+        )
+        assert '"fileName"' in env_dict["payloadJson"]
+
+        env_str = sm.build_signed_command_envelope(
+            "req-3", cuid, "remote.screenshot", '{"maxWidth":1280}', 60
+        )
+        assert env_str["payloadJson"] == '{"maxWidth":1280}'
 
         challenge = "challenge-plain-text-12345"
         await sm.store_pending_handshake(

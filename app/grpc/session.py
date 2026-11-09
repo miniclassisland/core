@@ -3,6 +3,8 @@
 Contains key pair management (PGPy), handshake challenge state, heartbeat online state, and session state.
 """
 
+import hashlib
+import json
 import os
 import secrets
 import time
@@ -59,7 +61,7 @@ class GPGKeyManager:
         u = pgpy.PGPUID.new("MINI ClassIsland Server", comment="MINI ClassIsland")
         k.add_uid(
             u,
-            usage={KeyFlags.EncryptCommunications},
+            usage={KeyFlags.EncryptCommunications, KeyFlags.Sign},
             hashes=[HashAlgorithm.SHA256],
             ciphers=[SymmetricKeyAlgorithm.AES256],
         )
@@ -90,6 +92,18 @@ class GPGKeyManager:
         except Exception as e:
             logger.error("GPG decryption failed: %s", e)
             return None
+
+    def sign_detached(self, text: str) -> str:
+        """Sign canonical text with server private key and return ASCII-armored detached signature."""
+        if self.private_key is None:  # pragma: no cover
+            return ""
+        try:
+            pk: Any = self.private_key
+            sig = pk.sign(text.encode("utf-8"), hash=HashAlgorithm.SHA256)
+            return str(sig)
+        except Exception as e:  # pragma: no cover
+            logger.error("GPG signing failed: %s", e)
+            return ""
 
 
 # ---- gRPC Peer IP Parser ----
@@ -129,6 +143,43 @@ class SessionManager:
         if self._private_key is None:
             return None
         return self._km.decrypt(token)
+
+    def build_signed_command_envelope(
+        self,
+        request_guid: str,
+        client_uid: str,
+        action: str,
+        payload: dict[str, Any] | str | None = None,
+        ttl_seconds: int = 120,
+    ) -> dict[str, Any]:
+        """Build a PGP-signed Extended Management Command envelope matching CommandSignatureVerifier."""
+        if payload is None:
+            payload_json = "{}"
+        elif isinstance(payload, str):
+            payload_json = payload
+        else:
+            payload_json = json.dumps(payload, ensure_ascii=False)
+        issued_at = int(time.time())
+        expires_at = issued_at + max(10, min(int(ttl_seconds), 600))
+        norm_guid = request_guid.strip()
+        norm_uid = client_uid.strip()
+        norm_action = action.strip().lower()
+        payload_hash = hashlib.sha256(payload_json.encode("utf-8")).hexdigest().lower()
+        canonical_text = (
+            f"MCI-EXTCMD-V1|1|{norm_guid}|{norm_uid}|"
+            f"{issued_at}|{expires_at}|{norm_action}|{payload_hash}"
+        )
+        signature = self._km.sign_detached(canonical_text)
+        return {
+            "version": 1,
+            "requestGuid": norm_guid,
+            "clientUid": norm_uid,
+            "issuedAtUtc": issued_at,
+            "expiresAtUtc": expires_at,
+            "action": norm_action,
+            "payloadJson": payload_json,
+            "signature": signature,
+        }
 
     async def store_pending_handshake(
         self, tenant_id: str, cuid: str, token: str, peer_ip: str = ""

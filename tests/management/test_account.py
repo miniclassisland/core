@@ -979,6 +979,18 @@ async def test_management_account_full_suite(test_superadmin_user):
         )
         mock_sm.is_client_online = AsyncMock(return_value=True)
         mock_sm.set_client_offline = AsyncMock()
+        mock_sm.build_signed_command_envelope = MagicMock(
+            return_value={
+                "version": 1,
+                "requestGuid": "req-ext-1",
+                "clientUid": "dev-1",
+                "issuedAtUtc": 1700000000,
+                "expiresAtUtc": 1700000120,
+                "action": "hardware.get_info",
+                "payloadJson": "{}",
+                "signature": "-----BEGIN PGP SIGNATURE-----\nTEST\n-----END PGP SIGNATURE-----",
+            }
+        )
 
         mock_servicer = MagicMock()
         mock_servicer.send_command = AsyncMock(return_value=True)
@@ -1173,6 +1185,45 @@ async def test_management_account_full_suite(test_superadmin_user):
             assert r_get_cfg.status_code == 200
             req_guid = r_get_cfg.json()["request_guid"]
 
+            # Extended management command & broadcast
+            r_ext_bad = await client.post(
+                f"/account/{acct_id}/client/dev-1/command/extend",
+                json={"action": "invalid.action"},
+                headers=sa_headers,
+            )
+            assert r_ext_bad.status_code == 400
+
+            r_ext_ok = await client.post(
+                f"/account/{acct_id}/client/dev-1/command/extend",
+                json={"action": "hardware.get_info", "payload": {}},
+                headers=sa_headers,
+            )
+            assert r_ext_ok.status_code == 200
+            assert r_ext_ok.json()["status"] == "command_queued"
+
+            r_bext_bad = await client.post(
+                f"/account/{acct_id}/client/broadcast/extend",
+                json={"action": "invalid.action"},
+                headers=sa_headers,
+            )
+            assert r_bext_bad.status_code == 400
+
+            r_bext_ok = await client.post(
+                f"/account/{acct_id}/client/broadcast/extend",
+                json={"action": "profile.reload"},
+                headers=sa_headers,
+            )
+            assert r_bext_ok.status_code == 200
+            assert r_bext_ok.json()["sent_count"] == 1
+
+            r_bext_targets = await client.post(
+                f"/account/{acct_id}/broadcast/extend",
+                json={"action": "profile.reload", "target_uids": ["dev-1", "  "]},
+                headers=sa_headers,
+            )
+            assert r_bext_targets.status_code == 200
+            assert r_bext_targets.json()["total_targets"] == 1
+
             # Offline command delivery branches
             mock_servicer.send_command = AsyncMock(return_value=False)
             assert (
@@ -1251,6 +1302,22 @@ async def test_management_account_full_suite(test_superadmin_user):
                     headers=sa_headers,
                 )
             ).json()["status"] == "error"
+            assert (
+                await client.post(
+                    f"/account/{acct_id}/client/dev-1/command/extend",
+                    json={"action": "hardware.get_info"},
+                    headers=sa_headers,
+                )
+            ).json()["status"] == "error"
+            assert (
+                await client.post(
+                    f"/account/{acct_id}/client/broadcast/extend",
+                    json={"action": "hardware.get_info"},
+                    headers=sa_headers,
+                )
+            ).json()["status"] == "error"
+            assert account._parse_json_safe('{"ok": true}') == {"ok": True}
+            assert account._parse_json_safe("{bad") is None
 
         # Audit logs list, filter, clear, and credentials/encode
         assert (

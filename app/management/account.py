@@ -45,6 +45,8 @@ from app.shared.schemas.schemas import (
     StatusResponse,
     NotificationPayload,
     BroadcastNotificationPayload,
+    ExtendCommandRequest,
+    BroadcastExtendCommandRequest,
     BatchRequest,
 )
 from app.shared.security.auth import (
@@ -2313,6 +2315,7 @@ async def delete_client(
 async def rename_client(
     account_id: str,
     client_id: str,
+    request: Request,
     body: dict = Body(default={}),
     db: AsyncSession = Depends(get_db),
 ):
@@ -2336,6 +2339,10 @@ async def rename_client(
     if "client_id" in body and body["client_id"] is not None:
         record.client_id = str(body["client_id"]).strip()
     await db.commit()
+
+    from app.Protobuf.Enum import CommandTypes_pb2
+
+    await _push_cmd(request, account_id, client_id, CommandTypes_pb2.DataUpdated)
     return {
         "status": "ok",
         "message": "Device updated",
@@ -2600,6 +2607,15 @@ async def fetch_runtime_config(
     }
 
 
+def _parse_json_safe(raw: str | None) -> Any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
 @router.get(
     "/account/{account_id}/client/{client_id}/config-uploads",
     tags=["Client"],
@@ -2636,6 +2652,12 @@ async def list_client_config_uploads(
             ),
             "status": getattr(r, "status", "completed") or "completed",
             "payload": r.payload,
+            "payload_preview": (
+                f"{r.payload[:200]}..."
+                if r.payload and len(r.payload) > 200
+                else (r.payload or "")
+            ),
+            "parsed_payload": _parse_json_safe(r.payload),
             "uploaded_at": r.uploaded_at.isoformat() if r.uploaded_at else None,
         }
         for r in rows
@@ -2675,6 +2697,12 @@ async def get_config_upload_detail(
         ),
         "status": getattr(r, "status", "completed") or "completed",
         "payload": r.payload,
+        "payload_preview": (
+            f"{r.payload[:200]}..."
+            if r.payload and len(r.payload) > 200
+            else (r.payload or "")
+        ),
+        "parsed_payload": _parse_json_safe(r.payload),
         "uploaded_at": r.uploaded_at.isoformat() if r.uploaded_at else None,
     }
 
@@ -2802,6 +2830,192 @@ async def broadcast_notify(
         "status": "success",
         "message": f"Notification delivered to {delivered_count} online device(s)",
         "delivered_count": delivered_count,
+    }
+
+
+_ALLOWED_EXTEND_COMMAND_PREFIXES = (
+    "hardware.",
+    "settings.",
+    "profile.",
+    "components.",
+    "automation.",
+    "update.",
+    "plugin.",
+    "theme.",
+    "remote.",
+)
+
+
+@router.post(
+    "/account/{account_id}/client/{client_id}/command/extend",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def send_extend_command(
+    account_id: str,
+    client_id: str,
+    request: Request,
+    body: ExtendCommandRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dispatch a PGP-signed extended management command to a client with MiniClassIsland.ExtendManagement."""
+    action = body.action.strip().lower()
+    if not any(action.startswith(p) for p in _ALLOWED_EXTEND_COMMAND_PREFIXES):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported extended command action: {action}",
+        )
+
+    servicer = get_command_servicer(request)
+    sm = get_session_manager(request)
+    if not servicer or not sm:
+        return {
+            "status": "error",
+            "delivered": False,
+            "message": "gRPC service unavailable",
+            "request_guid": "",
+            "action": action,
+        }
+
+    from app.Protobuf.Server import ClientCommandDeliverScRsp_pb2
+    from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
+
+    req_guid = str(uuid.uuid4())
+    db.add(
+        ConfigUploadRecord(
+            request_guid=req_guid,
+            account_id=account_id,
+            client_uid=client_id,
+            config_type=100,
+            status="pending",
+            payload="",
+            uploaded_at=datetime.now(timezone.utc),
+        )
+    )
+    await db.commit()
+
+    envelope = sm.build_signed_command_envelope(
+        request_guid=req_guid,
+        client_uid=client_id,
+        action=action,
+        payload=body.payload,
+        ttl_seconds=body.ttl_seconds,
+    )
+    envelope_bytes = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+
+    cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
+        RetCode=Retcode_pb2.Success,
+        Type=CommandTypes_pb2.GetClientConfig,
+        Payload=envelope_bytes,
+    )
+    delivered = await servicer.send_command(account_id, client_id, cmd)
+    return {
+        "status": "command_queued" if delivered else "offline",
+        "delivered": delivered,
+        "message": (
+            "Extended command delivered" if delivered else "Client is currently offline"
+        ),
+        "request_guid": req_guid,
+        "action": action,
+        "config_type": 100,
+        "config_type_name": "ExtendCommand",
+    }
+
+
+@router.post(
+    "/account/{account_id}/broadcast/extend",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+@router.post(
+    "/account/{account_id}/client/broadcast/extend",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def broadcast_extend_command(
+    account_id: str,
+    request: Request,
+    body: BroadcastExtendCommandRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Broadcast a PGP-signed extended management command to target or all online clients."""
+    action = body.action.strip().lower()
+    if not any(action.startswith(p) for p in _ALLOWED_EXTEND_COMMAND_PREFIXES):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unsupported extended command action: {action}",
+        )
+
+    servicer = get_command_servicer(request)
+    sm = get_session_manager(request)
+    if not servicer or not sm:
+        return {
+            "status": "error",
+            "delivered_count": 0,
+            "sent_count": 0,
+            "total_targets": 0,
+            "requests": [],
+        }
+
+    from app.Protobuf.Server import ClientCommandDeliverScRsp_pb2
+    from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
+
+    targets = body.target_uids or body.client_uids
+    if not targets:
+        online_list = await sm.get_all_clients_status(account_id)
+        targets = [item["uid"] for item in online_list]
+
+    delivered_count = 0
+    requests_out: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
+    for uid in targets:
+        uid_str = str(uid).strip()
+        if not uid_str:
+            continue
+        req_guid = str(uuid.uuid4())
+        db.add(
+            ConfigUploadRecord(
+                request_guid=req_guid,
+                account_id=account_id,
+                client_uid=uid_str,
+                config_type=100,
+                status="pending",
+                payload="",
+                uploaded_at=now,
+            )
+        )
+        envelope = sm.build_signed_command_envelope(
+            request_guid=req_guid,
+            client_uid=uid_str,
+            action=action,
+            payload=body.payload,
+            ttl_seconds=body.ttl_seconds,
+        )
+        envelope_bytes = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+        cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
+            RetCode=Retcode_pb2.Success,
+            Type=CommandTypes_pb2.GetClientConfig,
+            Payload=envelope_bytes,
+        )
+        ok = await servicer.send_command(account_id, uid_str, cmd)
+        if ok:
+            delivered_count += 1
+        requests_out.append(
+            {
+                "client_uid": uid_str,
+                "request_guid": req_guid,
+                "delivered": ok,
+            }
+        )
+
+    await db.commit()
+    return {
+        "status": "broadcast_queued",
+        "action": action,
+        "sent_count": delivered_count,
+        "delivered_count": delivered_count,
+        "total_targets": len(requests_out),
+        "requests": requests_out,
     }
 
 

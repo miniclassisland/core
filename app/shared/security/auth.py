@@ -874,6 +874,12 @@ def extract_qr_login_code(code_or_uri: str) -> str:
     cleaned = (code_or_uri or "").strip()
     if cleaned.lower().startswith(_QR_LOGIN_DEEPLINK_PREFIX):
         cleaned = cleaned[len(_QR_LOGIN_DEEPLINK_PREFIX) :].strip().strip("/")
+    if cleaned.startswith("?"):
+        q = cleaned[1:].strip()
+        if q.lower().startswith("code="):
+            cleaned = q[5:].split("&", 1)[0].strip()
+        else:
+            cleaned = q.split("&", 1)[0].strip()
     return cleaned
 
 
@@ -924,10 +930,14 @@ async def create_qr_login_challenge(client_ip: str = "") -> dict[str, Any]:
     }
 
 
-async def authorize_qr_login_challenge(code_or_uri: str, user_id: str) -> bool:
+async def authorize_qr_login_challenge(
+    code_or_uri: str, user_id: str, *, skip_stateless_verify: bool = False
+) -> bool:
     """Authorize a pending Web QR login challenge on behalf of user_id."""
     code = extract_qr_login_code(code_or_uri)
-    if not _verify_qr_login_code_stateless(code) or not user_id:
+    if not code or not _QR_LOGIN_CODE_RE.match(code) or not user_id:
+        return False
+    if not skip_stateless_verify and not _verify_qr_login_code_stateless(code):
         return False
     rd = get_redis(REDIS_DB_AUTH)
     key = f"{_QR_LOGIN_PREFIX}:{code}"

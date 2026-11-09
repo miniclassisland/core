@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from app.client import api
 from app.client.app import client_app
 from app.shared.db.session import AsyncSessionLocal
-from app.shared.db.models import Account, ClientProfile, ClientRecord
+from app.shared.db.models import Account, ClientProfile, ClientRecord, PairingCode
 from app.shared.utils.config import BASE_DOMAIN
 
 
@@ -210,3 +210,107 @@ async def test_client_app_endpoints():
         with patch("pathlib.Path.exists", return_value=False):
             r_font_missing = await client.get("/fonts/GoogleSansFlex-VariableFont.ttf")
             assert r_font_missing.status_code == 404
+
+        # 6. Pairing status endpoint tests (registered, disabled, pending, rejected, approved)
+        mock_sm_pair = AsyncMock()
+        mock_sm_pair.public_key_armor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nTEST\n-----END PGP PUBLIC KEY BLOCK-----"
+        with patch("app.client.api.get_session_manager", return_value=mock_sm_pair):
+            r_ps_reg = await client.get(
+                "/api/v1/client/some-long-client-uid-12345/pairing-status",
+                headers=host_headers,
+            )
+            assert r_ps_reg.status_code == 200
+            assert r_ps_reg.json()["status"] == "registered"
+            assert r_ps_reg.json()["approved"] is True
+            assert r_ps_reg.headers.get("X-MiniClassIsland-Server") == "1"
+
+            r_ps_dis = await client.get(
+                "/api/v1/client/uid-disabled/pairing-status",
+                headers=host_headers,
+            )
+            assert r_ps_dis.status_code == 200
+            assert r_ps_dis.json()["status"] == "rejected"
+
+            r_ps_none = await client.get(
+                "/api/v1/client/uid-no-pairing/pairing-status",
+                headers=host_headers,
+            )
+            assert r_ps_none.status_code == 200
+            assert r_ps_none.json()["status"] == "pending"
+
+            r_ps_code_miss = await client.get(
+                "/api/v1/client/uid-no-pairing/pairing-status",
+                params={"code": "MISSING99"},
+                headers=host_headers,
+            )
+            assert r_ps_code_miss.status_code == 200
+            assert r_ps_code_miss.json()["status"] == "rejected"
+
+            async with AsyncSessionLocal() as db:
+                db.add_all(
+                    [
+                        PairingCode(
+                            code="PEND1234",
+                            tenant_id="acct-client-test",
+                            client_uid="uid-pair-flow",
+                            client_id="Class-Pair",
+                            client_mac="11:22:33",
+                            client_ip="127.0.0.1",
+                            status="pending",
+                            approved=False,
+                            used=False,
+                            created_at=now,
+                        ),
+                        PairingCode(
+                            code="REJ99999",
+                            tenant_id="acct-client-test",
+                            client_uid="uid-pair-rej",
+                            status="rejected",
+                            approved=False,
+                            used=False,
+                            created_at=now,
+                        ),
+                    ]
+                )
+                await db.commit()
+
+            r_ps_pend = await client.get(
+                "/api/v1/client/uid-pair-flow/pairing-status",
+                params={"code": "PEND1234"},
+                headers=host_headers,
+            )
+            assert r_ps_pend.status_code == 200
+            assert r_ps_pend.json()["status"] == "pending"
+
+            r_ps_rej_row = await client.get(
+                "/api/v1/client/uid-pair-rej/pairing-status",
+                headers=host_headers,
+            )
+            assert r_ps_rej_row.status_code == 200
+            assert r_ps_rej_row.json()["status"] == "rejected"
+
+            async with AsyncSessionLocal() as db:
+                from sqlalchemy import select
+
+                row_p = (
+                    await db.execute(
+                        select(PairingCode).where(PairingCode.code == "PEND1234")
+                    )
+                ).scalar_one()
+                row_p.approved = True
+                row_p.status = "approved"
+                await db.commit()
+
+            r_ps_app = await client.get(
+                "/api/v1/client/uid-pair-flow/pairing-status",
+                params={
+                    "code": "PEND1234",
+                    "class_id": "Class-Pair-New",
+                    "mac": "AA:BB:CC",
+                },
+                headers=host_headers,
+            )
+            assert r_ps_app.status_code == 200
+            assert r_ps_app.json()["status"] == "approved"
+            assert r_ps_app.json()["registered"] is True
+            assert "BEGIN PGP PUBLIC KEY BLOCK" in r_ps_app.json()["serverPublicKey"]

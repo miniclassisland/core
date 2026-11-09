@@ -170,6 +170,7 @@ class CCProtectMiddleware(BaseHTTPMiddleware):
             )
 
         resp = await call_next(request)
+        resp.headers["X-MiniClassIsland-Server"] = "1"
         if resp.status_code in (401, 403) and not is_client_delivery_path:
             await record_ip_failure_async(ip)
 

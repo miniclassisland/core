@@ -21,6 +21,7 @@ def test_user_cli_commands():
         "reset-2fa",
         "set-create-account",
         "set-role",
+        "login",
     ):
         res_help = runner.invoke(cli, ["user", sub])
         assert res_help.exit_code == 0
@@ -42,6 +43,7 @@ def test_user_cli_commands():
         ["user", "reset-2fa", "missing_u"],
         ["user", "set-create-account", "missing_u", "true"],
         ["user", "set-role", "missing_u", "admin"],
+        ["user", "login", "missing_u", "miniclassisland://qr-login/?bad"],
     ):
         assert runner.invoke(cli, cmd_args).exit_code == 0
 
@@ -131,8 +133,51 @@ def test_user_cli_commands():
     )
     assert runner.invoke(cli, ["user", "reject", "cli_user_pend2"]).exit_code == 0
 
-    # Ban, activate, reset-password, reset-2fa, set-create-account, set-role, delete
+    # Ban, activate, reset-password, reset-2fa, set-create-account, set-role, login, delete
+    import asyncio
+    from app.shared.security.auth import (
+        create_qr_login_challenge,
+        poll_qr_login_challenge,
+    )
+
+    qr_sess = asyncio.run(create_qr_login_challenge("127.0.0.1"))
+    assert (
+        runner.invoke(
+            cli,
+            [
+                "user",
+                "login",
+                "cli_user_1",
+                f"miniclassisland://qr-login/?{qr_sess['code']}",
+            ],
+        ).exit_code
+        == 0
+    )
+    qr_polled = asyncio.run(
+        poll_qr_login_challenge(f"miniclassisland://qr-login/?code={qr_sess['code']}")
+    )
+    assert qr_polled["status"] == "authorized"
+    assert (
+        runner.invoke(
+            cli,
+            [
+                "user",
+                "login",
+                "cli_user_1",
+                f"miniclassisland://qr-login/?code={qr_sess['code']}",
+            ],
+        ).exit_code
+        == 0
+    )
+
     assert runner.invoke(cli, ["user", "ban", "cli_user_1"]).exit_code == 0
+    assert (
+        runner.invoke(
+            cli,
+            ["user", "login", "cli_user_1", "miniclassisland://qr-login/?expired"],
+        ).exit_code
+        == 0
+    )
     assert runner.invoke(cli, ["user", "activate", "cli_user_1"]).exit_code == 0
     assert (
         runner.invoke(

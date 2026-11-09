@@ -1,10 +1,17 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db
-from app.shared.db.models import ClientRecord, ClientProfile, Account, MODEL_MAP
+from app.shared.db.models import (
+    ClientRecord,
+    ClientProfile,
+    Account,
+    PairingCode,
+    MODEL_MAP,
+)
 from app.shared.db.schema_init import seed_account_defaults
 from app.shared.schemas.schemas import ClientManifest
 from app.shared.utils.logging import get_client_ip_from_request
@@ -13,6 +20,7 @@ from app.shared.utils.tenant import (
     get_cached_account,
 )
 from app.shared.security.auth import create_token
+from app.shared.services.pairing import check_approved
 from app.shared.services.quota import check_quota, record_bandwidth_bytes
 from app.shared.runtime import get_session_manager
 
@@ -64,8 +72,16 @@ def _build_empty_manifest(
 @router.get(
     "/v1/client/{client_uid}/manifest", response_model=ClientManifest, tags=["Client"]
 )
+@router.get(
+    "/api/v1/client/{client_uid}/manifest",
+    response_model=ClientManifest,
+    tags=["Client"],
+)
 async def get_client_manifest(
-    request: Request, client_uid: str, db: AsyncSession = Depends(get_db)
+    request: Request,
+    response: Response,
+    client_uid: str,
+    db: AsyncSession = Depends(get_db),
 ):
     """Build Manifest JSON payload for requested client UID.
 
@@ -75,6 +91,7 @@ async def get_client_manifest(
       the gRPC IP recorded on the ClientRecord before issuing one-time `/get?token=...` URLs.
     """
     slug = getattr(request.state, "tenant_slug", "Unknown")
+    response.headers["X-MiniClassIsland-Server"] = "1"
     tenant_id = get_tenant_id_or_default()
     client_ip = get_client_ip_from_request(request)
     short_uid = (
@@ -191,6 +208,8 @@ async def get_client_manifest(
             sources[rt] = {"Value": full_url, "Version": max(1, int(ver_val or 1))}
 
     record_bandwidth_bytes(tenant_id, 1024)
+    raw_display_name = (getattr(client_record, "display_name", "") or "").strip()
+    raw_client_id = (getattr(client_record, "client_id", "") or "").strip()
     return ClientManifest(
         ClassPlanSource=sources["ClassPlan"],
         TimeLayoutSource=sources["TimeLayout"],
@@ -202,4 +221,151 @@ async def get_client_manifest(
         ServerKind=1,
         OrganizationName=org_name,
         CoreVersion="2.0.0.0",
+        ServerFlavor="miniclassisland",
+        ServerSoftware="MINI ClassIsland",
+        ClientDisplayName=raw_display_name or "未命名设备",
+        ClientIdentity=raw_client_id,
     )
+
+
+@router.get(
+    "/v1/client/{client_uid}/pairing-status",
+    tags=["Client"],
+)
+@router.get(
+    "/api/v1/client/{client_uid}/pairing-status",
+    tags=["Client"],
+)
+async def get_client_pairing_status(
+    request: Request,
+    response: Response,
+    client_uid: str,
+    code: str = "",
+    class_id: str = "",
+    mac: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight HTTP pairing status endpoint for client pairing polling without re-triggering gRPC Register."""
+    response.headers["X-MiniClassIsland-Server"] = "1"
+    tenant_id = get_tenant_id_or_default()
+    client_ip = get_client_ip_from_request(request)
+    pairing_code = (code or request.headers.get("x-pairing-code") or "").strip().upper()
+
+    sm = get_session_manager(request)
+    pub_key = sm.public_key_armor if sm else ""
+
+    client_record = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.uid == client_uid,
+                ClientRecord.account_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if client_record is not None:
+        if getattr(client_record, "is_disabled", False):
+            return {
+                "status": "rejected",
+                "approved": False,
+                "registered": False,
+                "ServerFlavor": "miniclassisland",
+            }
+        return {
+            "status": "registered",
+            "approved": True,
+            "registered": True,
+            "serverPublicKey": pub_key,
+            "ServerFlavor": "miniclassisland",
+            "ServerSoftware": "MINI ClassIsland",
+            "ClientDisplayName": (
+                getattr(client_record, "display_name", "") or ""
+            ).strip()
+            or "未命名设备",
+            "ClientIdentity": (getattr(client_record, "client_id", "") or "").strip(),
+        }
+
+    stmt = (
+        select(PairingCode)
+        .where(
+            PairingCode.client_uid == client_uid,
+            PairingCode.tenant_id == tenant_id,
+        )
+        .order_by(PairingCode.created_at.desc())
+    )
+    if pairing_code:
+        stmt = stmt.where(PairingCode.code == pairing_code)
+    pairing_row = (await db.execute(stmt)).scalars().first()
+
+    if pairing_row is None:
+        if pairing_code:
+            return {
+                "status": "rejected",
+                "approved": False,
+                "registered": False,
+                "ServerFlavor": "miniclassisland",
+            }
+        return {
+            "status": "pending",
+            "approved": False,
+            "registered": False,
+            "ServerFlavor": "miniclassisland",
+        }
+
+    row_status = str(getattr(pairing_row, "status", "pending") or "pending").lower()
+    if row_status in ("rejected", "denied", "expired"):
+        return {
+            "status": row_status,
+            "approved": False,
+            "registered": False,
+            "ServerFlavor": "miniclassisland",
+        }
+
+    if pairing_row.approved:
+        effective_class_id = class_id.strip() or pairing_row.client_id or ""
+        effective_mac = mac.strip() or pairing_row.client_mac or ""
+        effective_ip = client_ip or pairing_row.client_ip or ""
+        await check_approved(client_uid, tenant_id)
+        existing_after = (
+            await db.execute(
+                select(ClientRecord).where(
+                    ClientRecord.uid == client_uid,
+                    ClientRecord.account_id == tenant_id,
+                )
+            )
+        ).scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        rec = existing_after or ClientRecord(
+            uid=client_uid,
+            account_id=tenant_id,
+            registered_at=now,
+        )
+        rec.account_id = tenant_id
+        if effective_class_id:
+            rec.client_id = effective_class_id
+        if effective_mac:
+            rec.mac = effective_mac
+        if effective_ip:
+            rec.ip = effective_ip
+        rec.last_seen_at = now
+        db.add(rec)
+        await db.commit()
+        return {
+            "status": "approved",
+            "approved": True,
+            "registered": True,
+            "serverPublicKey": pub_key,
+            "ServerFlavor": "miniclassisland",
+            "ServerSoftware": "MINI ClassIsland",
+            "ClientDisplayName": (getattr(rec, "display_name", "") or "").strip()
+            or "未命名设备",
+            "ClientIdentity": (getattr(rec, "client_id", "") or "").strip(),
+        }
+
+    return {
+        "status": "pending",
+        "approved": False,
+        "registered": False,
+        "code": pairing_row.code,
+        "ServerFlavor": "miniclassisland",
+    }
