@@ -7,7 +7,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Response, st
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.shared.db.models import Ticket, TicketMessage
+from app.shared.db.models import Ticket, TicketMessage, User
 from app.shared.db.session import get_db
 from app.shared.literals import TICKET_STATUSES
 from app.shared.schemas.schemas import (
@@ -26,6 +26,7 @@ from app.shared.services.ticket import (
     message_to_out,
     ticket_to_out,
 )
+from app.shared.utils.community import notify_superadmin_new_ticket
 
 
 def _no_store(response: Response) -> None:
@@ -99,6 +100,11 @@ async def create_ticket(
     db.add(ticket)
     await db.commit()
     await db.refresh(ticket)
+    creator = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if creator is not None:
+        await notify_superadmin_new_ticket(creator, ticket.subject, ticket.content, db)
     return TicketDetailOut(
         **ticket_to_out(ticket).model_dump(),
         content=ticket.content,

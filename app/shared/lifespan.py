@@ -22,6 +22,8 @@ from app.shared.security.turnstile import (
     get_turnstile_client,
 )
 from app.shared.utils.community import (
+    notify_service_shutdown,
+    notify_service_startup_recovery,
     start_snowluma_poller,
     stop_snowluma_poller,
 )
@@ -56,6 +58,7 @@ async def _startup(app: FastAPI):
     await init_redis()
     logger.info("Initializing Turnstile HTTP client...")
     get_turnstile_client()
+    await notify_service_startup_recovery()
     start_snowluma_poller()
 
     # Dynamically import serve_grpc to prevent compilation issues when protobufs are missing
@@ -87,6 +90,7 @@ async def _startup(app: FastAPI):
 async def _shutdown(app: FastAPI):
     """Graceful shutdown: stop gRPC and Redis."""
     logger.info("Performing graceful shutdown...")
+    await notify_service_shutdown()
     grpc_s = getattr(app.state, "grpc_server", None) or runtime_hub.grpc_server
     if grpc_s:
         grpc_logger.info("Stopping gRPC server...")

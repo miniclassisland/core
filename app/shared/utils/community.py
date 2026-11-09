@@ -2,9 +2,13 @@
 
 import asyncio
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import re
 import secrets
+import shutil
 import string
+import subprocess
 import threading
 import time
 from typing import Any, Callable, Coroutine, Optional
@@ -13,11 +17,17 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.shared.db.models import CommunityBinding, User
+from app.shared.db.models import (
+    AccountMember,
+    AccountQuota,
+    CommunityBinding,
+    User,
+)
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.utils.config import (
     COMMUNITY_CODE_TTL_SECONDS,
     COMMUNITY_QQ_GROUP_ID,
+    CONFIG_DIR,
     REDIS_DB_AUTH,
     SNOWLUMA_ONEBOT_TOKEN,
     SNOWLUMA_ONEBOT_URL,
@@ -45,6 +55,18 @@ _QQ_UIN_RE = re.compile(r"^[1-9][0-9]{4,19}$")
 
 _REDIS_USER_CODE_PREFIX = "community:user_code:"
 _REDIS_CODE_USER_PREFIX = "community:code_user:"
+_REDIS_REG_MSG_PREFIX = "community:reg_msg:"
+_REDIS_LIFECYCLE_MODE_KEY = "community:lifecycle_mode"
+_REDIS_PENDING_RESTART_KEY = "community:pending_restart"
+
+MSG_RESTARTING = "集控服务器后端正在重启，服务将马上恢复"
+MSG_RESTART_RECOVERED = "服务已恢复"
+MSG_SHUTDOWN_MAINTENANCE = "服务器例行维护，服务暂时不可用"
+MSG_SHUTDOWN_RECOVERED = "服务器维护已结束，服务已恢复"
+
+_CQ_REPLY_RE = re.compile(r"\[CQ:reply,[^\]]*id=([^\],]+)")
+_CQ_TAG_RE = re.compile(r"\[CQ:[^\]]+\]")
+_REG_MSG_PARSE_RE = re.compile(r"^新用户\s+.+\(([^,()]+),\s*([^,()]+)\)\s+注册$")
 
 _lock = threading.Lock()
 _code = ""
@@ -52,6 +74,13 @@ _code = ""
 _user_codes: dict[str, tuple[str, float]] = {}
 # Reverse index: code -> (user_id, expires_at_monotonic)
 _code_users: dict[str, tuple[str, float]] = {}
+# Registration notification message_id -> user_id
+_reg_msg_users: dict[str, str] = {}
+# Processed incoming private message IDs to avoid duplicate quote-reply handling
+_processed_reply_msg_ids: set[str] = set()
+# In-memory lifecycle state fallback
+_memory_lifecycle_mode: str = ""
+_memory_pending_restart: float = 0.0
 
 _snowluma_client: Optional[httpx.AsyncClient] = None
 _snowluma_poller_task: Optional[asyncio.Task] = None
@@ -471,6 +500,56 @@ def format_unbind_reminder(user: User, qq_uin: str = "") -> str:
     return f"管理员已将您的 QQ{qq_part} 与 {display} ({user.username}) 解绑"
 
 
+def format_user_identity(user: User) -> str:
+    """Format a user identity as ``Display Name(username, email)``."""
+    display = (user.display_name or "").strip() or user.username
+    return f"{display}({user.username}, {user.email})"
+
+
+def format_superadmin_registration_report(user: User) -> str:
+    """Format the superadmin private report when a new user registers."""
+    return f"新用户 {format_user_identity(user)} 注册"
+
+
+def format_superadmin_ticket_report(user: User, subject: str, content: str) -> str:
+    """Format the superadmin private report when a user submits a ticket."""
+    return f"用户 {format_user_identity(user)} 发起工单：{subject}\n{content}"
+
+
+def format_superadmin_group_join_report(
+    user: User, qq_uin: str, qq_nick: str = ""
+) -> str:
+    """Format the superadmin private report when a user joins the group via auto-approval."""
+    clean_uin = str(qq_uin or "").strip()
+    clean_nick = str(qq_nick or "").strip() or clean_uin
+    return (
+        f"用户 {format_user_identity(user)} 刚刚使用 QQ "
+        f"{clean_uin}({clean_nick}) 加入了交流群"
+    )
+
+
+def format_user_approved_notification(user: User) -> str:
+    """Format the private notification sent to a user when their registration is approved."""
+    display = (user.display_name or "").strip() or user.username
+    return f"您 ({display}) 的注册申请已经被批准，欢迎使用 MINI ClassIsland"
+
+
+def format_user_quota_changed_notification(
+    user: User, max_clients: int, max_grpc_connections: int
+) -> str:
+    """Format the private notification sent to account admins/owners when device quotas change."""
+    display = (user.display_name or "").strip() or user.username
+    return (
+        f"您 ({display}) 的配额已经变更为最大允许注册 {max_clients} 台设备，"
+        f"最大允许同时保持 {max_grpc_connections} 台设备连接"
+    )
+
+
+def format_group_announcement(title: str, content: str) -> str:
+    """Format the group notification sent when a site announcement is published."""
+    return f"新的站内公告【{title}】：\n{content}"
+
+
 def get_snowluma_client() -> httpx.AsyncClient:  # pragma: no cover
     """Return or initialize the shared httpx client for SnowLuma OneBot 11."""
     global _snowluma_client
@@ -507,7 +586,19 @@ async def _call_onebot(
     return resp.json()  # pragma: no cover
 
 
-async def _send_private_msg(
+def _extract_message_id(res: dict[str, Any]) -> Optional[str]:
+    """Extract OneBot message_id from a send_private_msg/send_group_msg response."""
+    if not isinstance(res, dict):  # pragma: no cover
+        return None
+    data = res.get("data")
+    if isinstance(data, dict) and data.get("message_id") is not None:
+        return str(data["message_id"]).strip() or None
+    if res.get("message_id") is not None:
+        return str(res["message_id"]).strip() or None
+    return None
+
+
+async def _send_private_msg_with_id(
     qq_uin: str,
     target_group_id: int,
     message: str,
@@ -516,13 +607,13 @@ async def _send_private_msg(
     token: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
     onebot_caller: Optional[OneBotCaller] = None,
-) -> bool:
-    """Send a private message to ``qq_uin`` (with temporary session fallback via ``target_group_id``)."""
+) -> tuple[bool, Optional[str]]:
+    """Send a private message to ``qq_uin`` and return ``(sent_ok, message_id)``."""
     auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
     if (
         not auth_token and client is None and base_url is None and onebot_caller is None
     ):  # pragma: no cover
-        return False
+        return False, None
 
     try:
         pm_res = await _call_onebot(
@@ -538,7 +629,7 @@ async def _send_private_msg(
             onebot_caller=onebot_caller,
         )
         if pm_res.get("retcode", 0) == 0:
-            return True
+            return True, _extract_message_id(pm_res)
         pm_res2 = await _call_onebot(
             "send_private_msg",
             {
@@ -552,12 +643,377 @@ async def _send_private_msg(
             client=client,
             onebot_caller=onebot_caller,
         )
-        return pm_res2.get("retcode", 0) == 0
+        if pm_res2.get("retcode", 0) == 0:
+            return True, _extract_message_id(pm_res2)
+        return False, None
     except Exception as exc:  # pragma: no cover
         logger.warning(
             "[QQ群控] 私聊发送失败 → QQ=%s: %s", mask_qq_uin(qq_uin) or qq_uin, exc
         )
+        return False, None
+
+
+async def _send_private_msg(
+    qq_uin: str,
+    target_group_id: int,
+    message: str,
+    *,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Send a private message to ``qq_uin`` (with temporary session fallback via ``target_group_id``)."""
+    ok, _ = await _send_private_msg_with_id(
+        qq_uin,
+        target_group_id,
+        message,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return ok
+
+
+async def send_group_msg(
+    message: str,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Send a message to the target QQ group."""
+    auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
+    if (
+        not auth_token and client is None and base_url is None and onebot_caller is None
+    ):  # pragma: no cover
         return False
+
+    target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
+    try:
+        res = await _call_onebot(
+            "send_group_msg",
+            {
+                "group_id": target_group_id,
+                "message": message,
+                "auto_escape": True,
+            },
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        return res.get("retcode", 0) == 0
+    except Exception as exc:  # pragma: no cover
+        logger.warning(
+            "[QQ群控] 群消息发送失败 → 群=%d: %s",
+            target_group_id,
+            exc,
+        )
+        return False
+
+
+async def get_superadmin_qq_uins(db: AsyncSession) -> list[str]:
+    """Return bound QQ UINs of all active platform Super Administrators from the database."""
+    rows = (
+        (
+            await db.execute(
+                select(CommunityBinding.qq_uin)
+                .join(User, User.id == CommunityBinding.user_id)
+                .where(
+                    User.role_code == "superadmin",
+                    User.is_active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    seen: set[str] = set()
+    uins: list[str] = []
+    for raw in rows:
+        uin = str(raw or "").strip()
+        if uin and uin not in seen:
+            seen.add(uin)
+            uins.append(uin)
+    return uins
+
+
+async def _send_private_msg_to_superadmins(
+    db: AsyncSession,
+    message: str,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> list[tuple[str, Optional[str]]]:
+    """Send a private message to all bound Super Administrators and return ``[(qq_uin, message_id), ...]``."""
+    uins = await get_superadmin_qq_uins(db)
+    if not uins:
+        return []
+    target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
+    delivered: list[tuple[str, Optional[str]]] = []
+    for uin in uins:
+        ok, msg_id = await _send_private_msg_with_id(
+            uin,
+            target_group_id,
+            message,
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        if ok:
+            delivered.append((uin, msg_id))
+    return delivered
+
+
+async def _store_registration_msg_mapping(message_id: str, user_id: str) -> None:
+    """Associate an outbound registration report message_id with the pending user_id."""
+    clean_mid = str(message_id or "").strip()
+    if not clean_mid or not user_id:  # pragma: no cover
+        return
+    with _lock:
+        _reg_msg_users[clean_mid] = user_id
+    try:
+        r = get_redis(REDIS_DB_AUTH)
+        await r.set(f"{_REDIS_REG_MSG_PREFIX}{clean_mid}", user_id, ex=86400 * 7)
+    except Exception:  # pragma: no cover
+        pass
+
+
+async def get_registration_user_for_msg(message_id: str) -> Optional[str]:
+    """Resolve the pending ``user_id`` associated with a registration report ``message_id``."""
+    clean_mid = str(message_id or "").strip()
+    if not clean_mid:  # pragma: no cover
+        return None
+    with _lock:
+        uid = _reg_msg_users.get(clean_mid)
+        if uid:
+            return uid
+    try:
+        r = get_redis(REDIS_DB_AUTH)
+        val = await r.get(f"{_REDIS_REG_MSG_PREFIX}{clean_mid}")
+        if val:
+            return str(val)
+    except Exception:  # pragma: no cover
+        pass
+    return None
+
+
+async def notify_superadmin_new_registration(
+    user: User,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> list[tuple[str, Optional[str]]]:
+    """Notify bound Super Administrators when a new user registers, and record message_id for quote-reply approval."""
+    msg = format_superadmin_registration_report(user)
+    delivered = await _send_private_msg_to_superadmins(
+        db,
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    for _, msg_id in delivered:
+        if msg_id:
+            await _store_registration_msg_mapping(msg_id, user.id)
+    return delivered
+
+
+async def notify_superadmin_new_ticket(
+    user: User,
+    subject: str,
+    content: str,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Notify bound Super Administrators when a user creates a new support ticket."""
+    msg = format_superadmin_ticket_report(user, subject, content)
+    delivered = await _send_private_msg_to_superadmins(
+        db,
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return len(delivered) > 0
+
+
+async def notify_superadmin_group_join(
+    user: User,
+    qq_uin: str,
+    qq_nick: str,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Notify bound Super Administrators when a user joins the QQ group via auto-approval."""
+    msg = format_superadmin_group_join_report(user, qq_uin, qq_nick)
+    delivered = await _send_private_msg_to_superadmins(
+        db,
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return len(delivered) > 0
+
+
+async def notify_user_approved(
+    user: User,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Send a private message to ``user`` if bound when their registration is approved."""
+    binding = (
+        await db.execute(
+            select(CommunityBinding).where(CommunityBinding.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+    if not binding or not str(binding.qq_uin or "").strip():
+        return False
+    qq_uin = str(binding.qq_uin).strip()
+    target_group_id = int(
+        group_id if group_id is not None else (binding.group_id or SNOWLUMA_QQ_GROUP_ID)
+    )
+    msg = format_user_approved_notification(user)
+    return await _send_private_msg(
+        qq_uin,
+        target_group_id,
+        msg,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+
+
+async def notify_account_device_quota_changed(
+    account_id: str,
+    quota_key: str,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> int:
+    """Notify account owners and admins via QQ PM when device count quotas change."""
+    if quota_key not in ("max_clients", "max_grpc_connections"):
+        return 0
+
+    quota_rows = (
+        (
+            await db.execute(
+                select(AccountQuota).where(
+                    AccountQuota.account_id == account_id,
+                    AccountQuota.quota_key.in_(("max_clients", "max_grpc_connections")),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    qmap = {q.quota_key: q.max_value for q in quota_rows}
+    max_clients = int(qmap.get("max_clients", 6))
+    max_grpc = int(qmap.get("max_grpc_connections", 4))
+
+    rows = (
+        await db.execute(
+            select(User, CommunityBinding)
+            .join(AccountMember, AccountMember.user_id == User.id)
+            .join(CommunityBinding, CommunityBinding.user_id == User.id)
+            .where(
+                AccountMember.account_id == account_id,
+                AccountMember.role_in_account.in_(("owner", "admin")),
+            )
+        )
+    ).all()
+
+    target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
+    sent_count = 0
+    seen_users: set[str] = set()
+    for user_obj, binding in rows:
+        if user_obj.id in seen_users:  # pragma: no cover
+            continue
+        seen_users.add(user_obj.id)
+        qq_uin = str(binding.qq_uin or "").strip()
+        if not qq_uin:  # pragma: no cover
+            continue
+        grp = int(
+            group_id if group_id is not None else (binding.group_id or target_group_id)
+        )
+        msg = format_user_quota_changed_notification(user_obj, max_clients, max_grpc)
+        ok = await _send_private_msg(
+            qq_uin,
+            grp,
+            msg,
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        if ok:
+            sent_count += 1
+    return sent_count
+
+
+async def notify_group_site_announcement(
+    title: str,
+    content: str,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Broadcast a new site announcement to the target QQ group."""
+    clean_title = str(title or "").strip()
+    clean_content = str(content or "").strip()
+    if not clean_title and not clean_content:
+        return False
+    msg = format_group_announcement(clean_title, clean_content)
+    return await send_group_msg(
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
 
 
 async def _send_private_msg_and_kick(
@@ -1056,14 +1512,16 @@ async def _approve_and_notify_member(
     target_group_id: int,
     user: User,
     *,
+    requester_nick: str = "",
     db: Optional[AsyncSession] = None,
     base_url: Optional[str] = None,
     token: Optional[str] = None,
     client: Optional[httpx.AsyncClient] = None,
     onebot_caller: Optional[OneBotCaller] = None,
-) -> tuple[bool, bool, str, str]:
+) -> tuple[bool, bool, str, str, str]:
     """Approve a pending group join request, resolve UIN if needed, and send the binding reminder PM."""
     resolved_uin = "" if requester_uin.strip() in ("", "0") else requester_uin.strip()
+    resolved_nick = str(requester_nick or "").strip()
     before_uins: set[str] = set()
     if not resolved_uin:
         before_uins, _ = await _fetch_group_member_uins(
@@ -1101,7 +1559,7 @@ async def _approve_and_notify_member(
             mask_qq_uin(resolved_uin) or resolved_uin or "未知",
             approve_res,
         )
-        return False, False, "", ""
+        return False, False, "", "", ""
 
     if not resolved_uin:
         after_uins, after_members = await _fetch_group_member_uins(
@@ -1135,6 +1593,13 @@ async def _approve_and_notify_member(
                 )
                 if int(newest.get("join_time") or 0) > 0:
                     resolved_uin = str(newest.get("user_id")).strip()
+        if resolved_uin and not resolved_nick and after_members:
+            for m in after_members:
+                if str(m.get("user_id")).strip() == resolved_uin:
+                    resolved_nick = str(
+                        m.get("nickname") or m.get("card") or ""
+                    ).strip()
+                    break
 
     reminder = format_binding_reminder(user, resolved_uin)
     private_sent = False
@@ -1185,7 +1650,7 @@ async def _approve_and_notify_member(
         mask_qq_uin(resolved_uin) or resolved_uin or "未知",
         "已送达" if private_sent else "未送达",
     )
-    return True, private_sent, reminder, resolved_uin
+    return True, private_sent, reminder, resolved_uin, (resolved_nick or resolved_uin)
 
 
 async def poll_snowluma_group_requests_once(
@@ -1237,6 +1702,9 @@ async def poll_snowluma_group_requests_once(
         flag = str(item.get("flag") or "")
         raw_uin = str(item.get("requester_uin") or "").strip()
         requester_uin = "" if raw_uin in ("", "0") else raw_uin
+        requester_nick = str(
+            item.get("requester_nick") or item.get("nickname") or ""
+        ).strip()
         message = str(item.get("message") or "")
         if not flag:  # pragma: no cover
             continue
@@ -1261,12 +1729,13 @@ async def poll_snowluma_group_requests_once(
                     and bound_user.role_code != "banned"
                     and (bound_user.role_code == "pending" or bound_user.is_active)
                 ):
-                    approved, private_sent, reminder, _ = (
+                    approved, private_sent, reminder, _, resolved_nick = (
                         await _approve_and_notify_member(
                             flag,
                             requester_uin,
                             target_group_id,
                             bound_user,
+                            requester_nick=requester_nick,
                             db=db,
                             base_url=base_url,
                             token=token,
@@ -1279,6 +1748,17 @@ async def poll_snowluma_group_requests_once(
                         existing_qq_bind.group_id = str(target_group_id)
                         await db.commit()
                         await invalidate_user_community_code(bound_user.id)
+                        await notify_superadmin_group_join(
+                            bound_user,
+                            requester_uin,
+                            resolved_nick or requester_uin,
+                            db,
+                            group_id=target_group_id,
+                            base_url=base_url,
+                            token=token,
+                            client=client,
+                            onebot_caller=onebot_caller,
+                        )
                         results.append(
                             {
                                 "handled": True,
@@ -1355,12 +1835,13 @@ async def poll_snowluma_group_requests_once(
             )
             continue
 
-        approved, private_sent, reminder, resolved_uin = (
+        approved, private_sent, reminder, resolved_uin, resolved_nick = (
             await _approve_and_notify_member(
                 flag,
                 requester_uin,
                 target_group_id,
                 user,
+                requester_nick=requester_nick,
                 db=db,
                 base_url=base_url,
                 token=token,
@@ -1382,6 +1863,18 @@ async def poll_snowluma_group_requests_once(
             )
             db.add(binding)
             await db.commit()
+            if user.role_code != "superadmin":
+                await notify_superadmin_group_join(
+                    user,
+                    resolved_uin,
+                    resolved_nick or resolved_uin,
+                    db,
+                    group_id=target_group_id,
+                    base_url=base_url,
+                    token=token,
+                    client=client,
+                    onebot_caller=onebot_caller,
+                )
 
         results.append(
             {
@@ -1394,6 +1887,296 @@ async def poll_snowluma_group_requests_once(
             }
         )
 
+    return results
+
+
+def _extract_reply_id_and_text(item: dict[str, Any]) -> tuple[Optional[str], str]:
+    """Extract ``(reply_message_id, plain_text)`` from a OneBot 11 message payload."""
+    reply_id: Optional[str] = None
+    for key in ("reply_id", "reply_message_id"):
+        if item.get(key) is not None and str(item[key]).strip():
+            reply_id = str(item[key]).strip()
+            break
+    if not reply_id and isinstance(item.get("reply"), dict):
+        rid = item["reply"].get("id") or item["reply"].get("message_id")
+        if rid is not None and str(rid).strip():
+            reply_id = str(rid).strip()
+    if not reply_id and isinstance(item.get("source"), dict):
+        rid = item["source"].get("id") or item["source"].get("message_id")
+        if rid is not None and str(rid).strip():
+            reply_id = str(rid).strip()
+
+    msg = item.get("message")
+    raw_msg = str(item.get("raw_message") or "")
+    text_parts: list[str] = []
+
+    if isinstance(msg, list):
+        for seg in msg:
+            if not isinstance(seg, dict):  # pragma: no cover
+                continue
+            seg_type = str(seg.get("type") or "")
+            raw_data = seg.get("data")
+            seg_data: dict[str, Any] = raw_data if isinstance(raw_data, dict) else {}
+            if seg_type == "reply" and not reply_id:
+                rid = seg_data.get("id") or seg_data.get("message_id")
+                if rid is not None and str(rid).strip():
+                    reply_id = str(rid).strip()
+            elif seg_type == "text":
+                text_parts.append(str(seg_data.get("text") or ""))
+    elif isinstance(msg, str):
+        m = _CQ_REPLY_RE.search(msg)
+        if m and not reply_id:
+            reply_id = m.group(1).strip()
+        text_parts.append(_CQ_TAG_RE.sub("", msg))
+
+    if not reply_id and raw_msg:
+        m = _CQ_REPLY_RE.search(raw_msg)
+        if m:
+            reply_id = m.group(1).strip()
+
+    plain_text = "".join(text_parts).strip()
+    if not plain_text and raw_msg:
+        plain_text = _CQ_TAG_RE.sub("", raw_msg).strip()
+
+    return reply_id, plain_text
+
+
+def _parse_registration_action(text: str) -> Optional[str]:
+    """Return ``'approve'`` for 同意/Approve, ``'refuse'`` for 拒绝/Refuse, else ``None``."""
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return None
+    low = cleaned.lower()
+    if cleaned == "同意" or low == "approve":
+        return "approve"
+    if cleaned == "拒绝" or low == "refuse":
+        return "refuse"
+    return None
+
+
+def _extract_quoted_text(res_or_item: dict[str, Any]) -> str:
+    """Extract plain text from a ``get_msg`` response or quoted source payload."""
+    data = (
+        res_or_item.get("data")
+        if isinstance(res_or_item.get("data"), dict)
+        else res_or_item
+    )
+    if not isinstance(data, dict):  # pragma: no cover
+        return ""
+    msg = data.get("message")
+    if isinstance(msg, list):
+        return "".join(
+            str(s.get("data", {}).get("text") or "")
+            for s in msg
+            if isinstance(s, dict)
+            and s.get("type") == "text"
+            and isinstance(s.get("data"), dict)
+        ).strip()
+    if isinstance(msg, str) and msg.strip():
+        return _CQ_TAG_RE.sub("", msg).strip()
+    raw = str(data.get("raw_message") or "").strip()
+    return _CQ_TAG_RE.sub("", raw).strip()
+
+
+async def handle_onebot_registration_reply_event(
+    event: dict[str, Any],
+    db: Optional[AsyncSession] = None,
+    *,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    group_id: Optional[int] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> Optional[dict[str, Any]]:
+    """Process a single OneBot message event for Super Admin quote-reply registration approval/rejection."""
+    if not isinstance(event, dict):  # pragma: no cover
+        return None
+
+    if db is None:
+        async with AsyncSessionLocal() as session:
+            return await handle_onebot_registration_reply_event(
+                event,
+                session,
+                base_url=base_url,
+                token=token,
+                group_id=group_id,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
+
+    msg_id = str(event.get("message_id") or "").strip()
+    if msg_id:
+        with _lock:
+            if msg_id in _processed_reply_msg_ids:
+                return None
+
+    sender_uin = ""
+    if event.get("user_id") is not None:
+        sender_uin = str(event["user_id"]).strip()
+    elif (
+        isinstance(event.get("sender"), dict)
+        and event["sender"].get("user_id") is not None
+    ):
+        sender_uin = str(event["sender"]["user_id"]).strip()
+
+    if sender_uin:
+        sa_uins = await get_superadmin_qq_uins(db)
+        if sender_uin not in sa_uins:
+            return None
+
+    reply_id, plain_text = _extract_reply_id_and_text(event)
+    if not reply_id:
+        return None
+
+    action = _parse_registration_action(plain_text)
+    if not action:
+        return None
+
+    target_user_id = await get_registration_user_for_msg(reply_id)
+    if not target_user_id:
+        quoted_text = ""
+        if isinstance(event.get("reply"), dict):
+            quoted_text = _extract_quoted_text(event["reply"])
+        elif isinstance(event.get("source"), dict):
+            quoted_text = _extract_quoted_text(event["source"])
+        if not quoted_text:
+            try:
+                msg_res = await _call_onebot(
+                    "get_msg",
+                    {
+                        "message_id": (
+                            int(reply_id)
+                            if reply_id.lstrip("-").isdigit()
+                            else reply_id
+                        )
+                    },
+                    base_url=base_url,
+                    token=token,
+                    client=client,
+                    onebot_caller=onebot_caller,
+                )
+                quoted_text = _extract_quoted_text(msg_res)
+            except Exception:
+                quoted_text = ""
+        if quoted_text:
+            m = _REG_MSG_PARSE_RE.match(quoted_text.strip())
+            if m:
+                uname, uemail = m.group(1).strip(), m.group(2).strip()
+                u_row = (
+                    await db.execute(
+                        select(User).where(
+                            User.username == uname,
+                            User.email == uemail,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if u_row:
+                    target_user_id = u_row.id
+
+    if not target_user_id:
+        return None
+
+    if msg_id:
+        with _lock:
+            _processed_reply_msg_ids.add(msg_id)
+
+    from app.shared.services.user import approve_user, reject_user
+
+    if action == "approve":
+        approved_user = await approve_user(
+            target_user_id,
+            db,
+            base_url=base_url,
+            token=token,
+            group_id=group_id,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        return {
+            "handled": approved_user is not None,
+            "action": "approve",
+            "user_id": target_user_id,
+            "reply_id": reply_id,
+        }
+
+    rejected_ok = await reject_user(target_user_id, db)
+    return {
+        "handled": rejected_ok,
+        "action": "refuse",
+        "user_id": target_user_id,
+        "reply_id": reply_id,
+    }
+
+
+async def poll_snowluma_superadmin_replies_once(
+    db: Optional[AsyncSession] = None,
+    *,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    group_id: Optional[int] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> list[dict[str, Any]]:
+    """Poll SnowLuma private message history for Super Admin quote-reply registration commands."""
+    if db is None:
+        async with AsyncSessionLocal() as session:
+            return await poll_snowluma_superadmin_replies_once(
+                session,
+                base_url=base_url,
+                token=token,
+                group_id=group_id,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
+
+    auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
+    if (
+        not auth_token and client is None and base_url is None and onebot_caller is None
+    ):  # pragma: no cover
+        return []
+
+    sa_uins = await get_superadmin_qq_uins(db)
+    if not sa_uins:
+        return []
+
+    results: list[dict[str, Any]] = []
+    for uin in sa_uins:
+        try:
+            res = await _call_onebot(
+                "get_friend_msg_history",
+                {"user_id": int(uin), "count": 20},
+                base_url=base_url,
+                token=token,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
+        except Exception:  # pragma: no cover
+            continue
+        if res.get("status") != "ok" or res.get("retcode", 0) != 0:
+            continue
+        data = res.get("data")
+        messages: list[Any] = []
+        if isinstance(data, dict) and isinstance(data.get("messages"), list):
+            messages = data["messages"]
+        elif isinstance(data, list):
+            messages = data
+        for item in messages:
+            if not isinstance(item, dict):  # pragma: no cover
+                continue
+            item_with_sender = dict(item)
+            if item_with_sender.get("user_id") is None:
+                item_with_sender["user_id"] = int(uin)
+            handled = await handle_onebot_registration_reply_event(
+                item_with_sender,
+                db,
+                base_url=base_url,
+                token=token,
+                group_id=group_id,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
+            if handled and handled.get("handled"):
+                results.append(handled)
     return results
 
 
@@ -1418,6 +2201,181 @@ async def process_pending_group_requests(
     return len(results)
 
 
+def _get_lifecycle_state_file() -> Path:
+    """Return path to the local lifecycle state file."""
+    return CONFIG_DIR / "lifecycle_state.json"
+
+
+def _read_local_lifecycle_state() -> dict[str, Any]:
+    """Read local lifecycle state JSON if present."""
+    path = _get_lifecycle_state_file()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # pragma: no cover
+        return {}
+
+
+def _write_local_lifecycle_state(data: dict[str, Any]) -> None:
+    """Write local lifecycle state JSON."""
+    path = _get_lifecycle_state_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # pragma: no cover
+        pass
+
+
+def mark_pending_restart() -> None:
+    """Mark that a service restart has been explicitly requested (e.g. via CLI)."""
+    global _memory_pending_restart
+    now = time.time()
+    with _lock:
+        _memory_pending_restart = now
+    state = _read_local_lifecycle_state()
+    state["pending_restart_ts"] = now
+    _write_local_lifecycle_state(state)
+
+
+def _consume_pending_restart() -> bool:
+    """Return True and clear pending restart marker if set within the last 120 seconds."""
+    global _memory_pending_restart
+    now = time.time()
+    matched = False
+    with _lock:
+        if _memory_pending_restart and (now - _memory_pending_restart) < 120:
+            matched = True
+        _memory_pending_restart = 0.0
+    state = _read_local_lifecycle_state()
+    ts = float(state.pop("pending_restart_ts", 0.0) or 0.0)
+    if ts and (now - ts) < 120:
+        matched = True
+        _write_local_lifecycle_state(state)
+    return matched
+
+
+def detect_is_systemd_restart() -> bool:
+    """Detect whether the current shutdown is triggered by ``systemctl restart`` or ``miniclassisland sys restart``."""
+    if _consume_pending_restart():
+        return True
+    if shutil.which("systemctl"):
+        try:
+            res = subprocess.run(
+                ["systemctl", "list-jobs", "--no-legend"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if res.returncode == 0 and res.stdout:
+                for line in res.stdout.splitlines():
+                    low = line.lower()
+                    if "miniclassisland-backend" in low and "restart" in low:
+                        return True
+        except Exception:  # pragma: no cover
+            pass
+    return False
+
+
+async def _set_lifecycle_mode(mode: str) -> None:
+    """Persist the shutdown lifecycle mode (``'restart'`` or ``'stop'``) for the next startup."""
+    global _memory_lifecycle_mode
+    with _lock:
+        _memory_lifecycle_mode = mode
+    state = _read_local_lifecycle_state()
+    if mode:
+        state["mode"] = mode
+    else:
+        state.pop("mode", None)
+    _write_local_lifecycle_state(state)
+    try:
+        r = get_redis(REDIS_DB_AUTH)
+        if mode:
+            await r.set(_REDIS_LIFECYCLE_MODE_KEY, mode, ex=86400 * 7)
+        else:
+            await r.delete(_REDIS_LIFECYCLE_MODE_KEY)
+    except Exception:  # pragma: no cover
+        pass
+
+
+async def _pop_lifecycle_mode() -> str:
+    """Read and clear the persisted shutdown lifecycle mode."""
+    global _memory_lifecycle_mode
+    mode = ""
+    with _lock:
+        if _memory_lifecycle_mode:
+            mode = _memory_lifecycle_mode
+            _memory_lifecycle_mode = ""
+    state = _read_local_lifecycle_state()
+    file_mode = str(state.pop("mode", "") or "").strip()
+    if file_mode:
+        if not mode:
+            mode = file_mode
+        _write_local_lifecycle_state(state)
+    try:
+        r = get_redis(REDIS_DB_AUTH)
+        redis_mode = await r.get(_REDIS_LIFECYCLE_MODE_KEY)
+        if redis_mode:
+            if not mode:
+                mode = str(redis_mode).strip()
+            await r.delete(_REDIS_LIFECYCLE_MODE_KEY)
+    except Exception:  # pragma: no cover
+        pass
+    return mode
+
+
+async def notify_service_shutdown(
+    *,
+    is_restart: Optional[bool] = None,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Send group notification on backend restart or maintenance shutdown and record mode for recovery."""
+    restarting = is_restart if is_restart is not None else detect_is_systemd_restart()
+    mode = "restart" if restarting else "stop"
+    await _set_lifecycle_mode(mode)
+    msg = MSG_RESTARTING if restarting else MSG_SHUTDOWN_MAINTENANCE
+    return await send_group_msg(
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+
+
+async def notify_service_startup_recovery(
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> Optional[str]:
+    """Send group recovery notification on startup if recovering from a previous restart or shutdown."""
+    mode = await _pop_lifecycle_mode()
+    if mode == "restart":
+        msg = MSG_RESTART_RECOVERED
+    elif mode == "stop":
+        msg = MSG_SHUTDOWN_RECOVERED
+    else:
+        return None
+    await send_group_msg(
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return msg
+
+
 async def _snowluma_poll_loop() -> None:  # pragma: no cover
     """Background loop polling SnowLuma for pending QQ group join requests and member departures."""
     interval = max(1.0, float(SNOWLUMA_POLL_INTERVAL or 3.0))
@@ -1430,6 +2388,7 @@ async def _snowluma_poll_loop() -> None:  # pragma: no cover
         try:
             async with AsyncSessionLocal() as db:
                 await process_pending_group_requests(db)
+                await poll_snowluma_superadmin_replies_once(db)
                 await sync_group_member_bindings(db)
         except asyncio.CancelledError:
             raise

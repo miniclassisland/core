@@ -22,7 +22,10 @@ from app.shared.services.user import (
     register_user,
     reject_user,
 )
-from app.shared.utils.community import handle_user_banned_in_community
+from app.shared.utils.community import (
+    handle_user_banned_in_community,
+    notify_user_approved,
+)
 
 user_app = typer.Typer(help="User account management", no_args_is_help=True)
 
@@ -276,9 +279,12 @@ def activate_user_cmd(
             if not user:
                 print(f"❌ User {username} does not exist")
                 return
+            was_pending = user.role_code == "pending"
             user.role_code = "normal"
             user.is_active = True
             await db.commit()
+            if was_pending:
+                await notify_user_approved(user, db)
             print(f"✅ User {username} activated")
 
     asyncio.run(_run())

@@ -152,6 +152,9 @@ def stop_service():
 @sys_app.command("restart")
 def restart_service():
     """Restart background service via systemd."""
+    from app.shared.utils.community import mark_pending_restart
+
+    mark_pending_restart()
     _run_systemctl("restart")
 
 
@@ -251,6 +254,19 @@ def set_setting_cmd(
 
     async def _run():
         async with AsyncSessionLocal() as db:
+            prev_rows = (
+                (
+                    await db.execute(
+                        select(SystemConfig).where(
+                            SystemConfig.key.in_(("announcement_title", "motd"))
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            prev_map = {r.key: str(r.value or "").strip() for r in prev_rows}
+
             now = datetime.now(timezone.utc)
             cfg = (
                 await db.execute(select(SystemConfig).where(SystemConfig.key == key))
@@ -267,6 +283,24 @@ def set_setting_cmd(
                     )
                 )
             await db.commit()
+            if key in ("announcement_title", "motd"):
+                from app.shared.utils.community import notify_group_site_announcement
+
+                new_title = (
+                    str(value or "").strip()
+                    if key == "announcement_title"
+                    else prev_map.get("announcement_title", "")
+                )
+                new_motd = (
+                    str(value or "").strip()
+                    if key == "motd"
+                    else prev_map.get("motd", "")
+                )
+                if (new_title or new_motd) and (
+                    new_title != prev_map.get("announcement_title", "")
+                    or new_motd != prev_map.get("motd", "")
+                ):
+                    await notify_group_site_announcement(new_title, new_motd)
             print(f"✅ Setting {key} updated to {value}")
 
     asyncio.run(_run())

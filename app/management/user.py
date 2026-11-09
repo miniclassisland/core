@@ -5,7 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db, AsyncSessionLocal
 from app.shared.db.models import User, SystemConfig
-from app.shared.utils.community import get_user_community_binding, mask_qq_uin
+from app.shared.utils.community import (
+    get_user_community_binding,
+    mask_qq_uin,
+    notify_superadmin_new_registration,
+)
 from app.shared.schemas.schemas import (
     UserOut,
     UserLoginRequest,
@@ -114,7 +118,7 @@ async def apply_user(
 
     try:
         if require_approval:
-            await register_user(
+            new_user = await register_user(
                 payload.email,
                 payload.password,
                 payload.display_name,
@@ -124,7 +128,7 @@ async def apply_user(
                 is_active=False,
             )
         else:
-            await register_user(
+            new_user = await register_user(
                 payload.email,
                 payload.password,
                 payload.display_name,
@@ -137,6 +141,7 @@ async def apply_user(
             )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    await notify_superadmin_new_registration(new_user, db)
     return MessageResponse(
         message=(
             "Registration successful, awaiting administrator approval"

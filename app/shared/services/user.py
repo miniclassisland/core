@@ -313,7 +313,15 @@ async def _create_default_account(user: User, db: AsyncSession) -> Account:
 
 
 async def approve_user(
-    user_id: str, db: AsyncSession, *, can_create_account: bool = False
+    user_id: str,
+    db: AsyncSession,
+    *,
+    can_create_account: bool = False,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    group_id: Optional[int] = None,
+    client: Optional[object] = None,
+    onebot_caller: Optional[object] = None,
 ) -> Optional[User]:
     """Approve pending user registration and create default account space."""
     result = await db.execute(
@@ -329,6 +337,17 @@ async def approve_user(
 
     await _create_default_account(user, db)
     await db.commit()
+    from app.shared.utils.community import notify_user_approved
+
+    await notify_user_approved(
+        user,
+        db,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,  # type: ignore[arg-type]
+        onebot_caller=onebot_caller,  # type: ignore[arg-type]
+    )
     return user
 
 

@@ -46,6 +46,7 @@ from app.shared.utils.community import (
     get_user_community_binding,
     handle_user_banned_in_community,
     mask_qq_uin,
+    notify_user_approved,
 )
 
 router = APIRouter(prefix="/user", tags=["User"])
@@ -238,6 +239,7 @@ async def update_user_info(
                 detail="Username is already taken",
             )
         body.username = cleaned_uname
+    was_pending = target_user.role_code == "pending"
     update_fields = body.model_dump(exclude_none=True)
     totp_flag = update_fields.pop("totp_enabled", None)
     qq_uin_field = update_fields.pop("qq_uin", None)
@@ -269,6 +271,12 @@ async def update_user_info(
                 )
         else:
             await admin_unbind_user_qq(updated, db)
+    if (
+        was_pending
+        and updated.role_code not in ("pending", "banned")
+        and updated.is_active
+    ):
+        await notify_user_approved(updated, db)
     if not updated.is_active or updated.role_code == "banned":
         await revoke_all_user_sessions(user_id)
     if updated.role_code == "banned":  # pragma: no cover

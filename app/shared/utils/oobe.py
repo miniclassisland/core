@@ -905,7 +905,8 @@ WantedBy=multi-user.target
     local_path.write_text(service_content, encoding="utf-8")
     logger.info("Service file generated: %s", local_path)
 
-    prefix = [] if (hasattr(os, "geteuid") and os.geteuid() == 0) else ["sudo", "-n"]
+    geteuid_fn = getattr(os, "geteuid", None)
+    prefix = [] if (callable(geteuid_fn) and geteuid_fn() == 0) else ["sudo", "-n"]
     venv_cli = Path(work_dir) / ".venv" / "bin" / "miniclassisland"
     if venv_cli.exists():
         for bin_path in ("/usr/local/bin/miniclassisland", "/usr/bin/miniclassisland"):

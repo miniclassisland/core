@@ -1120,7 +1120,7 @@ wheels = [
 
 [[package]]
 name = "miniclassisland-core"
-version = "2.3.1"
+version = "2.4.1"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

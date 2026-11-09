@@ -123,20 +123,42 @@ async def set_quota(
     quota_key: str,
     max_value: int,
     db: AsyncSession,
+    *,
+    base_url: str | None = None,
+    token: str | None = None,
+    group_id: int | None = None,
+    client: object | None = None,
+    onebot_caller: object | None = None,
 ) -> AccountQuota:
     """Create or update quota maximum value for account."""
     existing = await get_quota_record(account_id, quota_key, db)
     if existing:
+        changed = existing.max_value != max_value
         existing.max_value = max_value
         await db.commit()
-        return existing
+        quota = existing
+    else:
+        changed = True
+        quota = AccountQuota(
+            id=str(uuid.uuid4()),
+            account_id=account_id,
+            quota_key=quota_key,
+            max_value=max_value,
+        )
+        db.add(quota)
+        await db.commit()
 
-    quota = AccountQuota(
-        id=str(uuid.uuid4()),
-        account_id=account_id,
-        quota_key=quota_key,
-        max_value=max_value,
-    )
-    db.add(quota)
-    await db.commit()
+    if changed and quota_key in ("max_clients", "max_grpc_connections"):
+        from app.shared.utils.community import notify_account_device_quota_changed
+
+        await notify_account_device_quota_changed(
+            account_id,
+            quota_key,
+            db,
+            group_id=group_id,
+            base_url=base_url,
+            token=token,
+            client=client,  # type: ignore[arg-type]
+            onebot_caller=onebot_caller,  # type: ignore[arg-type]
+        )
     return quota

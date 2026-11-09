@@ -227,6 +227,629 @@ async def test_community_code_endpoint_and_snowluma_binding_flow(test_superadmin
 
 
 @pytest.mark.asyncio
+async def test_qq_bot_event_notifications_and_quote_reply_workflow(
+    test_superadmin_user,
+):
+    """Test superadmin event reports (register, ticket, group join), quote-reply approve/refuse, user notifications (approved, device quota changed), group announcement, and restart/shutdown lifecycle notifications."""
+    from datetime import datetime, timezone
+    from unittest.mock import patch, MagicMock
+    from app.shared.db.models import CommunityBinding, User
+    from app.shared.services.quota import set_quota
+    from app.shared.utils.community import (
+        MSG_RESTART_RECOVERED,
+        MSG_RESTARTING,
+        MSG_SHUTDOWN_MAINTENANCE,
+        MSG_SHUTDOWN_RECOVERED,
+        detect_is_systemd_restart,
+        format_group_announcement,
+        format_superadmin_group_join_report,
+        format_superadmin_registration_report,
+        format_superadmin_ticket_report,
+        format_user_approved_notification,
+        format_user_quota_changed_notification,
+        get_registration_user_for_msg,
+        handle_onebot_registration_reply_event,
+        mark_pending_restart,
+        notify_group_site_announcement,
+        notify_service_shutdown,
+        notify_service_startup_recovery,
+        notify_superadmin_group_join,
+        notify_superadmin_new_registration,
+        notify_superadmin_new_ticket,
+        poll_snowluma_superadmin_replies_once,
+    )
+
+    # Bind test_superadmin_user to QQ 1480708359 in DB
+    async with AsyncSessionLocal() as db:
+        sa_user = (
+            await db.execute(select(User).where(User.id == test_superadmin_user))
+        ).scalar_one()
+        sa_user.display_name = "Super Administrator"
+        db.add(
+            CommunityBinding(
+                user_id=test_superadmin_user,
+                qq_uin="1480708359",
+                group_id=str(COMMUNITY_QQ_GROUP_ID),
+                is_manual=True,
+                is_joined=True,
+                bound_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+        await db.refresh(sa_user)
+
+    # 1. Verify exact message formatting
+    dummy_user = User(
+        id="u-fmt-1",
+        username="admin",
+        email="admin@miniclassisland.com",
+        display_name="Super Administrator",
+        hashed_password="x",
+        role_code="pending",
+        is_active=False,
+    )
+    assert (
+        format_superadmin_registration_report(dummy_user)
+        == "新用户 Super Administrator(admin, admin@miniclassisland.com) 注册"
+    )
+    assert (
+        format_superadmin_ticket_report(dummy_user, "工单标题", "工单正文")
+        == "用户 Super Administrator(admin, admin@miniclassisland.com) 发起工单：工单标题\n工单正文"
+    )
+    assert (
+        format_superadmin_group_join_report(dummy_user, "1234567890", "Name")
+        == "用户 Super Administrator(admin, admin@miniclassisland.com) 刚刚使用 QQ 1234567890(Name) 加入了交流群"
+    )
+    assert (
+        format_user_approved_notification(dummy_user)
+        == "您 (Super Administrator) 的注册申请已经被批准，欢迎使用 MINI ClassIsland"
+    )
+    assert (
+        format_user_quota_changed_notification(dummy_user, 10, 8)
+        == "您 (Super Administrator) 的配额已经变更为最大允许注册 10 台设备，最大允许同时保持 8 台设备连接"
+    )
+    assert format_group_announcement("标题", "正文") == "新的站内公告【标题】：\n正文"
+
+    # 2. Registration report + Quote-Reply Approve & Refuse
+    onebot_log: list[tuple[str, dict]] = []
+    next_msg_id = 5000
+
+    async def fake_bot(action: str, params: dict):
+        nonlocal next_msg_id
+        onebot_log.append((action, params))
+        if action == "send_private_msg":
+            next_msg_id += 1
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"message_id": next_msg_id},
+            }
+        if action == "send_group_msg":
+            next_msg_id += 1
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": {"message_id": next_msg_id},
+            }
+        return {"status": "ok", "retcode": 0, "data": None}
+
+    async with AsyncSessionLocal() as db:
+        reg_u1 = await register_user(
+            "applicant1@miniclassisland.com",
+            "ValidPass123!",
+            "Applicant One",
+            db,
+            username="applicant_one",
+            role_code="pending",
+            is_active=False,
+        )
+        # Bind applicant_one QQ so they also get the approval PM when approved
+        db.add(
+            CommunityBinding(
+                user_id=reg_u1.id,
+                qq_uin="200001111",
+                group_id=str(COMMUNITY_QQ_GROUP_ID),
+                is_manual=True,
+                is_joined=True,
+                bound_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+        delivered = await notify_superadmin_new_registration(
+            reg_u1, db, onebot_caller=fake_bot
+        )
+        assert len(delivered) == 1
+        sa_uin, reg_msg_id1 = delivered[0]
+        assert sa_uin == "1480708359"
+        assert reg_msg_id1 == "5001"
+        assert await get_registration_user_for_msg("5001") == reg_u1.id
+        assert (
+            onebot_log[-1][1]["message"]
+            == "新用户 Applicant One(applicant_one, applicant1@miniclassisland.com) 注册"
+        )
+
+        # Quote-reply "同意" from Super Admin -> approves reg_u1 and sends approval PM to 200001111
+        onebot_log.clear()
+        reply_res1 = await handle_onebot_registration_reply_event(
+            {
+                "message_id": 9001,
+                "user_id": 1480708359,
+                "message": f"[CQ:reply,id={reg_msg_id1}] 同意",
+            },
+            db,
+            onebot_caller=fake_bot,
+        )
+        assert reply_res1 is not None
+        assert reply_res1["handled"] is True
+        assert reply_res1["action"] == "approve"
+
+        await db.refresh(reg_u1)
+        assert reg_u1.role_code == "normal"
+        assert reg_u1.is_active is True
+        assert (
+            "send_private_msg",
+            {
+                "user_id": 200001111,
+                "message": "您 (Applicant One) 的注册申请已经被批准，欢迎使用 MINI ClassIsland",
+                "auto_escape": True,
+            },
+        ) in onebot_log
+
+        # Duplicate message_id 9001 is ignored
+        dup_res = await handle_onebot_registration_reply_event(
+            {
+                "message_id": 9001,
+                "user_id": 1480708359,
+                "message": f"[CQ:reply,id={reg_msg_id1}] 同意",
+            },
+            db,
+            onebot_caller=fake_bot,
+        )
+        assert dup_res is None
+
+        # Non-superadmin sender is ignored
+        non_sa_res = await handle_onebot_registration_reply_event(
+            {
+                "message_id": 9002,
+                "user_id": 99999999,
+                "message": f"[CQ:reply,id={reg_msg_id1}] 同意",
+            },
+            db,
+            onebot_caller=fake_bot,
+        )
+        assert non_sa_res is None
+
+        # Second pending user -> Quote-reply "Refuse" via array segments & get_friend_msg_history poller
+        reg_u2 = await register_user(
+            "applicant2@miniclassisland.com",
+            "ValidPass123!",
+            "Applicant Two",
+            db,
+            username="applicant_two",
+            role_code="pending",
+            is_active=False,
+        )
+        delivered2 = await notify_superadmin_new_registration(
+            reg_u2, db, onebot_caller=fake_bot
+        )
+        reg_msg_id2 = delivered2[0][1]
+
+        async def fake_history_bot(action: str, params: dict):
+            if action == "get_friend_msg_history":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": 9003,
+                                "sender": {"user_id": 1480708359},
+                                "message": [
+                                    {"type": "reply", "data": {"id": reg_msg_id2}},
+                                    {"type": "text", "data": {"text": "Refuse"}},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            return await fake_bot(action, params)
+
+        polled_replies = await poll_snowluma_superadmin_replies_once(
+            db, onebot_caller=fake_history_bot
+        )
+        assert len(polled_replies) == 1
+        assert polled_replies[0]["action"] == "refuse"
+        assert (
+            await db.execute(select(User).where(User.id == reg_u2.id))
+        ).scalar_one_or_none() is None
+
+        # Third pending user -> Quote-reply "Approve" when message_id is not in cache (resolved via get_msg text parsing)
+        reg_u3 = await register_user(
+            "applicant3@miniclassisland.com",
+            "ValidPass123!",
+            "Applicant Three",
+            db,
+            username="applicant_three",
+            role_code="pending",
+            is_active=False,
+        )
+
+        async def fake_get_msg_bot(action: str, params: dict):
+            if action == "get_msg":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": {
+                        "message": "新用户 Applicant Three(applicant_three, applicant3@miniclassisland.com) 注册"
+                    },
+                }
+            return await fake_bot(action, params)
+
+        reply_res3 = await handle_onebot_registration_reply_event(
+            {
+                "message_id": 9004,
+                "user_id": 1480708359,
+                "reply_id": "88888",
+                "raw_message": "Approve",
+            },
+            db,
+            onebot_caller=fake_get_msg_bot,
+        )
+        assert reply_res3 is not None
+        assert reply_res3["handled"] is True
+        await db.refresh(reg_u3)
+        assert reg_u3.role_code == "normal"
+
+        # 3. Ticket creation report to superadmin
+        onebot_log.clear()
+        ticket_sent = await notify_superadmin_new_ticket(
+            reg_u1, "无法连接集控", "客户端报错 503", db, onebot_caller=fake_bot
+        )
+        assert ticket_sent is True
+        assert (
+            onebot_log[-1][1]["message"]
+            == "用户 Applicant One(applicant_one, applicant1@miniclassisland.com) 发起工单：无法连接集控\n客户端报错 503"
+        )
+
+        # 4. Auto-approved group join report to superadmin
+        onebot_log.clear()
+        join_sent = await notify_superadmin_group_join(
+            reg_u1, "200001111", "NickOne", db, onebot_caller=fake_bot
+        )
+        assert join_sent is True
+        assert (
+            onebot_log[-1][1]["message"]
+            == "用户 Applicant One(applicant_one, applicant1@miniclassisland.com) 刚刚使用 QQ 200001111(NickOne) 加入了交流群"
+        )
+
+        # 5. Quota change notification (only max_clients / max_grpc_connections notify owner/admin)
+        from app.shared.db.models import AccountMember
+
+        acct_member = (
+            await db.execute(
+                select(AccountMember).where(AccountMember.user_id == reg_u1.id)
+            )
+        ).scalar_one()
+        acct_id = acct_member.account_id
+
+        onebot_log.clear()
+        # Changing max_bandwidth_mb does NOT trigger notification
+        await set_quota(acct_id, "max_bandwidth_mb", 500, db, onebot_caller=fake_bot)
+        assert onebot_log == []
+
+        # Changing max_clients DOES trigger notification to account owner/admin
+        await set_quota(acct_id, "max_clients", 15, db, onebot_caller=fake_bot)
+        assert len(onebot_log) == 1
+        assert (
+            onebot_log[0][1]["message"]
+            == "您 (Applicant One) 的配额已经变更为最大允许注册 15 台设备，最大允许同时保持 4 台设备连接"
+        )
+
+        onebot_log.clear()
+        await set_quota(acct_id, "max_grpc_connections", 12, db, onebot_caller=fake_bot)
+        assert len(onebot_log) == 1
+        assert (
+            onebot_log[0][1]["message"]
+            == "您 (Applicant One) 的配额已经变更为最大允许注册 15 台设备，最大允许同时保持 12 台设备连接"
+        )
+
+    # 6. Group announcement broadcast
+    onebot_log.clear()
+    ann_ok = await notify_group_site_announcement(
+        "维护通知", "今晚十点升级", onebot_caller=fake_bot
+    )
+    assert ann_ok is True
+    assert onebot_log == [
+        (
+            "send_group_msg",
+            {
+                "group_id": COMMUNITY_QQ_GROUP_ID,
+                "message": "新的站内公告【维护通知】：\n今晚十点升级",
+                "auto_escape": True,
+            },
+        )
+    ]
+    assert await notify_group_site_announcement("", "", onebot_caller=fake_bot) is False
+
+    # 7. Service restart vs shutdown lifecycle group notifications
+    onebot_log.clear()
+    mark_pending_restart()
+    assert detect_is_systemd_restart() is True
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/systemctl"),
+        patch(
+            "subprocess.run",
+            return_value=MagicMock(
+                returncode=0,
+                stdout="123 miniclassisland-backend.service restart running\n",
+            ),
+        ),
+    ):
+        assert detect_is_systemd_restart() is True
+
+    await notify_service_shutdown(is_restart=True, onebot_caller=fake_bot)
+    assert onebot_log[-1][1]["message"] == MSG_RESTARTING
+    rec_msg1 = await notify_service_startup_recovery(onebot_caller=fake_bot)
+    assert rec_msg1 == MSG_RESTART_RECOVERED
+    assert onebot_log[-1][1]["message"] == MSG_RESTART_RECOVERED
+
+    await notify_service_shutdown(is_restart=False, onebot_caller=fake_bot)
+    assert onebot_log[-1][1]["message"] == MSG_SHUTDOWN_MAINTENANCE
+    rec_msg2 = await notify_service_startup_recovery(onebot_caller=fake_bot)
+    assert rec_msg2 == MSG_SHUTDOWN_RECOVERED
+    assert onebot_log[-1][1]["message"] == MSG_SHUTDOWN_RECOVERED
+
+    # Subsequent startup with no pending lifecycle mode sends nothing
+    assert await notify_service_startup_recovery(onebot_caller=fake_bot) is None
+
+    # 8. Additional coverage for edge branches, CLI set/activate, and admin user update
+    from app.shared.utils.community import (
+        _extract_message_id,
+        _extract_quoted_text,
+        _extract_reply_id_and_text,
+        _parse_registration_action,
+        _pop_lifecycle_mode,
+        _reg_msg_users,
+        _send_private_msg_with_id,
+        _set_lifecycle_mode,
+        issue_user_community_code,
+        notify_account_device_quota_changed,
+        poll_snowluma_group_requests_once,
+    )
+
+    assert _extract_message_id({"message_id": 777}) == "777"
+    assert _extract_message_id({}) is None
+
+    async def fail_bot(action: str, params: dict):
+        return {"status": "failed", "retcode": 100}
+
+    assert (
+        await _send_private_msg_with_id(
+            "1480708359", 1131427434, "hi", onebot_caller=fail_bot
+        )
+    ) == (False, None)
+
+    # Redis fallback for get_registration_user_for_msg when memory dict is cleared
+    _reg_msg_users.pop("5001", None)
+    assert await get_registration_user_for_msg("5001") is not None
+
+    async with AsyncSessionLocal() as db:
+        assert (
+            await notify_account_device_quota_changed(
+                "nonexistent", "max_bandwidth_mb", db
+            )
+            == 0
+        )
+
+        # Auto-approved normal user join via poll_snowluma_group_requests_once triggers notify_superadmin_group_join
+        join_u = await register_user(
+            "joiner_norm@miniclassisland.com",
+            "ValidPass123!",
+            "Joiner Norm",
+            db,
+            username="joiner_norm",
+            role_code="normal",
+            is_active=True,
+        )
+        join_code, _ = await issue_user_community_code(join_u.id, db)
+
+        async def fake_join_bot(action: str, params: dict):
+            if action == "get_group_system_msg":
+                return {
+                    "status": "ok",
+                    "retcode": 0,
+                    "data": [
+                        {
+                            "flag": "flag-join-norm",
+                            "group_id": COMMUNITY_QQ_GROUP_ID,
+                            "requester_uin": 300002222,
+                            "requester_nick": "JoinerNick",
+                            "message": f"问题：请输入密码\n答案：{join_code}",
+                            "checked": False,
+                        }
+                    ],
+                }
+            return await fake_bot(action, params)
+
+        join_res = await poll_snowluma_group_requests_once(
+            db, onebot_caller=fake_join_bot
+        )
+        assert len(join_res) == 1
+        assert join_res[0]["approved"] is True
+
+    # Reply extraction and quoted text edge cases
+    assert _extract_reply_id_and_text(
+        {"reply": {"id": "111"}, "raw_message": "[CQ:reply,id=111] 同意"}
+    ) == ("111", "同意")
+    assert _extract_reply_id_and_text(
+        {"source": {"message_id": "222"}, "raw_message": "拒绝"}
+    ) == ("222", "拒绝")
+    assert _extract_reply_id_and_text({"raw_message": "[CQ:reply,id=333] Approve"}) == (
+        "333",
+        "Approve",
+    )
+    assert _parse_registration_action("") is None
+    assert _parse_registration_action("other") is None
+    assert (
+        _extract_quoted_text(
+            {"message": [{"type": "text", "data": {"text": "quoted seg"}}]}
+        )
+        == "quoted seg"
+    )
+    assert _extract_quoted_text({"raw_message": "quoted raw"}) == "quoted raw"
+
+    # handle_onebot_registration_reply_event edge branches (db=None, no reply_id, invalid action, reply/source dict, get_msg error)
+    assert (
+        await handle_onebot_registration_reply_event(
+            {"user_id": 1480708359, "message": "hello"}, onebot_caller=fake_bot
+        )
+        is None
+    )
+    assert (
+        await handle_onebot_registration_reply_event(
+            {"user_id": 1480708359, "reply_id": "999", "message": "hello"},
+            onebot_caller=fake_bot,
+        )
+        is None
+    )
+    assert (
+        await handle_onebot_registration_reply_event(
+            {
+                "sender": {"user_id": 1480708359},
+                "reply": {"id": "99991", "message": "not a reg msg"},
+                "raw_message": "同意",
+            },
+            onebot_caller=fake_bot,
+        )
+        is None
+    )
+
+    async def raise_get_msg_bot(action: str, params: dict):
+        if action == "get_msg":
+            raise RuntimeError("boom")
+        return await fake_bot(action, params)
+
+    assert (
+        await handle_onebot_registration_reply_event(
+            {
+                "user_id": 1480708359,
+                "source": {"id": "99992", "raw_message": ""},
+                "raw_message": "同意",
+            },
+            onebot_caller=raise_get_msg_bot,
+        )
+        is None
+    )
+
+    # poll_snowluma_superadmin_replies_once with db=None, failed retcode, and list data
+    async def list_history_bot(action: str, params: dict):
+        if action == "get_friend_msg_history":
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": [{"message_id": 9099, "message": "plain"}],
+            }
+        return await fake_bot(action, params)
+
+    assert (
+        await poll_snowluma_superadmin_replies_once(onebot_caller=list_history_bot)
+        == []
+    )
+    assert await poll_snowluma_superadmin_replies_once(onebot_caller=fail_bot) == []
+
+    # Lifecycle mode file/redis fallbacks and empty mode clear
+    await _set_lifecycle_mode("")
+    await _set_lifecycle_mode("restart")
+    from app.shared.utils import community as comm_mod
+
+    comm_mod._memory_lifecycle_mode = ""
+    assert await _pop_lifecycle_mode() == "restart"
+
+    await _set_lifecycle_mode("stop")
+    comm_mod._memory_lifecycle_mode = ""
+    comm_mod._write_local_lifecycle_state({})
+    assert await _pop_lifecycle_mode() == "stop"
+
+    # Admin PATCH /user/{id} transitioning pending -> normal triggers notify_user_approved
+    # CLI user activate & CLI sys set announcement_title/motd
+    from app.admin.user import update_user_info
+    from app.shared.schemas.schemas import UserUpdateRequest
+
+    async with AsyncSessionLocal() as db:
+        sa_obj = (
+            await db.execute(select(User).where(User.id == test_superadmin_user))
+        ).scalar_one()
+        pend_admin_u = await register_user(
+            "pend_admin@miniclassisland.com",
+            "ValidPass123!",
+            "Pend Admin",
+            db,
+            username="pend_admin",
+            role_code="pending",
+            is_active=False,
+        )
+        await update_user_info(
+            pend_admin_u.id,
+            UserUpdateRequest(
+                username=None,
+                display_name=None,
+                qq_uin=None,
+                role_code="normal",
+                is_active=True,
+            ),
+            db=db,
+            admin_user=sa_obj,
+        )
+
+        await register_user(
+            "pend_cli@miniclassisland.com",
+            "ValidPass123!",
+            "Pend CLI",
+            db,
+            username="pend_cli",
+            role_code="pending",
+            is_active=False,
+        )
+
+    import asyncio as _asyncio
+    import concurrent.futures
+    from typer.testing import CliRunner
+    from app.cli.main import cli
+
+    runner = CliRunner()
+
+    def _run_cli_cmds():
+        r1 = runner.invoke(cli, ["user", "activate", "pend_cli"])
+        r2 = runner.invoke(cli, ["sys", "set-setting", "announcement_title", "CLI标题"])
+        r3 = runner.invoke(cli, ["sys", "set-setting", "motd", "CLI正文"])
+        return r1.exit_code, r2.exit_code, r3.exit_code
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        c1, c2, c3 = await _asyncio.get_running_loop().run_in_executor(
+            pool, _run_cli_cmds
+        )
+    assert (c1, c2, c3) == (0, 0, 0)
+
+    # Clean up test superadmin binding so subsequent tests see clean state
+    async with AsyncSessionLocal() as db:
+        from sqlalchemy import delete as sql_delete
+
+        await db.execute(
+            sql_delete(CommunityBinding).where(
+                CommunityBinding.user_id.in_([test_superadmin_user, join_u.id])
+            )
+        )
+        await db.commit()
+        # With no superadmin bindings in DB, poll_snowluma_superadmin_replies_once returns []
+        assert (
+            await poll_snowluma_superadmin_replies_once(db, onebot_caller=fake_bot)
+            == []
+        )
+
+
+@pytest.mark.asyncio
 async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind_ban(
     test_superadmin_user,
 ):
