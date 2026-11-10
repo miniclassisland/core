@@ -18,6 +18,7 @@ from pgpy.constants import (
     KeyFlags,
     HashAlgorithm,
     SymmetricKeyAlgorithm,
+    SignatureType,
 )
 
 from app.shared.utils.config import REDIS_DB_SESSION, KEY_FILE
@@ -74,12 +75,12 @@ class GPGKeyManager:
             )
             with os.fdopen(fd, "w") as f:
                 f.write(str(k))
-        except OSError:  # pragma: no cover
+        except OSError:
             with open(self._key_file, "w") as f:
                 f.write(str(k))
         try:
             os.chmod(self._key_file, 0o600)
-        except OSError:  # pragma: no cover
+        except OSError:
             pass
 
     def decrypt(self, encrypted: str) -> Any:
@@ -95,13 +96,23 @@ class GPGKeyManager:
 
     def sign_detached(self, text: str) -> str:
         """Sign canonical text with server private key and return ASCII-armored detached signature."""
-        if self.private_key is None:  # pragma: no cover
+        if self.private_key is None:
             return ""
         try:
             pk: Any = self.private_key
-            sig = pk.sign(text.encode("utf-8"), hash=HashAlgorithm.SHA256)
+            data = text.encode("utf-8")
+            try:
+                sig = pk.sign(data, hash=HashAlgorithm.SHA256)
+            except Exception:
+                raw_sig = pgpy.PGPSignature.new(
+                    SignatureType.BinaryDocument,
+                    pk.key_algorithm,
+                    HashAlgorithm.SHA256,
+                    pk.fingerprint.keyid,
+                )
+                sig = pk._sign(data, raw_sig)
             return str(sig)
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             logger.error("GPG signing failed: %s", e)
             return ""
 
@@ -216,7 +227,7 @@ class SessionManager:
         key = f"session:{sid}"
         await rd.hset(key, mapping={"cuid": cuid, "tenant_id": tenant_id})
         await rd.expire(key, SESSION_TTL)
-        if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:  # pragma: no cover
+        if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:
             _LOCAL_SESSION_CACHE.pop(next(iter(_LOCAL_SESSION_CACHE)), None)
         _LOCAL_SESSION_CACHE[sid] = (
             time.monotonic() + _LOCAL_SESSION_TTL,
@@ -241,7 +252,7 @@ class SessionManager:
                 and cached_tid
                 and cached_tid != "default"
                 and cached_tid != tenant_id
-            ):  # pragma: no cover
+            ):
                 return None
             return cached_cuid
         rd = get_redis(REDIS_DB_SESSION)
@@ -250,7 +261,7 @@ class SessionManager:
             return None
         cuid = data["cuid"]
         tid = data.get("tenant_id", "")
-        if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:  # pragma: no cover
+        if len(_LOCAL_SESSION_CACHE) >= _MAX_LOCAL_SESSION_CACHE:
             _LOCAL_SESSION_CACHE.pop(next(iter(_LOCAL_SESSION_CACHE)), None)
         _LOCAL_SESSION_CACHE[sid] = (now + _LOCAL_SESSION_TTL, cuid, tid)
         if (
@@ -259,7 +270,7 @@ class SessionManager:
             and tid
             and tid != "default"
             and tid != tenant_id
-        ):  # pragma: no cover
+        ):
             return None
         return cuid
 
@@ -274,17 +285,80 @@ class SessionManager:
         rd = get_redis(REDIS_DB_SESSION)
         return await rd.hget(f"session:{sid}", "tenant_id")
 
-    async def set_client_online(self, tid: str, cuid: str, ip: str = ""):
+    async def mark_client_extend_enabled(
+        self, tid: str, cuid: str, version: str = "2.0.0.1"
+    ):
+        """Record that a client device has MiniClassIsland.ExtendManagement active."""
+        rd = get_redis(REDIS_DB_SESSION)
+        ext_key = f"extend_mgmt:{tid}:{cuid}"
+        pipe = rd.pipeline(transaction=False)
+        pipe.hset(
+            ext_key,
+            mapping={
+                "enabled": "1",
+                "version": version or "2.0.0.1",
+                "updated_at": str(int(time.time())),
+            },
+        )
+        pipe.expire(ext_key, SESSION_TTL * 7)
+        if tid:
+            pipe.sadd(f"extend_mgmt_set:{tid}", cuid)
+            pipe.expire(f"extend_mgmt_set:{tid}", SESSION_TTL * 7)
+        await pipe.execute()
+
+    async def get_extend_enabled_clients(self, tid: str) -> dict[str, dict[str, str]]:
+        """Return mapping of client_uid -> {enabled, version, updated_at} for tenant."""
+        rd = get_redis(REDIS_DB_SESSION)
+        out: dict[str, dict[str, str]] = {}
+        if tid:
+            members = list(await rd.smembers(f"extend_mgmt_set:{tid}"))
+            if not members:
+                return out
+            pipe = rd.pipeline(transaction=False)
+            for cuid in members:
+                pipe.hgetall(f"extend_mgmt:{tid}:{cuid}")
+            results = await pipe.execute()
+            for cuid, data in zip(members, results):
+                if data and data.get("enabled") == "1":
+                    out[cuid] = data
+        return out
+
+    async def set_client_online(
+        self,
+        tid: str,
+        cuid: str,
+        ip: str = "",
+        extend_enabled: bool = False,
+        extend_version: str = "",
+    ):
         """Record device online heartbeat and bind IP via single Redis pipeline."""
         rd = get_redis(REDIS_DB_SESSION)
         key = f"online:{tid}:{cuid}"
+        mapping = {"status": "online", "ip": ip}
+        if extend_enabled:
+            mapping["extend_enabled"] = "1"
+            mapping["extend_version"] = extend_version or "2.0.0.1"
         pipe = rd.pipeline(transaction=False)
-        pipe.hset(key, mapping={"status": "online", "ip": ip})
+        pipe.hset(key, mapping=mapping)
         pipe.expire(key, ONLINE_TTL)
         if tid:
             idx_key = f"online_set:{tid}"
             pipe.sadd(idx_key, cuid)
             pipe.expire(idx_key, SESSION_TTL)
+        if extend_enabled:
+            ext_key = f"extend_mgmt:{tid}:{cuid}"
+            pipe.hset(
+                ext_key,
+                mapping={
+                    "enabled": "1",
+                    "version": extend_version or "2.0.0.1",
+                    "updated_at": str(int(time.time())),
+                },
+            )
+            pipe.expire(ext_key, SESSION_TTL * 7)
+            if tid:
+                pipe.sadd(f"extend_mgmt_set:{tid}", cuid)
+                pipe.expire(f"extend_mgmt_set:{tid}", SESSION_TTL * 7)
         await pipe.execute()
 
     async def set_client_offline(self, tid: str, cuid: str):
@@ -341,6 +415,9 @@ class SessionManager:
                             "uid": cuid,
                             "status": "online",
                             "ip": data.get("ip", ""),
+                            "extend_management_enabled": data.get("extend_enabled")
+                            == "1",
+                            "extend_management_version": data.get("extend_version", ""),
                         }
                     )
                 else:

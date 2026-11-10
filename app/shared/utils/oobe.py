@@ -701,12 +701,12 @@ def write_config_file(config: dict) -> None:
         )
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(file_config, f, indent=2, ensure_ascii=False)
-    except OSError:  # pragma: no cover
+    except OSError:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(file_config, f, indent=2, ensure_ascii=False)
     try:
         os.chmod(CONFIG_FILE, 0o600)
-    except OSError:  # pragma: no cover
+    except OSError:
         pass
     logger.info("Configuration written to %s", CONFIG_FILE)
 
@@ -874,7 +874,7 @@ def generate_systemd_service() -> None:
 
     service_content = f"""[Unit]
 Description=MINI ClassIsland Backend Server
-Documentation=https://github.com/MINIOpenSource/miniclassisland
+Documentation=https://github.com/miniclassisland/miniclassisland
 After=network.target postgresql.service redis-server.service
 Wants=postgresql.service redis-server.service
 

@@ -62,6 +62,7 @@ DEFAULT_QUOTAS = [
     ("max_bandwidth_mb", 100),
     ("feature.ota", 1),
     ("feature.audit", 1),
+    ("feature.risk", 1),
 ]
 
 SYSTEM_ROLES = [

@@ -391,7 +391,7 @@ async def test_qq_bot_event_notifications_and_quote_reply_workflow(
             "send_private_msg",
             {
                 "user_id": 200001111,
-                "message": "您 (Applicant One) 的注册申请已经被批准，欢迎使用 MINI ClassIsland",
+                "message": "您 (Applicant One) 的注册申请已经被批准，欢迎使用 MINI ClassIsland，当前配额最大允许注册 6 台设备",
                 "auto_escape": True,
             },
         ) in onebot_log

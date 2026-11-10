@@ -211,7 +211,7 @@ async def user_login(
     )
     try:
         token, user, needs_2fa = await login_user(payload.email, payload.password, db)
-    except ValueError as exc:  # pragma: no cover
+    except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
     if needs_2fa:
         temp = await create_2fa_temp_token(user.id)
@@ -410,7 +410,7 @@ async def enable_2fa(
             )
         reset_flag = await rd.getdel(f"totp_reset_allowed:{uid}")
         remaining_codes = await get_remaining_recovery_count(uid)
-        if not reset_flag and remaining_codes > 1:  # pragma: no cover
+        if not reset_flag and remaining_codes > 1:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Resetting an active 2FA requires recovery-code reset authorization or disabling 2FA first",
@@ -466,9 +466,9 @@ async def confirm_2fa(
             parsed_codes = json.loads(pending_codes_raw)
             if isinstance(parsed_codes, list):
                 await store_recovery_codes(uid, [str(c) for c in parsed_codes])
-        except Exception:  # pragma: no cover
+        except Exception:
             pass
-    elif await get_remaining_recovery_count(uid) == 0:  # pragma: no cover
+    elif await get_remaining_recovery_count(uid) == 0:
         await store_recovery_codes(uid, generate_recovery_codes())
     return {"status": "2fa_enabled"}
 

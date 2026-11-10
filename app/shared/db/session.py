@@ -43,6 +43,36 @@ async def init_db() -> None:
                     "ALTER TABLE community_bindings ADD COLUMN IF NOT EXISTS is_joined BOOLEAN NOT NULL DEFAULT TRUE"
                 )
             )
+            await conn.execute(
+                text(
+                    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS extend_management_enabled BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS extend_management_version VARCHAR(64)"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS is_app_locked BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS plugin_settings_json TEXT"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS plugin_components_json TEXT"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE clients ADD COLUMN IF NOT EXISTS hardware_info_json TEXT"
+                )
+            )
 
 
 async def get_db():

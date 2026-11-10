@@ -48,13 +48,13 @@ async def close_turnstile_client() -> None:
 async def get_turnstile_secret_key(db: Optional[AsyncSession] = None) -> str:
     """Resolve Cloudflare Turnstile secret key from environment, config.json, or SystemConfig."""
     env_secret = os.getenv("TURNSTILE_SECRET_KEY", "").strip()
-    if env_secret:  # pragma: no cover
+    if env_secret:
         return env_secret
 
     try:
         file_cfg = _load_file_config()
         cfg_secret = str(file_cfg.get("turnstile_secret_key", "")).strip()
-        if cfg_secret:  # pragma: no cover
+        if cfg_secret:
             return cfg_secret
     except Exception:
         pass
@@ -68,7 +68,7 @@ async def get_turnstile_secret_key(db: Optional[AsyncSession] = None) -> str:
                     )
                 )
             ).scalar_one_or_none()
-            if row and row.strip() and row.strip() != "***":  # pragma: no cover
+            if row and row.strip() and row.strip() != "***":
                 return row.strip()
         except Exception:
             pass
@@ -90,7 +90,7 @@ def get_turnstile_allowed_hostnames() -> set[str]:
         return {host.strip().lower() for host in raw.split(",") if host.strip()}
 
     domain = (BASE_DOMAIN or "").strip().lower()
-    if not domain:  # pragma: no cover
+    if not domain:
         return set()
     return {domain, f"dash.{domain}", f"dashboard.{domain}"}
 

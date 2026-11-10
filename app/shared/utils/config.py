@@ -111,7 +111,7 @@ def _load_file_config() -> dict:
             _CACHED_FILE_CFG = data if isinstance(data, dict) else {}
             _CACHED_FILE_MTIME = mtime
             return _CACHED_FILE_CFG
-        except Exception:  # pragma: no cover
+        except Exception:
             return _CACHED_FILE_CFG
     _CACHED_FILE_CFG = {}
     _CACHED_FILE_MTIME = -1.0

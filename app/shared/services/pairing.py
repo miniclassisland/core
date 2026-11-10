@@ -62,7 +62,7 @@ async def create_pairing_request(
             )
             or 0
         )
-        if pending_cnt >= _MAX_PENDING_PAIRING_CODES_PER_TENANT:  # pragma: no cover
+        if pending_cnt >= _MAX_PENDING_PAIRING_CODES_PER_TENANT:
             oldest_codes = (
                 (
                     await db.execute(

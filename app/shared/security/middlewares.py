@@ -103,7 +103,7 @@ async def check_ip_blocked_async(ip: str) -> bool:
             val = await r.get(f"cc:ip_fail:{ip}")
             if val is not None and int(val) >= IP_FAILURE_LIMIT:
                 return True
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
     return False
 
@@ -119,9 +119,9 @@ async def record_ip_failure_async(ip: str) -> None:
             r = get_redis(REDIS_DB_AUTH)
             key = f"cc:ip_fail:{ip}"
             cnt = await r.incr(key)
-            if cnt == 1 or cnt == IP_FAILURE_LIMIT:  # pragma: no cover
+            if cnt == 1 or cnt == IP_FAILURE_LIMIT:
                 await r.expire(key, IP_BLOCK_DURATION)
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
 
 
@@ -230,7 +230,7 @@ def _is_pending_user_allowed_request(path: str, method: str) -> bool:
         "GET",
         "HEAD",
         "OPTIONS",
-    ):  # pragma: no cover
+    ):
         if (
             not path_lower.endswith(("/create", "/delete", "/command/get-config"))
             and "/credentials" not in path_lower
@@ -295,7 +295,7 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
                                 "msg": "Account is awaiting administrator approval",
                             },
                         )
-                elif not u.is_active:  # pragma: no cover
+                elif not u.is_active:
                     return JSONResponse(
                         status_code=status.HTTP_403_FORBIDDEN,
                         content={
@@ -405,7 +405,7 @@ class AccountContextMiddleware(BaseHTTPMiddleware):
                     ).scalar_one_or_none()
                 )
                 if member:
-                    if u and u.role_code == "pending":  # pragma: no cover
+                    if u and u.role_code == "pending":
                         role_in_account = "viewer"
                     else:
                         role_in_account = member.role_in_account or "member"

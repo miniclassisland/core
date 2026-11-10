@@ -221,6 +221,20 @@ class ClientRecord(Base):
     mac: Mapped[str] = mapped_column(String(64), default="")
     ip: Mapped[str] = mapped_column(String(64), default="")
     is_disabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    extend_management_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    extend_management_version: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, default=None
+    )
+    is_app_locked: Mapped[bool] = mapped_column(Boolean, default=False)
+    plugin_settings_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
+    plugin_components_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
+    hardware_info_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True, default=None
+    )
     registered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None

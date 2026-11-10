@@ -45,7 +45,7 @@ _MSG_TICKET_NOT_FOUND = "工单不存在"
 async def _get_ticket_with_user(
     db: AsyncSession, ticket_id: str
 ) -> tuple[Ticket, Optional[User]]:
-    if is_unsafe_ticket_id(ticket_id):  # pragma: no cover
+    if is_unsafe_ticket_id(ticket_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=_MSG_TICKET_NOT_FOUND
         )
@@ -63,7 +63,7 @@ async def _get_ticket_with_user(
     return row[0], row[1]
 
 
-async def _message_count(db: AsyncSession, ticket_id: str) -> int:  # pragma: no cover
+async def _message_count(db: AsyncSession, ticket_id: str) -> int:
     count = (
         await db.execute(
             select(func.count(TicketMessage.id)).where(
@@ -91,7 +91,7 @@ async def list_all_tickets(
 
     if ticket_status:
         normalized = ticket_status.strip().lower()
-        if normalized not in TICKET_STATUSES:  # pragma: no cover
+        if normalized not in TICKET_STATUSES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="无效的工单状态",
@@ -99,13 +99,13 @@ async def list_all_tickets(
         filters.append(Ticket.status == normalized)
     if priority:
         normalized_priority = priority.strip().lower()
-        if normalized_priority not in TICKET_PRIORITIES:  # pragma: no cover
+        if normalized_priority not in TICKET_PRIORITIES:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="无效的优先级",
             )
         filters.append(Ticket.priority == normalized_priority)
-    if category:  # pragma: no cover
+    if category:
         normalized_category = category.strip().lower()
         if normalized_category not in TICKET_CATEGORIES:
             raise HTTPException(
@@ -113,7 +113,7 @@ async def list_all_tickets(
                 detail="无效的工单分类",
             )
         filters.append(Ticket.category == normalized_category)
-    if unread_only:  # pragma: no cover
+    if unread_only:
         filters.append(Ticket.admin_unread.is_(True))
     if q.strip():
         if has_unsafe_control(q):

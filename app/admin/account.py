@@ -20,6 +20,7 @@ from app.shared.schemas.schemas import (
     AccountOut,
     AccountCreate,
     AccountUpdate,
+    ApproveUserRequest,
     QuotaOut,
     QuotaSetRequest,
     UserOut,
@@ -217,9 +218,7 @@ async def admin_update_account(
     admin_user: User = Depends(_sa),
 ):
     """Update account properties (name, slug, is_active, registration_mode; Account ID is immutable)."""
-    if (
-        body.new_id is not None and body.new_id.strip() != account_id
-    ):  # pragma: no cover
+    if body.new_id is not None and body.new_id.strip() != account_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account ID is immutable and cannot be modified",
@@ -244,7 +243,7 @@ async def admin_update_account(
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except PermissionError as exc:  # pragma: no cover
+    except PermissionError as exc:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
     if not acct:
         raise HTTPException(
@@ -375,7 +374,7 @@ async def admin_list_all_clients(
             )
         )
     all_records = list((await db.execute(stmt)).scalars().all())
-    if not all_records:  # pragma: no cover
+    if not all_records:
         return []
 
     by_acct: dict[str, list[ClientRecord]] = {}
@@ -413,7 +412,7 @@ async def get_pending(
 ):
     """List all pending user registration applications."""
     users = await list_pending_users(db)
-    if not users:  # pragma: no cover
+    if not users:
         return []
     uids = [u.id for u in users]
     bindings = (
@@ -437,11 +436,23 @@ async def get_pending(
 )
 async def approve_pending(
     user_id: str,
+    body: ApproveUserRequest | None = Body(default=None),
     db: AsyncSession = Depends(get_db),
     _user=Depends(_sa),
 ):
-    """Approve a pending user registration application."""
-    user = await approve_user(user_id, db)
+    """Approve a pending user registration application with optional quota overrides."""
+    quotas = body.resolved_quotas() if body else None
+    can_create = (
+        bool(body.can_create_account)
+        if body and body.can_create_account is not None
+        else False
+    )
+    user = await approve_user(
+        user_id,
+        db,
+        can_create_account=can_create,
+        quotas=quotas,
+    )
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

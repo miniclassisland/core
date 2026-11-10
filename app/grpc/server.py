@@ -69,6 +69,7 @@ _MAX_REGISTER_LOCKS = 4096
 # calls UploadConfig without GetMetadata(); the servicer verifies RequestGuidId or session)
 _AUTH_EXEMPT = {
     "Register",
+    "UnRegister",
     "BeginHandshake",
     "CompleteHandshake",
     "UploadConfig",
@@ -279,7 +280,7 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
             )
 
         raw_cipher = request.ChallengeTokenEncrypted or ""
-        if not raw_cipher or len(raw_cipher) > 16384:  # pragma: no cover
+        if not raw_cipher or len(raw_cipher) > 16384:
             return HandshakeScRsp_pb2.HandshakeScBeginHandShakeRsp(
                 Retcode=Retcode_pb2.ServerInternalError
             )
@@ -325,7 +326,7 @@ class HandshakeServicer(Handshake_pb2_grpc.HandshakeServicer):
                     tenant_id
                     and client.account_id
                     and client.account_id not in (tenant_id, "default")
-                ):  # pragma: no cover
+                ):
                     return HandshakeScRsp_pb2.HandshakeScCompleteHandshakeRsp(
                         Retcode=Retcode_pb2.InvalidRequest
                     )
@@ -556,23 +557,37 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
         )
 
     async def UnRegister(self, request, context):
-        sid = _get_metadata_dict(context).get("session", "")
-        real_cuid = await self._sm.validate_session(sid)
-
-        if not real_cuid or real_cuid != request.ClientUid:
+        md = _get_metadata_dict(context)
+        sid = md.get("session", "")
+        real_cuid = await self._sm.validate_session(sid) if sid else None
+        if sid and not real_cuid:
             await context.abort(
                 grpc.StatusCode.UNAUTHENTICATED,
                 "Session authentication failed, unable to unregister",
             )
             return ClientRegisterScRsp_pb2.ClientRegisterScRsp()
 
-        tid = await self._sm.get_session_tenant(sid) or _get_tenant_id_safe()
+        target_cuid = (
+            request.ClientUid or md.get("cuid", "") or real_cuid or ""
+        ).strip()
+        if not target_cuid:
+            await context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "ClientUid is required to unregister",
+            )
+            return ClientRegisterScRsp_pb2.ClientRegisterScRsp()
+
+        tid = (
+            await self._sm.get_session_tenant(sid) if sid else None
+        ) or _get_tenant_id_safe()
+        peer_ip = get_client_ip_from_grpc(context)
+        req_mac = (request.ClientMac or md.get("x-client-mac", "")).strip()
 
         async with AsyncSessionLocal() as db:
             await set_search_path(db)
             rec = (
                 await db.execute(
-                    select(ClientRecord).where(ClientRecord.uid == real_cuid)
+                    select(ClientRecord).where(ClientRecord.uid == target_cuid)
                 )
             ).scalar_one_or_none()
             if rec:
@@ -582,11 +597,48 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                         "Device does not belong to this tenant",
                     )
                     return ClientRegisterScRsp_pb2.ClientRegisterScRsp()
+
+                authorized = bool(real_cuid and real_cuid == target_cuid)
+                if (
+                    not authorized
+                    and rec.mac
+                    and req_mac
+                    and rec.mac.upper().replace(":", "-")
+                    == req_mac.upper().replace(":", "-")
+                ):
+                    authorized = True
+                if not authorized and rec.ip and peer_ip and rec.ip == peer_ip:
+                    authorized = True
+                if not authorized and peer_ip in ("127.0.0.1", "::1", "localhost"):
+                    authorized = True
+
+                if not authorized:
+                    await context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED,
+                        "Session authentication failed, unable to unregister",
+                    )
+                    return ClientRegisterScRsp_pb2.ClientRegisterScRsp()
+
+                effective_tid = tid or rec.account_id or "default"
+                pre_rows = (
+                    (
+                        await db.execute(
+                            select(PreRegisteredClient).where(
+                                PreRegisteredClient.account_id == effective_tid,
+                                PreRegisteredClient.bound_client_uid == target_cuid,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for p in pre_rows:
+                    p.bound_client_uid = ""
                 await db.delete(rec)
                 await db.commit()
 
-        await self._sm.set_client_offline(tid, real_cuid)
-        logger.info("Client device unregistered: uid=%s", real_cuid)
+        await self._sm.set_client_offline(tid, target_cuid)
+        logger.info("Client device unregistered: uid=%s", target_cuid)
         return ClientRegisterScRsp_pb2.ClientRegisterScRsp(Retcode=Retcode_pb2.Success)
 
 
@@ -619,6 +671,17 @@ class ClientCommandDeliverServicer(
 
         tid = await self._sm.get_session_tenant(sid) or _get_tenant_id_safe()
         client_ip = get_client_ip_from_grpc(context)
+        raw_ext = (
+            (
+                md.get("x-extend-management-enabled")
+                or md.get("x-mci-extend-management")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        ext_enabled = raw_ext in ("1", "true", "yes")
+        ext_ver = (md.get("x-extend-management-version") or "").strip()
 
         # Allocate queue and migrate any pending commands from stale stream
         q_key = f"{tid}:{real_cuid}"
@@ -627,7 +690,13 @@ class ClientCommandDeliverServicer(
         self.client_queues[q_key] = queue
         if tid:
             self.tenant_clients.setdefault(tid, set()).add(real_cuid)
-        await self._sm.set_client_online(tid, real_cuid, ip=client_ip)
+        await self._sm.set_client_online(
+            tid,
+            real_cuid,
+            ip=client_ip,
+            extend_enabled=ext_enabled,
+            extend_version=ext_ver,
+        )
 
         # Update DB record last_seen_at & ip and enforce max_grpc_connections quota in a single DB session
         try:
@@ -665,6 +734,10 @@ class ClientCommandDeliverServicer(
                         self.tenant_clients.setdefault(tid, set()).add(real_cuid)
                     if client_ip:
                         rec.ip = client_ip
+                    if ext_enabled:
+                        rec.extend_management_enabled = True
+                        if ext_ver:
+                            rec.extend_management_version = ext_ver
                     rec.last_seen_at = datetime.now(timezone.utc)
                     await db.commit()
 
@@ -701,11 +774,11 @@ class ClientCommandDeliverServicer(
                         and not queue.full()
                     ):
                         queue.put_nowait(pending_cmd)
-                except Exception:  # pragma: no cover
+                except Exception:
                     break
             try:
                 old_q.put_nowait(None)
-            except asyncio.QueueFull:  # pragma: no cover
+            except asyncio.QueueFull:
                 pass
 
         logger.info(
@@ -794,7 +867,7 @@ class ClientCommandDeliverServicer(
                         q.get_nowait()
                         q.task_done()
                         q.put_nowait(None)
-                    except Exception:  # pragma: no cover
+                    except Exception:
                         pass
                 disconnected = True
         await self._sm.set_client_offline(tid, cuid)
@@ -804,6 +877,71 @@ class ClientCommandDeliverServicer(
 # ---- 4. Config Upload Servicer ----
 
 
+async def _sync_extend_response_to_client_record(
+    db: Any,
+    client_uid: str,
+    payload_str: str,
+    ext_enabled: bool = False,
+    ext_ver: str = "",
+) -> None:
+    """Extract plugin hook catalogs, hardware info, and lock state from uploaded ExtendCommand payload."""
+    if not client_uid:
+        return
+    rec = (
+        await db.execute(select(ClientRecord).where(ClientRecord.uid == client_uid))
+    ).scalar_one_or_none()
+    if not rec:
+        return
+    if ext_enabled:
+        rec.extend_management_enabled = True
+        if ext_ver:
+            rec.extend_management_version = ext_ver
+    if not payload_str or not payload_str.strip().startswith("{"):
+        return
+    try:
+        parsed = json.loads(payload_str)
+    except Exception:
+        return
+    if not isinstance(parsed, dict):
+        return
+
+    action = str(parsed.get("action") or parsed.get("Action") or "").strip().lower()
+    data = parsed.get("data") if "data" in parsed else parsed.get("Data")
+    if not isinstance(data, dict):
+        return
+
+    if action:
+        rec.extend_management_enabled = True
+    if "version" in data and isinstance(data["version"], str) and data["version"]:
+        rec.extend_management_version = data["version"].strip()
+    if "isAppLocked" in data and isinstance(data["isAppLocked"], bool):
+        rec.is_app_locked = data["isAppLocked"]
+
+    if action in ("plugin.api_snapshot", "plugin.hook.snapshot"):
+        if "settingsCatalog" in data and data["settingsCatalog"] is not None:
+            rec.plugin_settings_json = json.dumps(
+                data["settingsCatalog"], ensure_ascii=False
+            )
+        if "registeredComponents" in data and data["registeredComponents"] is not None:
+            rec.plugin_components_json = json.dumps(
+                data["registeredComponents"], ensure_ascii=False
+            )
+    elif action in (
+        "plugin.get_settings",
+        "plugin.settings.list",
+        "plugin.settings.get",
+    ):
+        rec.plugin_settings_json = json.dumps(data, ensure_ascii=False)
+    elif action in (
+        "plugin.list_components",
+        "plugin.components.list",
+        "plugin.components.registry",
+    ):
+        rec.plugin_components_json = json.dumps(data, ensure_ascii=False)
+    elif action.startswith("hardware."):
+        rec.hardware_info_json = json.dumps(data, ensure_ascii=False)
+
+
 class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
     """Client configuration upload service."""
 
@@ -811,12 +949,24 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
         self._sm = session_manager
 
     async def UploadConfig(self, request, context):
-        sid = _get_metadata_dict(context).get("session", "")
+        md = _get_metadata_dict(context)
+        sid = md.get("session", "")
         real_cuid = await self._sm.validate_session(sid) if sid else None
         tid = (
             await self._sm.get_session_tenant(sid) if sid else None
         ) or _get_tenant_id_safe()
         peer_ip = get_client_ip_from_grpc(context)
+        raw_ext = (
+            (
+                md.get("x-extend-management-enabled")
+                or md.get("x-mci-extend-management")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+        ext_enabled = raw_ext in ("1", "true", "yes")
+        ext_ver = (md.get("x-extend-management-version") or "").strip()
 
         req_guid = getattr(request, "RequestGuidId", "")
         req_guid_str = req_guid if isinstance(req_guid, str) else ""
@@ -880,6 +1030,11 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                 existing.uploaded_at = datetime.now(timezone.utc)
                 if real_cuid:
                     existing.client_uid = real_cuid
+                target_uid = real_cuid or existing.client_uid
+                if target_uid:
+                    await _sync_extend_response_to_client_record(
+                        db, target_uid, payload_str, ext_enabled, ext_ver
+                    )
                 await db.commit()
                 return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
                     Retcode=Retcode_pb2.Success, Message="Upload successful"
@@ -890,7 +1045,7 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                     Retcode=Retcode_pb2.InvalidRequest, Message="Session expired"
                 )
 
-            if existing is not None:  # pragma: no cover
+            if existing is not None:
                 existing.payload = payload_str
                 existing.status = "completed"
                 existing.uploaded_at = datetime.now(timezone.utc)
@@ -907,6 +1062,9 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                         uploaded_at=datetime.now(timezone.utc),
                     )
                 )
+            await _sync_extend_response_to_client_record(
+                db, real_cuid, payload_str, ext_enabled, ext_ver
+            )
             await db.commit()
 
         return ConfigUploadScRsp_pb2.ConfigUploadScRsp(

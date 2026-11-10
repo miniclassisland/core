@@ -54,7 +54,7 @@ async def enforce_ticket_write_limit(
             )
     except HTTPException:
         raise
-    except Exception as exc:  # pragma: no cover - Redis outage fallback
+    except Exception as exc:
         logger.warning("Ticket rate limiter unavailable: %s", exc)
 
 

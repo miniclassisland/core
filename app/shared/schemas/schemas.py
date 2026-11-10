@@ -255,12 +255,13 @@ class ClientManifest(BaseModel):
     CredentialSource: Dict[str, Any]
     ServerKind: int = 1
     OrganizationName: str = "MINI ClassIsland Server"
-    CoreVersion: str = "2.0.0.0"
+    CoreVersion: str = "2.6.1"
     ServerFlavor: str = "miniclassisland"
     ServerSoftware: str = "MINI ClassIsland"
     MiniClassIsland: bool = True
     ClientDisplayName: str = ""
     ClientIdentity: str = ""
+    IsAppLocked: bool = False
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -400,6 +401,39 @@ class QuotaOut(BaseModel):
     quota_key: str
     max_value: int
     current_value: int
+
+
+class ApproveUserRequest(BaseModel):
+    """Super admin pending user approval request with optional initial quota overrides."""
+
+    can_create_account: Optional[bool] = None
+    quotas: Optional[Dict[str, int]] = None
+    max_clients: Optional[int] = Field(default=None, ge=-1)
+    max_grpc_connections: Optional[int] = Field(default=None, ge=-1)
+    max_bandwidth_mb: Optional[int] = Field(default=None, ge=-1)
+    feature_ota: Optional[int] = Field(default=None, ge=-1)
+    feature_audit: Optional[int] = Field(default=None, ge=-1)
+    feature_risk: Optional[int] = Field(default=None, ge=-1)
+
+    def resolved_quotas(self) -> Dict[str, int]:
+        """Collect quota overrides from dict and top-level fields."""
+        out: Dict[str, int] = {}
+        if self.quotas:
+            for k, v in self.quotas.items():
+                if v is not None:
+                    out[str(k).strip()] = int(v)
+        for field_name, quota_key in (
+            ("max_clients", "max_clients"),
+            ("max_grpc_connections", "max_grpc_connections"),
+            ("max_bandwidth_mb", "max_bandwidth_mb"),
+            ("feature_ota", "feature.ota"),
+            ("feature_audit", "feature.audit"),
+            ("feature_risk", "feature.risk"),
+        ):
+            val = getattr(self, field_name, None)
+            if val is not None:
+                out[quota_key] = int(val)
+        return out
 
 
 # ---- 10. System Settings & 2FA Schemas ----
@@ -561,7 +595,7 @@ class TicketCreate(BaseModel):
     @classmethod
     def _check_priority(cls, v: str) -> str:
         value = v.strip().lower()
-        if value not in TICKET_PRIORITIES:  # pragma: no cover
+        if value not in TICKET_PRIORITIES:
             raise ValueError("无效的优先级")
         return value
 
@@ -586,7 +620,7 @@ class TicketAdminUpdate(BaseModel):
     @field_validator("status")
     @classmethod
     def _check_status(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:  # pragma: no cover
+        if v is None:
             return None
         value = v.strip().lower()
         if value not in TICKET_STATUSES:
@@ -596,10 +630,10 @@ class TicketAdminUpdate(BaseModel):
     @field_validator("priority")
     @classmethod
     def _check_priority(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:  # pragma: no cover
+        if v is None:
             return None
         value = v.strip().lower()
-        if value not in TICKET_PRIORITIES:  # pragma: no cover
+        if value not in TICKET_PRIORITIES:
             raise ValueError("无效的优先级")
         return value
 

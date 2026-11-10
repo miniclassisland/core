@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import json
 import logging
 import secrets
@@ -67,7 +69,12 @@ from app.shared.services.user import (
 )
 from app.shared.security.middlewares import record_ip_failure
 from app.shared.utils.logging import get_client_ip_from_request
-from app.shared.services.quota import get_quotas, set_quota, get_bandwidth_mb
+from app.shared.services.quota import (
+    get_quotas,
+    set_quota,
+    get_bandwidth_mb,
+    check_quota,
+)
 from app.shared.schemas.schemas import QuotaOut, QuotaSetRequest
 from app.shared.literals import AUDIT_EVENT_NAMES, CONFIG_TYPE_NAMES, DEFAULT_RESOURCES
 from app.shared.runtime import get_session_manager, get_command_servicer
@@ -102,7 +109,7 @@ async def _get_effective_account_role(
     if u and u.role_code == "superadmin":
         return "owner"
     if member:
-        if u and u.role_code == "pending":  # pragma: no cover
+        if u and u.role_code == "pending":
             return "viewer"
         return member.role_in_account or "member"
     return None
@@ -497,9 +504,7 @@ async def update_account_basic_info(
     uid: str = Depends(get_current_user_id),
 ):
     """Update account basic info (name, slug, registration_mode, is_active; Account ID is immutable)."""
-    if (
-        body.new_id is not None and body.new_id.strip() != account_id
-    ):  # pragma: no cover
+    if body.new_id is not None and body.new_id.strip() != account_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account ID is immutable and cannot be modified",
@@ -766,7 +771,7 @@ async def rename_access(
     cleaned_name = str(raw_name).strip()
     if len(cleaned_name) > 128 or any(
         ord(c) < 32 or ord(c) == 127 for c in cleaned_name
-    ):  # pragma: no cover
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid display name length or characters",
@@ -1093,12 +1098,12 @@ async def rename_invitation(
     if "max_uses" in body and body["max_uses"] is not None:
         try:
             max_uses_val = int(body["max_uses"])
-        except (ValueError, TypeError):  # pragma: no cover
+        except (ValueError, TypeError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="max_uses must be an integer between 1 and 100",
             )
-        if max_uses_val < 1 or max_uses_val > 100:  # pragma: no cover
+        if max_uses_val < 1 or max_uses_val > 100:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="max_uses must be between 1 and 100",
@@ -2008,6 +2013,15 @@ async def _serialize_clients(
     sm = get_session_manager(request)
     online_list = await sm.get_all_clients_status(account_id) if sm else []
     online_map = {item["uid"]: item for item in online_list}
+    ext_map: dict[str, dict[str, Any]] = {}
+    if sm:
+        ext_fn = getattr(sm, "get_extend_enabled_clients", None)
+        if callable(ext_fn):
+            raw_ext = ext_fn(account_id)
+            if inspect.isawaitable(raw_ext):
+                raw_ext = await raw_ext
+            if isinstance(raw_ext, dict):
+                ext_map = raw_ext
 
     profiles_rows = (
         (
@@ -2031,17 +2045,30 @@ async def _serialize_clients(
     out: list[dict[str, Any]] = []
     for r in records:
         is_online = r.uid in online_map
-        if not is_online and sm and not account_id:  # pragma: no cover
+        if not is_online and sm and not account_id:
             is_online = await sm.is_client_online(account_id, r.uid)
         live_ip = online_map.get(r.uid, {}).get("ip") or getattr(r, "ip", "") or ""
         client_prof = prof_map.get(r.uid)
         raw_mac = r.mac or ""
         if can_view_full_mac or not raw_mac:
             mac_out = raw_mac
-        else:  # pragma: no cover
+        else:
             mac_out = (
                 f"{raw_mac[:5]}:**:**:**{raw_mac[-3:]}" if len(raw_mac) >= 8 else "***"
             )
+        ext_info = ext_map.get(r.uid, {})
+        online_info = online_map.get(r.uid, {})
+        ext_enabled = bool(
+            getattr(r, "extend_management_enabled", False)
+            or ext_info.get("enabled")
+            or online_info.get("extend_management_enabled")
+        )
+        ext_version = str(
+            ext_info.get("version")
+            or online_info.get("extend_management_version")
+            or getattr(r, "extend_management_version", None)
+            or ""
+        )
         out.append(
             {
                 "uid": r.uid,
@@ -2051,11 +2078,23 @@ async def _serialize_clients(
                 "mac": mac_out,
                 "ip": live_ip,
                 "is_disabled": bool(getattr(r, "is_disabled", False)),
+                "is_app_locked": bool(getattr(r, "is_app_locked", False)),
                 "online": is_online and not bool(getattr(r, "is_disabled", False)),
                 "status": (
                     "disabled"
                     if getattr(r, "is_disabled", False)
                     else ("online" if is_online else "offline")
+                ),
+                "extend_management_enabled": ext_enabled,
+                "extend_management_version": ext_version,
+                "plugin_settings": _parse_json_safe(
+                    getattr(r, "plugin_settings_json", None)
+                ),
+                "plugin_components": _parse_json_safe(
+                    getattr(r, "plugin_components_json", None)
+                ),
+                "hardware_info": _parse_json_safe(
+                    getattr(r, "hardware_info_json", None)
                 ),
                 "registered_at": (
                     r.registered_at.isoformat() if r.registered_at else None
@@ -2239,6 +2278,70 @@ async def set_client_config(
 
 
 @router.get(
+    "/account/{account_id}/client/plugin-components",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def list_account_plugin_components(
+    account_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate third-party and built-in component definitions captured from client Hook across the account."""
+    rows = (
+        (
+            await db.execute(
+                select(ClientRecord).where(ClientRecord.account_id == account_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    comp_map: dict[str, dict[str, Any]] = {}
+    for rec in rows:
+        raw_comp = getattr(rec, "plugin_components_json", None)
+        if not raw_comp:
+            continue
+        parsed = _parse_json_safe(raw_comp)
+        comp_list: list[Any] = []
+        if isinstance(parsed, dict) and isinstance(parsed.get("components"), list):
+            comp_list = parsed["components"]
+        elif isinstance(parsed, list):
+            comp_list = parsed
+        for item in comp_list:
+            if not isinstance(item, dict):
+                continue
+            cid = str(item.get("id") or item.get("guid") or "").strip()
+            if not cid:
+                continue
+            existing = comp_map.get(cid)
+            if existing is None:
+                entry = dict(item)
+                entry["source_clients"] = [
+                    {
+                        "uid": rec.uid,
+                        "display_name": rec.display_name or rec.client_id or rec.uid,
+                    }
+                ]
+                comp_map[cid] = entry
+            else:
+                sources = existing.setdefault("source_clients", [])
+                if not any(s.get("uid") == rec.uid for s in sources):
+                    sources.append(
+                        {
+                            "uid": rec.uid,
+                            "display_name": rec.display_name
+                            or rec.client_id
+                            or rec.uid,
+                        }
+                    )
+    items = list(comp_map.values())
+    return {
+        "totalCount": len(items),
+        "components": items,
+    }
+
+
+@router.get(
     "/account/{account_id}/client/{client_id}",
     tags=["Client"],
     dependencies=[Depends(setup_tenant_context)],
@@ -2266,6 +2369,49 @@ async def get_client_detail(
     return items[0]
 
 
+async def _notify_client_remote_exit(
+    request: Request, account_id: str, client_id: str
+) -> None:
+    """Push a signed management.exit command before disconnecting a removed device."""
+    servicer = get_command_servicer(request)
+    sm = get_session_manager(request)
+    if not servicer or not sm:
+        return
+    try:
+        from app.Protobuf.Server import ClientCommandDeliverScRsp_pb2
+        from app.Protobuf.Command import GetClientConfig_pb2
+        from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
+
+        envelope = sm.build_signed_command_envelope(
+            request_guid=str(uuid.uuid4()),
+            client_uid=client_id,
+            action="management.exit",
+            payload={"reason": "removed_by_server"},
+            ttl_seconds=120,
+        )
+        envelope_json = json.dumps(envelope, ensure_ascii=False)
+        req_msg = GetClientConfig_pb2.GetClientConfig(
+            RequestGuid=envelope_json,
+            ConfigType=100,
+        )
+        cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
+            RetCode=Retcode_pb2.Success,
+            Type=CommandTypes_pb2.GetClientConfig,
+            Payload=req_msg.SerializeToString(),
+        )
+        default_cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
+            RetCode=Retcode_pb2.Success,
+            Type=CommandTypes_pb2.DefaultCommand,
+            Payload=envelope_json.encode("utf-8"),
+        )
+        d1 = await servicer.send_command(account_id, client_id, default_cmd)
+        d2 = await servicer.send_command(account_id, client_id, cmd)
+        if d1 or d2:
+            await asyncio.sleep(0.15)
+    except Exception:
+        pass
+
+
 @router.delete(
     "/account/{account_id}/client/{client_id}",
     tags=["Client"],
@@ -2290,12 +2436,27 @@ async def delete_client(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Device not found"
         )
+    await _notify_client_remote_exit(request, account_id, client_id)
     servicer = get_command_servicer(request)
     if servicer:
         await servicer.disconnect_client(account_id, client_id)
     sm = get_session_manager(request)
     if sm:
         await sm.set_client_offline(account_id, client_id)
+    pre_rows = (
+        (
+            await db.execute(
+                select(PreRegisteredClient).where(
+                    PreRegisteredClient.account_id == account_id,
+                    PreRegisteredClient.bound_client_uid == client_id,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for pr in pre_rows:
+        pr.bound_client_uid = ""
     await db.execute(
         delete(ClientProfile).where(
             ClientProfile.account_id == account_id,
@@ -2461,8 +2622,8 @@ async def batch_client_action(
     body: dict = Body(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Execute batch action ('sync', 'restart', 'disconnect', 'enable', 'disable', 'delete', 'assign_profile') on multiple clients."""
-    action = str(body.get("action") or "").strip()
+    """Execute batch action ('sync', 'restart', 'disconnect', 'enable', 'disable', 'delete', 'lock', 'unlock', 'send_notification', 'assign_profile') on multiple clients."""
+    action = str(body.get("action") or "").strip().lower()
     uids = body.get("uids") or body.get("client_uids") or []
     if not isinstance(uids, list) or not uids:
         raise HTTPException(
@@ -2488,7 +2649,32 @@ async def batch_client_action(
             if sm:
                 await sm.set_client_offline(account_id, uid_str)
             count += 1
-        elif action in ("enable", "disable", "delete"):
+        elif action in ("lock", "unlock"):
+            rec = (
+                await db.execute(
+                    select(ClientRecord).where(
+                        ClientRecord.uid == uid_str,
+                        ClientRecord.account_id == account_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if not rec:
+                continue
+            target_locked = action == "lock"
+            rec.is_app_locked = target_locked
+            await _dispatch_lock_command_to_client(
+                request, account_id, uid_str, target_locked, db
+            )
+            count += 1
+        elif action in ("send_notification", "notify"):
+            raw_notif = body.get("notification") or body.get("payload") or {}
+            notif_payload = NotificationPayload(
+                **(raw_notif if isinstance(raw_notif, dict) else {})
+            )
+            res = await push_notify(account_id, uid_str, request, notif_payload)
+            if res.status == "success":
+                count += 1
+        elif action in ("enable", "disable", "delete", "remove"):
             rec = (
                 await db.execute(
                     select(ClientRecord).where(
@@ -2506,7 +2692,34 @@ async def batch_client_action(
                 servicer = get_command_servicer(request)
                 if servicer:
                     await servicer.disconnect_client(account_id, uid_str)
-            elif action == "delete":
+            elif action in ("delete", "remove"):
+                await _notify_client_remote_exit(request, account_id, uid_str)
+                servicer = get_command_servicer(request)
+                if servicer:
+                    await servicer.disconnect_client(account_id, uid_str)
+                sm = get_session_manager(request)
+                if sm:
+                    await sm.set_client_offline(account_id, uid_str)
+                pre_rows = (
+                    (
+                        await db.execute(
+                            select(PreRegisteredClient).where(
+                                PreRegisteredClient.account_id == account_id,
+                                PreRegisteredClient.bound_client_uid == uid_str,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                for pr in pre_rows:
+                    pr.bound_client_uid = ""
+                await db.execute(
+                    delete(ClientProfile).where(
+                        ClientProfile.account_id == account_id,
+                        ClientProfile.client_id == uid_str,
+                    )
+                )
                 await db.delete(rec)
             count += 1
         elif action == "assign_profile":
@@ -2724,6 +2937,129 @@ async def restart_app(
     return await _push_cmd(request, account_id, client_id, CommandTypes_pb2.RestartApp)
 
 
+async def _dispatch_lock_command_to_client(
+    request: Request,
+    account_id: str,
+    client_id: str,
+    locked: bool,
+    db: AsyncSession,
+) -> bool:
+    """Persist lock state and dispatch signed lock.enable / lock.disable command to client."""
+    servicer = get_command_servicer(request)
+    sm = get_session_manager(request)
+    if not servicer or not sm:
+        return False
+
+    from app.Protobuf.Server import ClientCommandDeliverScRsp_pb2
+    from app.Protobuf.Enum import Retcode_pb2, CommandTypes_pb2
+
+    action = "lock.enable" if locked else "lock.disable"
+    req_guid = str(uuid.uuid4())
+    db.add(
+        ConfigUploadRecord(
+            request_guid=req_guid,
+            account_id=account_id,
+            client_uid=client_id,
+            config_type=100,
+            status="pending",
+            payload="",
+            uploaded_at=datetime.now(timezone.utc),
+        )
+    )
+    envelope = sm.build_signed_command_envelope(
+        request_guid=req_guid,
+        client_uid=client_id,
+        action=action,
+        payload={"locked": locked, "isAppLocked": locked},
+        ttl_seconds=120,
+    )
+    envelope_bytes = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+    cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
+        RetCode=Retcode_pb2.Success,
+        Type=CommandTypes_pb2.DefaultCommand,
+        Payload=envelope_bytes,
+    )
+    delivered = await servicer.send_command(account_id, client_id, cmd)
+    await _push_cmd(request, account_id, client_id, CommandTypes_pb2.DataUpdated)
+    return delivered
+
+
+@router.post(
+    "/account/{account_id}/client/{client_id}/command/lock",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def lock_client_app(
+    account_id: str,
+    client_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lock the client application via Extend Management and persist lock state."""
+    record = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.uid == client_id,
+                ClientRecord.account_id == account_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Device not found"
+        )
+    record.is_app_locked = True
+    delivered = await _dispatch_lock_command_to_client(
+        request, account_id, client_id, True, db
+    )
+    await db.commit()
+    return {
+        "status": "success" if delivered else "queued",
+        "delivered": delivered,
+        "is_app_locked": True,
+        "message": (
+            "已发送锁定指令" if delivered else "已标记锁定，将在客户端上线后同步"
+        ),
+    }
+
+
+@router.post(
+    "/account/{account_id}/client/{client_id}/command/unlock",
+    tags=["Client"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def unlock_client_app(
+    account_id: str,
+    client_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Unlock the client application via Extend Management and persist lock state."""
+    record = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.uid == client_id,
+                ClientRecord.account_id == account_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if not record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Device not found"
+        )
+    record.is_app_locked = False
+    delivered = await _dispatch_lock_command_to_client(
+        request, account_id, client_id, False, db
+    )
+    await db.commit()
+    return {
+        "status": "success" if delivered else "queued",
+        "delivered": delivered,
+        "is_app_locked": False,
+        "message": "已发送解锁指令" if delivered else "已解除锁定状态",
+    }
+
+
 @router.post(
     "/account/{account_id}/client/{client_id}/command/update-data",
     response_model=StatusResponse,
@@ -2843,7 +3179,21 @@ _ALLOWED_EXTEND_COMMAND_PREFIXES = (
     "plugin.",
     "theme.",
     "remote.",
+    "extend.",
+    "system.",
+    "management.",
+    "client.",
+    "lock.",
+    "app.",
 )
+
+
+_RISK_EXTEND_COMMAND_ACTIONS = {
+    "remote.exec_code",
+    "remote.exec_command",
+    "remote.screenshot",
+    "remote.simulate_click",
+}
 
 
 @router.post(
@@ -2865,6 +3215,35 @@ async def send_extend_command(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported extended command action: {action}",
         )
+    if action in _RISK_EXTEND_COMMAND_ACTIONS:
+        if not await check_quota(account_id, "feature.risk", db):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="当前账户未开通风险远程运维功能权限",
+            )
+
+    if action in ("lock.enable", "app.lock"):
+        rec = (
+            await db.execute(
+                select(ClientRecord).where(
+                    ClientRecord.uid == client_id,
+                    ClientRecord.account_id == account_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if rec:
+            rec.is_app_locked = True
+    elif action in ("lock.disable", "app.unlock"):
+        rec = (
+            await db.execute(
+                select(ClientRecord).where(
+                    ClientRecord.uid == client_id,
+                    ClientRecord.account_id == account_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if rec:
+            rec.is_app_locked = False
 
     servicer = get_command_servicer(request)
     sm = get_session_manager(request)
@@ -2905,7 +3284,7 @@ async def send_extend_command(
 
     cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
         RetCode=Retcode_pb2.Success,
-        Type=CommandTypes_pb2.GetClientConfig,
+        Type=CommandTypes_pb2.DefaultCommand,
         Payload=envelope_bytes,
     )
     delivered = await servicer.send_command(account_id, client_id, cmd)
@@ -2945,6 +3324,12 @@ async def broadcast_extend_command(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported extended command action: {action}",
         )
+    if action in _RISK_EXTEND_COMMAND_ACTIONS:
+        if not await check_quota(account_id, "feature.risk", db):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="当前账户未开通风险远程运维功能权限",
+            )
 
     servicer = get_command_servicer(request)
     sm = get_session_manager(request)
@@ -2994,7 +3379,7 @@ async def broadcast_extend_command(
         envelope_bytes = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
         cmd = ClientCommandDeliverScRsp_pb2.ClientCommandDeliverScRsp(
             RetCode=Retcode_pb2.Success,
-            Type=CommandTypes_pb2.GetClientConfig,
+            Type=CommandTypes_pb2.DefaultCommand,
             Payload=envelope_bytes,
         )
         ok = await servicer.send_command(account_id, uid_str, cmd)
@@ -3065,7 +3450,7 @@ async def list_audit_logs(
             .all()
         )
         client_map = {c.uid: c.display_name or c.client_id or c.uid for c in clients}
-    else:  # pragma: no cover
+    else:
         client_map = {}
 
     out = []
@@ -3180,7 +3565,7 @@ def _validate_resource_name(name: str) -> str:
         or "\\" in cleaned
         or ".." in cleaned
         or any(ord(c) < 32 or ord(c) == 127 for c in cleaned)
-    ):  # pragma: no cover
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid resource file name",
@@ -3544,7 +3929,7 @@ async def list_resource_history(
 
     current_ver = record.version or 1
     has_current = any(r.version == current_ver for r in rows)
-    if not has_current:  # pragma: no cover
+    if not has_current:
         snap_time = record.updated_at or datetime.now(timezone.utc)
         await record_resource_history(
             db,
@@ -3577,7 +3962,7 @@ async def list_resource_history(
     seen_versions: set[int] = set()
     out = []
     for r in rows:
-        if r.version in seen_versions:  # pragma: no cover
+        if r.version in seen_versions:
             continue
         seen_versions.add(r.version)
         out.append(
@@ -3637,7 +4022,7 @@ async def get_resource_history_version(
                 select(model).where(model.account_id == account_id, model.name == name)
             )
         ).scalar_one_or_none()
-        if record and (record.version or 1) == version:  # pragma: no cover
+        if record and (record.version or 1) == version:
             snap_time = record.updated_at or datetime.now(timezone.utc)
             await record_resource_history(
                 db,
@@ -3664,7 +4049,7 @@ async def get_resource_history_version(
 
     try:
         parsed = json.loads(raw_content) if raw_content else {}
-    except (json.JSONDecodeError, TypeError):  # pragma: no cover
+    except (json.JSONDecodeError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Corrupted historical resource content",
@@ -3714,7 +4099,7 @@ async def get_resource_content_endpoint(
 
     try:
         parsed = json.loads(record.content) if record.content else {}
-    except (json.JSONDecodeError, TypeError):  # pragma: no cover
+    except (json.JSONDecodeError, TypeError):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Corrupted resource content",

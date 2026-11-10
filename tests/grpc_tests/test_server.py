@@ -40,7 +40,7 @@ def get_mock_context(metadata: list | None = None, peer: str = "ipv4:127.0.0.1:1
 
 
 async def _empty_req_iter():
-    if False:  # pragma: no cover
+    for _ in ():
         yield None
 
 

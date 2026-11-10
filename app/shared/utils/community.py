@@ -67,6 +67,9 @@ MSG_SHUTDOWN_RECOVERED = "服务器维护已结束，服务已恢复"
 _CQ_REPLY_RE = re.compile(r"\[CQ:reply,[^\]]*id=([^\],]+)")
 _CQ_TAG_RE = re.compile(r"\[CQ:[^\]]+\]")
 _REG_MSG_PARSE_RE = re.compile(r"^新用户\s+.+\(([^,()]+),\s*([^,()]+)\)\s+注册$")
+_QR_LOGIN_LINK_RE = re.compile(
+    r"miniclassisland://qr-login/([^\s\]\"'<>]+)", re.IGNORECASE
+)
 
 _lock = threading.Lock()
 _code = ""
@@ -95,13 +98,13 @@ def mask_qq_uin(qq_uin: Optional[str]) -> Optional[str]:
     if not qq_uin:
         return None
     s = str(qq_uin).strip()
-    if not s:  # pragma: no cover
+    if not s:
         return None
     if len(s) >= 7:
         return f"{s[:3]}****{s[-3:]}"
     if len(s) >= 5:
         return f"{s[:2]}***{s[-2:]}"
-    return f"{s[:1]}***"  # pragma: no cover
+    return f"{s[:1]}***"
 
 
 def format_manual_bound_prompt(qq_uin: str) -> str:
@@ -127,10 +130,10 @@ def _generate_code() -> str:
     secrets.SystemRandom().shuffle(chars)
 
     # Keep spaces away from the edges so the code is easy to copy into QQ.
-    while chars[0] == " " or chars[-1] == " ":  # pragma: no cover
+    while chars[0] == " " or chars[-1] == " ":
         edge = 0 if chars[0] == " " else len(chars) - 1
         interior = [i for i in range(1, len(chars) - 1) if chars[i] != " "]
-        if not interior:  # pragma: no cover
+        if not interior:
             break
         swap = secrets.choice(interior)
         chars[edge], chars[swap] = chars[swap], chars[edge]
@@ -145,12 +148,12 @@ def _prune_expired_locked(now: Optional[float] = None) -> None:
     """Remove expired entries from in-memory caches (caller must hold _lock)."""
     ts = now if now is not None else time.monotonic()
     expired_users = [uid for uid, (_, exp) in _user_codes.items() if exp <= ts]
-    for uid in expired_users:  # pragma: no cover
+    for uid in expired_users:
         old_code, _ = _user_codes.pop(uid, ("", 0.0))
         if old_code:
             _code_users.pop(old_code, None)
     expired_codes = [c for c, (_, exp) in _code_users.items() if exp <= ts]
-    for c in expired_codes:  # pragma: no cover
+    for c in expired_codes:
         uid, _ = _code_users.pop(c, ("", 0.0))
         if uid and _user_codes.get(uid, ("", 0.0))[0] == c:
             _user_codes.pop(uid, None)
@@ -177,15 +180,11 @@ async def clear_all_pending_community_codes() -> str:
     try:
         r = get_redis(REDIS_DB_AUTH)
         keys = []
-        async for k in r.scan_iter(
-            match=f"{_REDIS_USER_CODE_PREFIX}*"
-        ):  # pragma: no cover
+        async for k in r.scan_iter(match=f"{_REDIS_USER_CODE_PREFIX}*"):
             keys.append(k)
-        async for k in r.scan_iter(
-            match=f"{_REDIS_CODE_USER_PREFIX}*"
-        ):  # pragma: no cover
+        async for k in r.scan_iter(match=f"{_REDIS_CODE_USER_PREFIX}*"):
             keys.append(k)
-        if keys:  # pragma: no cover
+        if keys:
             await r.delete(*keys)
     except Exception:
         pass
@@ -207,16 +206,14 @@ async def invalidate_user_community_code(user_id: str) -> None:
         pipe.delete(user_key)
         if prev_code:
             pipe.delete(f"{_REDIS_CODE_USER_PREFIX}{prev_code}")
-        if old_code and old_code != prev_code:  # pragma: no cover
+        if old_code and old_code != prev_code:
             pipe.delete(f"{_REDIS_CODE_USER_PREFIX}{old_code}")
         await pipe.execute()
     except Exception:
         pass
 
 
-async def is_user_community_bound(
-    user_id: str, db: AsyncSession
-) -> bool:  # pragma: no cover
+async def is_user_community_bound(user_id: str, db: AsyncSession) -> bool:
     """Return True if the user has a community QQ binding."""
     row = (
         await db.execute(
@@ -240,7 +237,7 @@ async def get_user_community_binding(
 async def get_user_community_status(user_id: str, db: AsyncSession) -> dict[str, Any]:
     """Return the community binding status and prompt message for ``user_id``."""
     binding = await get_user_community_binding(user_id, db)
-    if binding is not None and SNOWLUMA_ONEBOT_TOKEN:  # pragma: no cover
+    if binding is not None and SNOWLUMA_ONEBOT_TOKEN:
         await sync_group_member_bindings(db)
         binding = await get_user_community_binding(user_id, db)
     if not binding:
@@ -287,7 +284,7 @@ async def issue_user_community_code(
     """
     effective_ttl = int(ttl_seconds if ttl_seconds is not None else ttl)
     binding = await get_user_community_binding(user_id, db)
-    if binding is not None and SNOWLUMA_ONEBOT_TOKEN:  # pragma: no cover
+    if binding is not None and SNOWLUMA_ONEBOT_TOKEN:
         await sync_group_member_bindings(db)
         binding = await get_user_community_binding(user_id, db)
     if binding is not None:
@@ -307,7 +304,7 @@ async def issue_user_community_code(
             _code_users.pop(old_mem_code, None)
 
         new_code = _generate_code()
-        while new_code in _code_users:  # pragma: no cover
+        while new_code in _code_users:
             new_code = _generate_code()
 
         if effective_ttl > 0:
@@ -321,7 +318,7 @@ async def issue_user_community_code(
         pipe = r.pipeline()
         if prev_redis_code:
             pipe.delete(f"{_REDIS_CODE_USER_PREFIX}{prev_redis_code}")
-        if old_mem_code and old_mem_code != prev_redis_code:  # pragma: no cover
+        if old_mem_code and old_mem_code != prev_redis_code:
             pipe.delete(f"{_REDIS_CODE_USER_PREFIX}{old_mem_code}")
         if effective_ttl > 0:
             pipe.set(user_key, new_code, ex=effective_ttl)
@@ -329,7 +326,7 @@ async def issue_user_community_code(
         else:
             pipe.delete(user_key)
         await pipe.execute()
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.debug("[QQ群控] Redis 不可用，入群码回退至内存存储: %s", exc)
 
     logger.info(
@@ -340,7 +337,7 @@ async def issue_user_community_code(
 
 async def get_active_user_community_code(
     user_id: str,
-) -> Optional[str]:  # pragma: no cover
+) -> Optional[str]:
     """Return the currently active unexpired code for ``user_id`` (for testing/inspection)."""
     now = time.monotonic()
     with _lock:
@@ -360,7 +357,7 @@ async def get_active_user_community_code(
 
 async def get_active_user_for_code(code: str) -> Optional[str]:
     """Return the ``user_id`` currently bound to ``code`` without consuming it."""
-    if not code:  # pragma: no cover
+    if not code:
         return None
     now = time.monotonic()
     with _lock:
@@ -373,7 +370,7 @@ async def get_active_user_for_code(code: str) -> Optional[str]:
     try:
         r = get_redis(REDIS_DB_AUTH)
         uid = await r.get(f"{_REDIS_CODE_USER_PREFIX}{code}")
-        if uid:  # pragma: no cover
+        if uid:
             current_for_user = await r.get(f"{_REDIS_USER_CODE_PREFIX}{uid}")
             if current_for_user == code:
                 return str(uid)
@@ -384,7 +381,7 @@ async def get_active_user_for_code(code: str) -> Optional[str]:
 
 def _extract_candidate_answers(message: str) -> list[str]:
     """Extract candidate code strings from a QQ group verification message."""
-    if not message:  # pragma: no cover
+    if not message:
         return []
     candidates: list[str] = []
     stripped = message.strip()
@@ -408,7 +405,7 @@ async def match_and_consume_community_code(message: str) -> Optional[str]:
     Returns the bound ``user_id`` if a valid unexpired code is found and consumed,
     or ``None`` otherwise.
     """
-    if not message or not message.strip():  # pragma: no cover
+    if not message or not message.strip():
         return None
 
     candidates = _extract_candidate_answers(message)
@@ -430,7 +427,7 @@ async def match_and_consume_community_code(message: str) -> Optional[str]:
         if not matched_code:
             for code_str, (uid, exp) in list(_code_users.items()):
                 if exp > now and _user_codes.get(uid, ("", 0.0))[0] == code_str:
-                    if code_str in message:  # pragma: no cover
+                    if code_str in message:
                         matched_code = code_str
                         matched_user_id = uid
                         break
@@ -457,7 +454,7 @@ async def match_and_consume_community_code(message: str) -> Optional[str]:
         for cand in candidates:
             if len(cand) == CODE_LENGTH:
                 uid = await r.get(f"{_REDIS_CODE_USER_PREFIX}{cand}")
-                if uid:  # pragma: no cover
+                if uid:
                     current_for_user = await r.get(f"{_REDIS_USER_CODE_PREFIX}{uid}")
                     if current_for_user == cand:
                         pipe = r.pipeline()
@@ -528,10 +525,15 @@ def format_superadmin_group_join_report(
     )
 
 
-def format_user_approved_notification(user: User) -> str:
+def format_user_approved_notification(
+    user: User, max_clients: Optional[int] = None
+) -> str:
     """Format the private notification sent to a user when their registration is approved."""
     display = (user.display_name or "").strip() or user.username
-    return f"您 ({display}) 的注册申请已经被批准，欢迎使用 MINI ClassIsland"
+    base = f"您 ({display}) 的注册申请已经被批准，欢迎使用 MINI ClassIsland"
+    if max_clients is not None:
+        return f"{base}，当前配额最大允许注册 {max_clients} 台设备"
+    return base
 
 
 def format_user_quota_changed_notification(
@@ -550,7 +552,7 @@ def format_group_announcement(title: str, content: str) -> str:
     return f"新的站内公告【{title}】：\n{content}"
 
 
-def get_snowluma_client() -> httpx.AsyncClient:  # pragma: no cover
+def get_snowluma_client() -> httpx.AsyncClient:
     """Return or initialize the shared httpx client for SnowLuma OneBot 11."""
     global _snowluma_client
     if _snowluma_client is None or _snowluma_client.is_closed:
@@ -573,22 +575,20 @@ async def _call_onebot(
     """Call a SnowLuma OneBot 11 HTTP endpoint."""
     if onebot_caller is not None:
         return await onebot_caller(action, params)
-    url = f"{(base_url or SNOWLUMA_ONEBOT_URL).rstrip('/')}/{action.lstrip('/')}"  # pragma: no cover
-    auth_token = (
-        token if token is not None else SNOWLUMA_ONEBOT_TOKEN
-    )  # pragma: no cover
-    headers: dict[str, str] = {"Content-Type": "application/json"}  # pragma: no cover
-    if auth_token:  # pragma: no cover
+    url = f"{(base_url or SNOWLUMA_ONEBOT_URL).rstrip('/')}/{action.lstrip('/')}"
+    auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
-    http_client = client or get_snowluma_client()  # pragma: no cover
-    resp = await http_client.post(url, json=params, headers=headers)  # pragma: no cover
-    resp.raise_for_status()  # pragma: no cover
-    return resp.json()  # pragma: no cover
+    http_client = client or get_snowluma_client()
+    resp = await http_client.post(url, json=params, headers=headers)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _extract_message_id(res: dict[str, Any]) -> Optional[str]:
     """Extract OneBot message_id from a send_private_msg/send_group_msg response."""
-    if not isinstance(res, dict):  # pragma: no cover
+    if not isinstance(res, dict):
         return None
     data = res.get("data")
     if isinstance(data, dict) and data.get("message_id") is not None:
@@ -610,9 +610,7 @@ async def _send_private_msg_with_id(
 ) -> tuple[bool, Optional[str]]:
     """Send a private message to ``qq_uin`` and return ``(sent_ok, message_id)``."""
     auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
-    if (
-        not auth_token and client is None and base_url is None and onebot_caller is None
-    ):  # pragma: no cover
+    if not auth_token and client is None and base_url is None and onebot_caller is None:
         return False, None
 
     try:
@@ -646,7 +644,7 @@ async def _send_private_msg_with_id(
         if pm_res2.get("retcode", 0) == 0:
             return True, _extract_message_id(pm_res2)
         return False, None
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.warning(
             "[QQ群控] 私聊发送失败 → QQ=%s: %s", mask_qq_uin(qq_uin) or qq_uin, exc
         )
@@ -687,9 +685,7 @@ async def send_group_msg(
 ) -> bool:
     """Send a message to the target QQ group."""
     auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
-    if (
-        not auth_token and client is None and base_url is None and onebot_caller is None
-    ):  # pragma: no cover
+    if not auth_token and client is None and base_url is None and onebot_caller is None:
         return False
 
     target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
@@ -707,7 +703,7 @@ async def send_group_msg(
             onebot_caller=onebot_caller,
         )
         return res.get("retcode", 0) == 0
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.warning(
             "[QQ群控] 群消息发送失败 → 群=%d: %s",
             target_group_id,
@@ -776,21 +772,21 @@ async def _send_private_msg_to_superadmins(
 async def _store_registration_msg_mapping(message_id: str, user_id: str) -> None:
     """Associate an outbound registration report message_id with the pending user_id."""
     clean_mid = str(message_id or "").strip()
-    if not clean_mid or not user_id:  # pragma: no cover
+    if not clean_mid or not user_id:
         return
     with _lock:
         _reg_msg_users[clean_mid] = user_id
     try:
         r = get_redis(REDIS_DB_AUTH)
         await r.set(f"{_REDIS_REG_MSG_PREFIX}{clean_mid}", user_id, ex=86400 * 7)
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
 
 
 async def get_registration_user_for_msg(message_id: str) -> Optional[str]:
     """Resolve the pending ``user_id`` associated with a registration report ``message_id``."""
     clean_mid = str(message_id or "").strip()
-    if not clean_mid:  # pragma: no cover
+    if not clean_mid:
         return None
     with _lock:
         uid = _reg_msg_users.get(clean_mid)
@@ -801,7 +797,7 @@ async def get_registration_user_for_msg(message_id: str) -> Optional[str]:
         val = await r.get(f"{_REDIS_REG_MSG_PREFIX}{clean_mid}")
         if val:
             return str(val)
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
     return None
 
@@ -889,6 +885,7 @@ async def notify_user_approved(
     user: User,
     db: AsyncSession,
     *,
+    max_clients: Optional[int] = None,
     group_id: Optional[int] = None,
     base_url: Optional[str] = None,
     token: Optional[str] = None,
@@ -907,7 +904,23 @@ async def notify_user_approved(
     target_group_id = int(
         group_id if group_id is not None else (binding.group_id or SNOWLUMA_QQ_GROUP_ID)
     )
-    msg = format_user_approved_notification(user)
+    resolved_max_clients = max_clients
+    if resolved_max_clients is None:
+        q_val = (
+            await db.execute(
+                select(AccountQuota.max_value)
+                .join(
+                    AccountMember, AccountMember.account_id == AccountQuota.account_id
+                )
+                .where(
+                    AccountMember.user_id == user.id,
+                    AccountQuota.quota_key == "max_clients",
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        resolved_max_clients = int(q_val) if q_val is not None else 6
+    msg = format_user_approved_notification(user, max_clients=resolved_max_clients)
     return await _send_private_msg(
         qq_uin,
         target_group_id,
@@ -964,13 +977,9 @@ async def notify_account_device_quota_changed(
 
     target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
     sent_count = 0
-    seen_users: set[str] = set()
     for user_obj, binding in rows:
-        if user_obj.id in seen_users:  # pragma: no cover
-            continue
-        seen_users.add(user_obj.id)
         qq_uin = str(binding.qq_uin or "").strip()
-        if not qq_uin:  # pragma: no cover
+        if not qq_uin:
             continue
         grp = int(
             group_id if group_id is not None else (binding.group_id or target_group_id)
@@ -1028,9 +1037,7 @@ async def _send_private_msg_and_kick(
 ) -> None:
     """Send a private message to ``qq_uin`` first, then kick them from ``target_group_id``."""
     auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
-    if (
-        not auth_token and client is None and base_url is None and onebot_caller is None
-    ):  # pragma: no cover
+    if not auth_token and client is None and base_url is None and onebot_caller is None:
         return
 
     await _send_private_msg(
@@ -1062,7 +1069,7 @@ async def _send_private_msg_and_kick(
             mask_qq_uin(qq_uin) or qq_uin,
             message,
         )
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.warning(
             "[QQ群控] 移出群聊失败 → 群=%d QQ=%s: %s",
             target_group_id,
@@ -1091,7 +1098,7 @@ async def handle_user_banned_in_community(
             select(CommunityBinding).where(CommunityBinding.user_id == user.id)
         )
     ).scalar_one_or_none()
-    if not binding:  # pragma: no cover
+    if not binding:
         return False
 
     qq_uin = str(binding.qq_uin).strip()
@@ -1139,7 +1146,7 @@ async def admin_bind_or_rebind_user_qq(
     to the old QQ and removes the old QQ from the group.
     """
     cleaned_qq = str(qq_uin or "").strip()
-    if not _QQ_UIN_RE.match(cleaned_qq):  # pragma: no cover
+    if not _QQ_UIN_RE.match(cleaned_qq):
         raise ValueError("QQ 号格式无效（需为 5-20 位纯数字且不能以 0 开头）")
 
     dup = (
@@ -1150,7 +1157,7 @@ async def admin_bind_or_rebind_user_qq(
             )
         )
     ).scalar_one_or_none()
-    if dup is not None:  # pragma: no cover
+    if dup is not None:
         raise ValueError("该 QQ 号已绑定到其他用户")
 
     await invalidate_user_community_code(user.id)
@@ -1186,7 +1193,7 @@ async def admin_bind_or_rebind_user_qq(
                     for m in res["data"]
                     if isinstance(m, dict) and m.get("user_id") is not None
                 }
-                if cleaned_qq in active_uins:  # pragma: no cover
+                if cleaned_qq in active_uins:
                     already_in_group = True
         except Exception:
             pass
@@ -1195,7 +1202,7 @@ async def admin_bind_or_rebind_user_qq(
     old_group_id = target_group_id
 
     if existing is not None:
-        if str(existing.qq_uin).strip() == cleaned_qq:  # pragma: no cover
+        if str(existing.qq_uin).strip() == cleaned_qq:
             was_joined = bool(getattr(existing, "is_joined", False))
             existing.is_manual = True
             if already_in_group:
@@ -1297,7 +1304,7 @@ async def admin_unbind_user_qq(
             select(CommunityBinding).where(CommunityBinding.user_id == user.id)
         )
     ).scalar_one_or_none()
-    if not binding:  # pragma: no cover
+    if not binding:
         return False
 
     old_qq = str(binding.qq_uin).strip()
@@ -1344,12 +1351,12 @@ async def sync_group_member_bindings(
       so the user can request a new join code again. Returns the number of unbound rows.
     """
     bindings = (await db.execute(select(CommunityBinding))).scalars().all()
-    if not bindings:  # pragma: no cover
+    if not bindings:
         return 0
 
     target_group_id = int(group_id if group_id is not None else SNOWLUMA_QQ_GROUP_ID)
     member_params: dict[str, Any] = {"group_id": target_group_id}
-    if onebot_caller is None:  # pragma: no cover
+    if onebot_caller is None:
         member_params["no_cache"] = True
     res = await _call_onebot(
         "get_group_member_list",
@@ -1359,11 +1366,11 @@ async def sync_group_member_bindings(
         client=client,
         onebot_caller=onebot_caller,
     )
-    if res.get("status") != "ok" or res.get("retcode", -1) != 0:  # pragma: no cover
+    if res.get("status") != "ok" or res.get("retcode", -1) != 0:
         return 0
 
     data = res.get("data")
-    if not isinstance(data, list) or len(data) == 0:  # pragma: no cover
+    if not isinstance(data, list) or len(data) == 0:
         return 0
 
     active_uins = {
@@ -1371,19 +1378,17 @@ async def sync_group_member_bindings(
         for m in data
         if isinstance(m, dict) and m.get("user_id") is not None
     }
-    if not active_uins:  # pragma: no cover
+    if not active_uins:
         return 0
 
     unbound_users: list[str] = []
     newly_joined_updated = False
     for b in bindings:
-        if str(b.group_id or target_group_id) != str(
-            target_group_id
-        ):  # pragma: no cover
+        if str(b.group_id or target_group_id) != str(target_group_id):
             continue
         qq_str = str(b.qq_uin).strip()
         is_joined = bool(getattr(b, "is_joined", True))
-        if qq_str in active_uins:  # pragma: no cover
+        if qq_str in active_uins:
             if not is_joined:
                 b.is_joined = True
                 newly_joined_updated = True
@@ -1404,14 +1409,14 @@ async def sync_group_member_bindings(
         )
         return len(unbound_users)
 
-    if newly_joined_updated:  # pragma: no cover
+    if newly_joined_updated:
         await db.commit()
         logger.info(
             "[QQ群控] 已同步预绑定成员的在群状态 (群=%d)",
             target_group_id,
         )
 
-    return 0  # pragma: no cover
+    return 0
 
 
 async def _fetch_group_member_uins(
@@ -1436,12 +1441,12 @@ async def _fetch_group_member_uins(
             client=client,
             onebot_caller=onebot_caller,
         )
-    except Exception:  # pragma: no cover
+    except Exception:
         return set(), []
-    if res.get("status") != "ok" or res.get("retcode", -1) != 0:  # pragma: no cover
+    if res.get("status") != "ok" or res.get("retcode", -1) != 0:
         return set(), []
     data = res.get("data")
-    if not isinstance(data, list):  # pragma: no cover
+    if not isinstance(data, list):
         return set(), []
     members = [m for m in data if isinstance(m, dict) and m.get("user_id") is not None]
     uins = {
@@ -1487,7 +1492,7 @@ async def _reject_group_request(
                 mask_qq_uin(requester_uin) or requester_uin or "未知",
                 reason,
             )
-        else:  # pragma: no cover
+        else:
             logger.warning(
                 "[QQ群控] 拒绝入群申请失败 → flag=%s 群=%d QQ=%s 响应=%s",
                 flag,
@@ -1496,7 +1501,7 @@ async def _reject_group_request(
                 res,
             )
         return ok
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         logger.warning(
             "[QQ群控] 拒绝入群申请异常 → flag=%s 群=%d: %s",
             flag,
@@ -1538,7 +1543,7 @@ async def _approve_and_notify_member(
         "sub_type": "add",
         "approve": True,
     }
-    if onebot_caller is None:  # pragma: no cover
+    if onebot_caller is None:
         approve_params["reason"] = ""
     approve_res = await _call_onebot(
         "set_group_add_request",
@@ -1548,9 +1553,7 @@ async def _approve_and_notify_member(
         client=client,
         onebot_caller=onebot_caller,
     )
-    if (
-        approve_res.get("status") != "ok" or approve_res.get("retcode", 0) != 0
-    ):  # pragma: no cover
+    if approve_res.get("status") != "ok" or approve_res.get("retcode", 0) != 0:
         logger.error(
             "[QQ群控] 审批入群申请失败 → flag=%s 用户=%s(%s) QQ=%s 响应=%s",
             flag,
@@ -1579,7 +1582,7 @@ async def _approve_and_notify_member(
         diff_uins = [u for u in (after_uins - before_uins) if u not in bound_uins]
         if diff_uins:
             resolved_uin = sorted(diff_uins)[0]
-        elif after_members:  # pragma: no cover
+        elif after_members:
             unbound_members = [
                 m
                 for m in after_members
@@ -1609,7 +1612,7 @@ async def _approve_and_notify_member(
                 "user_id": int(resolved_uin),
                 "message": reminder,
             }
-            if onebot_caller is None:  # pragma: no cover
+            if onebot_caller is None:
                 pm_params["auto_escape"] = True
             pm_res = await _call_onebot(
                 "send_private_msg",
@@ -1621,7 +1624,7 @@ async def _approve_and_notify_member(
             )
             if pm_res.get("retcode", 0) == 0:
                 private_sent = True
-            else:  # pragma: no cover
+            else:
                 pm_res2 = await _call_onebot(
                     "send_private_msg",
                     {
@@ -1636,7 +1639,7 @@ async def _approve_and_notify_member(
                     onebot_caller=onebot_caller,
                 )
                 private_sent = pm_res2.get("retcode", 0) == 0
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             logger.warning(
                 "[QQ群控] 发送绑定私聊提醒失败 → QQ=%s: %s",
                 mask_qq_uin(resolved_uin) or resolved_uin,
@@ -1683,20 +1686,20 @@ async def poll_snowluma_group_requests_once(
         client=client,
         onebot_caller=onebot_caller,
     )
-    if res.get("status") != "ok" or res.get("retcode", 0) != 0:  # pragma: no cover
+    if res.get("status") != "ok" or res.get("retcode", 0) != 0:
         return []
 
     items = res.get("data")
-    if not isinstance(items, list):  # pragma: no cover
+    if not isinstance(items, list):
         return []
 
     results: list[dict[str, Any]] = []
     for item in items:
-        if not isinstance(item, dict):  # pragma: no cover
+        if not isinstance(item, dict):
             continue
-        if item.get("checked"):  # pragma: no cover
+        if item.get("checked"):
             continue
-        if int(item.get("group_id") or 0) != target_group_id:  # pragma: no cover
+        if int(item.get("group_id") or 0) != target_group_id:
             continue
 
         flag = str(item.get("flag") or "")
@@ -1706,7 +1709,7 @@ async def poll_snowluma_group_requests_once(
             item.get("requester_nick") or item.get("nickname") or ""
         ).strip()
         message = str(item.get("message") or "")
-        if not flag:  # pragma: no cover
+        if not flag:
             continue
 
         # Case 1: Manually pre-bound QQ by Super Admin — any password/message is accepted!
@@ -1769,7 +1772,7 @@ async def poll_snowluma_group_requests_once(
                                 "message": reminder,
                             }
                         )
-                    else:  # pragma: no cover
+                    else:
                         await _reject_group_request(
                             flag,
                             target_group_id,
@@ -1804,7 +1807,7 @@ async def poll_snowluma_group_requests_once(
             not user
             or user.role_code == "banned"
             or (user.role_code != "pending" and not user.is_active)
-        ):  # pragma: no cover
+        ):
             await _reject_group_request(
                 flag,
                 target_group_id,
@@ -1822,7 +1825,7 @@ async def poll_snowluma_group_requests_once(
                 select(CommunityBinding).where(CommunityBinding.user_id == user.id)
             )
         ).scalar_one_or_none()
-        if existing_user_bind:  # pragma: no cover
+        if existing_user_bind:
             await _reject_group_request(
                 flag,
                 target_group_id,
@@ -1849,7 +1852,7 @@ async def poll_snowluma_group_requests_once(
                 onebot_caller=onebot_caller,
             )
         )
-        if not approved:  # pragma: no cover
+        if not approved:
             continue
 
         if resolved_uin:
@@ -1912,7 +1915,7 @@ def _extract_reply_id_and_text(item: dict[str, Any]) -> tuple[Optional[str], str
 
     if isinstance(msg, list):
         for seg in msg:
-            if not isinstance(seg, dict):  # pragma: no cover
+            if not isinstance(seg, dict):
                 continue
             seg_type = str(seg.get("type") or "")
             raw_data = seg.get("data")
@@ -1956,13 +1959,13 @@ def _parse_registration_action(text: str) -> Optional[str]:
 
 def _extract_quoted_text(res_or_item: dict[str, Any]) -> str:
     """Extract plain text from a ``get_msg`` response or quoted source payload."""
+    if not isinstance(res_or_item, dict):
+        return ""
     data = (
         res_or_item.get("data")
         if isinstance(res_or_item.get("data"), dict)
         else res_or_item
     )
-    if not isinstance(data, dict):  # pragma: no cover
-        return ""
     msg = data.get("message")
     if isinstance(msg, list):
         return "".join(
@@ -1978,6 +1981,106 @@ def _extract_quoted_text(res_or_item: dict[str, Any]) -> str:
     return _CQ_TAG_RE.sub("", raw).strip()
 
 
+async def handle_onebot_qr_login_event(
+    event: dict[str, Any],
+    db: Optional[AsyncSession] = None,
+    *,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    group_id: Optional[int] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> Optional[dict[str, Any]]:
+    """Process a OneBot message from a bound QQ user containing a ``miniclassisland://qr-login/...`` link."""
+    if not isinstance(event, dict):
+        return None
+
+    if db is None:
+        async with AsyncSessionLocal() as session:
+            return await handle_onebot_qr_login_event(
+                event,
+                session,
+                base_url=base_url,
+                token=token,
+                group_id=group_id,
+                client=client,
+                onebot_caller=onebot_caller,
+            )
+
+    msg_id = str(event.get("message_id") or "").strip()
+    if msg_id:
+        with _lock:
+            if msg_id in _processed_reply_msg_ids:
+                return None
+
+    sender_uin = ""
+    if event.get("user_id") is not None:
+        sender_uin = str(event["user_id"]).strip()
+    elif (
+        isinstance(event.get("sender"), dict)
+        and event["sender"].get("user_id") is not None
+    ):
+        sender_uin = str(event["sender"]["user_id"]).strip()
+    if not sender_uin:
+        return None
+
+    _, plain_text = _extract_reply_id_and_text(event)
+    raw_msg = str(event.get("raw_message") or "")
+    m = _QR_LOGIN_LINK_RE.search(plain_text) or _QR_LOGIN_LINK_RE.search(raw_msg)
+    if not m:
+        return None
+
+    deeplink = f"miniclassisland://qr-login/{m.group(1).strip()}"
+
+    binding = (
+        await db.execute(
+            select(CommunityBinding).where(CommunityBinding.qq_uin == sender_uin)
+        )
+    ).scalar_one_or_none()
+    if not binding:
+        return None
+
+    user = (
+        await db.execute(select(User).where(User.id == binding.user_id))
+    ).scalar_one_or_none()
+    if not user or user.role_code in ("pending", "banned") or not user.is_active:
+        return None
+
+    if msg_id:
+        with _lock:
+            _processed_reply_msg_ids.add(msg_id)
+
+    from app.shared.security.auth import authorize_qr_login_challenge
+
+    authorized = await authorize_qr_login_challenge(deeplink, user.id)
+    target_group_id = int(
+        group_id if group_id is not None else (binding.group_id or SNOWLUMA_QQ_GROUP_ID)
+    )
+    display = (user.display_name or "").strip() or user.username
+    reply_msg = (
+        f"已为您 ({display}) 确认扫码登录"
+        if authorized
+        else "登录链接无效或已过期，请刷新二维码后重试"
+    )
+    await _send_private_msg(
+        sender_uin,
+        target_group_id,
+        reply_msg,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return {
+        "handled": True,
+        "action": "qr_login",
+        "authorized": authorized,
+        "user_id": user.id,
+        "qq_uin": sender_uin,
+        "message": reply_msg,
+    }
+
+
 async def handle_onebot_registration_reply_event(
     event: dict[str, Any],
     db: Optional[AsyncSession] = None,
@@ -1989,7 +2092,7 @@ async def handle_onebot_registration_reply_event(
     onebot_caller: Optional[OneBotCaller] = None,
 ) -> Optional[dict[str, Any]]:
     """Process a single OneBot message event for Super Admin quote-reply registration approval/rejection."""
-    if not isinstance(event, dict):  # pragma: no cover
+    if not isinstance(event, dict):
         return None
 
     if db is None:
@@ -2003,6 +2106,18 @@ async def handle_onebot_registration_reply_event(
                 client=client,
                 onebot_caller=onebot_caller,
             )
+
+    qr_handled = await handle_onebot_qr_login_event(
+        event,
+        db,
+        base_url=base_url,
+        token=token,
+        group_id=group_id,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    if qr_handled is not None:
+        return qr_handled
 
     msg_id = str(event.get("message_id") or "").strip()
     if msg_id:
@@ -2130,17 +2245,37 @@ async def poll_snowluma_superadmin_replies_once(
             )
 
     auth_token = token if token is not None else SNOWLUMA_ONEBOT_TOKEN
-    if (
-        not auth_token and client is None and base_url is None and onebot_caller is None
-    ):  # pragma: no cover
+    if not auth_token and client is None and base_url is None and onebot_caller is None:
         return []
 
     sa_uins = await get_superadmin_qq_uins(db)
-    if not sa_uins:
+    bound_rows = (
+        (
+            await db.execute(
+                select(CommunityBinding.qq_uin)
+                .join(User, User.id == CommunityBinding.user_id)
+                .where(
+                    User.role_code != "banned",
+                    User.role_code != "pending",
+                    User.is_active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    poll_uins: list[str] = []
+    seen_uins: set[str] = set()
+    for raw_u in list(sa_uins) + list(bound_rows):
+        u_str = str(raw_u or "").strip()
+        if u_str and u_str not in seen_uins:
+            seen_uins.add(u_str)
+            poll_uins.append(u_str)
+    if not poll_uins:
         return []
 
     results: list[dict[str, Any]] = []
-    for uin in sa_uins:
+    for uin in poll_uins:
         try:
             res = await _call_onebot(
                 "get_friend_msg_history",
@@ -2150,7 +2285,7 @@ async def poll_snowluma_superadmin_replies_once(
                 client=client,
                 onebot_caller=onebot_caller,
             )
-        except Exception:  # pragma: no cover
+        except Exception:
             continue
         if res.get("status") != "ok" or res.get("retcode", 0) != 0:
             continue
@@ -2161,7 +2296,7 @@ async def poll_snowluma_superadmin_replies_once(
         elif isinstance(data, list):
             messages = data
         for item in messages:
-            if not isinstance(item, dict):  # pragma: no cover
+            if not isinstance(item, dict):
                 continue
             item_with_sender = dict(item)
             if item_with_sender.get("user_id") is None:
@@ -2188,7 +2323,7 @@ async def process_pending_group_requests(
     group_id: Optional[int] = None,
     client: Optional[httpx.AsyncClient] = None,
     onebot_caller: Optional[OneBotCaller] = None,
-) -> int:  # pragma: no cover
+) -> int:
     """Fetch pending QQ group join requests from SnowLuma and auto-approve valid join codes."""
     results = await poll_snowluma_group_requests_once(
         db,
@@ -2214,7 +2349,7 @@ def _read_local_lifecycle_state() -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except Exception:  # pragma: no cover
+    except Exception:
         return {}
 
 
@@ -2224,7 +2359,7 @@ def _write_local_lifecycle_state(data: dict[str, Any]) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
 
 
@@ -2273,7 +2408,7 @@ def detect_is_systemd_restart() -> bool:
                     low = line.lower()
                     if "miniclassisland-backend" in low and "restart" in low:
                         return True
-        except Exception:  # pragma: no cover
+        except Exception:
             pass
     return False
 
@@ -2295,7 +2430,7 @@ async def _set_lifecycle_mode(mode: str) -> None:
             await r.set(_REDIS_LIFECYCLE_MODE_KEY, mode, ex=86400 * 7)
         else:
             await r.delete(_REDIS_LIFECYCLE_MODE_KEY)
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
 
 
@@ -2320,7 +2455,7 @@ async def _pop_lifecycle_mode() -> str:
             if not mode:
                 mode = str(redis_mode).strip()
             await r.delete(_REDIS_LIFECYCLE_MODE_KEY)
-    except Exception:  # pragma: no cover
+    except Exception:
         pass
     return mode
 
@@ -2376,7 +2511,7 @@ async def notify_service_startup_recovery(
     return msg
 
 
-async def _snowluma_poll_loop() -> None:  # pragma: no cover
+async def _snowluma_poll_loop() -> None:
     """Background loop polling SnowLuma for pending QQ group join requests and member departures."""
     interval = max(1.0, float(SNOWLUMA_POLL_INTERVAL or 3.0))
     logger.info(
@@ -2401,7 +2536,7 @@ async def _snowluma_poll_loop() -> None:  # pragma: no cover
         await asyncio.sleep(interval)
 
 
-def start_snowluma_poller() -> Optional[asyncio.Task]:  # pragma: no cover
+def start_snowluma_poller() -> Optional[asyncio.Task]:
     """Start the background SnowLuma polling task if SNOWLUMA_ONEBOT_TOKEN is configured."""
     global _snowluma_poller_task
     if not SNOWLUMA_ONEBOT_TOKEN:
@@ -2415,7 +2550,7 @@ def start_snowluma_poller() -> Optional[asyncio.Task]:  # pragma: no cover
     return _snowluma_poller_task
 
 
-async def stop_snowluma_poller() -> None:  # pragma: no cover
+async def stop_snowluma_poller() -> None:
     """Stop the background SnowLuma polling task and close its HTTP client."""
     global _snowluma_poller_task, _snowluma_client
     if _snowluma_poller_task is not None:

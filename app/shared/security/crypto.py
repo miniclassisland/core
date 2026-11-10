@@ -188,7 +188,7 @@ def normalize_resource_payload(resource_type: str, payload: Any) -> Any:
         )
         norm_tls: dict[str, dict] = {}
         for k, v in raw_tls.items():
-            if not isinstance(v, dict):  # pragma: no cover
+            if not isinstance(v, dict):
                 continue
             tl_copy = dict(v)
             layouts = tl_copy.get("Layouts")
@@ -228,7 +228,7 @@ def normalize_resource_payload(resource_type: str, payload: Any) -> Any:
         )
         norm_cps: dict[str, dict] = {}
         for k, v in raw_cps.items():
-            if not isinstance(v, dict):  # pragma: no cover
+            if not isinstance(v, dict):
                 continue
             cp_copy = dict(v)
             tl_id = cp_copy.get("TimeLayoutId")

@@ -33,7 +33,7 @@ def invalidate_resource_cache(
         and (resource_type is None or k[1] == resource_type)
         and (name is None or k[2] == name)
     ]
-    for k in keys_to_remove:  # pragma: no cover
+    for k in keys_to_remove:
         _NORMALIZED_RESOURCE_CACHE.pop(k, None)
 
 
@@ -60,7 +60,7 @@ async def get_resource_by_token(token: str, request: Request):
             detail="Token IP address mismatch",
         )
     model = MODEL_MAP.get(resource_type)
-    if model is None:  # pragma: no cover
+    if model is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid resource type"
         )
@@ -118,9 +118,15 @@ async def get_resource_by_token(token: str, request: Request):
         int(row.version or 1),
     )
     cached_json = _NORMALIZED_RESOURCE_CACHE.get(cache_key)
+    resp_headers = {
+        "X-MiniClassIsland-Server": "miniclassisland",
+        "X-Server-Flavor": "miniclassisland",
+    }
     if cached_json is not None:
         record_bandwidth_bytes(effective_tid, len(cached_json.encode("utf-8")) + 256)
-        return Response(content=cached_json, media_type="application/json")
+        return Response(
+            content=cached_json, media_type="application/json", headers=resp_headers
+        )
 
     try:
         parsed = json.loads(row.content)
@@ -131,8 +137,10 @@ async def get_resource_by_token(token: str, request: Request):
         )
     norm_obj = normalize_resource_payload(resource_type, parsed)
     norm_json = json.dumps(norm_obj, ensure_ascii=False)
-    if len(_NORMALIZED_RESOURCE_CACHE) >= _MAX_RESOURCE_CACHE_SIZE:  # pragma: no cover
+    if len(_NORMALIZED_RESOURCE_CACHE) >= _MAX_RESOURCE_CACHE_SIZE:
         _NORMALIZED_RESOURCE_CACHE.pop(next(iter(_NORMALIZED_RESOURCE_CACHE)), None)
     _NORMALIZED_RESOURCE_CACHE[cache_key] = norm_json
     record_bandwidth_bytes(effective_tid, len(norm_json.encode("utf-8")) + 256)
-    return Response(content=norm_json, media_type="application/json")
+    return Response(
+        content=norm_json, media_type="application/json", headers=resp_headers
+    )

@@ -50,7 +50,7 @@ async def seed_account_defaults(
         if has_default is not None:
             return
 
-    if len(_SEED_LOCKS) > 2048:  # pragma: no cover
+    if len(_SEED_LOCKS) > 2048:
         for k in [k for k, lk in _SEED_LOCKS.items() if not lk.locked()][:512]:
             _SEED_LOCKS.pop(k, None)
     lock = _SEED_LOCKS.setdefault(account_id, asyncio.Lock())

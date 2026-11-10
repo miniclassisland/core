@@ -99,7 +99,7 @@ async def get_cached_account(slug: str) -> Optional[Account]:
             is_active=data["is_active"],
             registration_mode=data.get("registration_mode", "pairing"),
         )
-        if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:  # pragma: no cover
+        if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:
             _LOCAL_ACCOUNT_CACHE.clear()
         _LOCAL_ACCOUNT_CACHE[slug] = (now + _LOCAL_ACCOUNT_TTL, acct)
         return acct
@@ -109,7 +109,7 @@ async def get_cached_account(slug: str) -> Optional[Account]:
 
 async def set_cached_account(slug: str, account: Account) -> None:
     """Serialize and cache tenant account record into L1 memory and Redis."""
-    if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:  # pragma: no cover
+    if len(_LOCAL_ACCOUNT_CACHE) >= _MAX_LOCAL_ACCOUNT_CACHE:
         _LOCAL_ACCOUNT_CACHE.clear()
     _LOCAL_ACCOUNT_CACHE[slug] = (
         time.monotonic() + _LOCAL_ACCOUNT_TTL,

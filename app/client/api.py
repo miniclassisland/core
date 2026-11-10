@@ -1,6 +1,7 @@
+import json
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,7 +66,9 @@ def _build_empty_manifest(
         CredentialSource=empty_src,
         ServerKind=1,
         OrganizationName=org_name,
-        CoreVersion="2.0.0.0",
+        CoreVersion="2.6.1",
+        ServerFlavor="miniclassisland",
+        ServerSoftware="MINI ClassIsland",
     )
 
 
@@ -91,7 +94,8 @@ async def get_client_manifest(
       the gRPC IP recorded on the ClientRecord before issuing one-time `/get?token=...` URLs.
     """
     slug = getattr(request.state, "tenant_slug", "Unknown")
-    response.headers["X-MiniClassIsland-Server"] = "1"
+    response.headers["X-MiniClassIsland-Server"] = "miniclassisland"
+    response.headers["X-Server-Flavor"] = "miniclassisland"
     tenant_id = get_tenant_id_or_default()
     client_ip = get_client_ip_from_request(request)
     short_uid = (
@@ -127,15 +131,49 @@ async def get_client_manifest(
         )
     ).scalar_one_or_none()
 
-    if client_record is None or getattr(client_record, "is_disabled", False):
+    if client_record is None:
+        response.headers["X-Client-Registration-Status"] = "unregistered"
         record_bandwidth_bytes(tenant_id, 512)
         return _build_empty_manifest(org_name)
+    if getattr(client_record, "is_disabled", False):
+        response.headers["X-Client-Registration-Status"] = "disabled"
+        record_bandwidth_bytes(tenant_id, 512)
+        return _build_empty_manifest(org_name)
+    response.headers["X-Client-Registration-Status"] = "registered"
+
+    raw_extend = (
+        (
+            request.headers.get("x-extend-management-enabled")
+            or request.headers.get("x-mci-extend-management")
+            or ""
+        )
+        .strip()
+        .lower()
+    )
+    if raw_extend in ("1", "true", "yes"):
+        ext_ver = (
+            request.headers.get("x-extend-management-version") or "2.0.0.3"
+        ).strip()
+        sm_ext = get_session_manager(request)
+        if sm_ext is not None:
+            await sm_ext.mark_client_extend_enabled(
+                tenant_id,
+                client_uid,
+                version=ext_ver,
+            )
+        if (
+            not getattr(client_record, "extend_management_enabled", False)
+            or getattr(client_record, "extend_management_version", None) != ext_ver
+        ):
+            client_record.extend_management_enabled = True
+            client_record.extend_management_version = ext_ver
+            await db.commit()
 
     session_header = (
         request.headers.get("x-client-session") or request.headers.get("session") or ""
     ).strip()
     if session_header:
-        sm = get_session_manager()
+        sm = get_session_manager(request)
         session_uid = (
             await sm.validate_session(session_header, tenant_id=tenant_id)
             if sm is not None
@@ -220,11 +258,12 @@ async def get_client_manifest(
         CredentialSource=sources["Credentials"],
         ServerKind=1,
         OrganizationName=org_name,
-        CoreVersion="2.0.0.0",
+        CoreVersion="2.6.1",
         ServerFlavor="miniclassisland",
         ServerSoftware="MINI ClassIsland",
         ClientDisplayName=raw_display_name or "未命名设备",
         ClientIdentity=raw_client_id,
+        IsAppLocked=bool(getattr(client_record, "is_app_locked", False)),
     )
 
 
@@ -246,7 +285,8 @@ async def get_client_pairing_status(
     db: AsyncSession = Depends(get_db),
 ):
     """Lightweight HTTP pairing status endpoint for client pairing polling without re-triggering gRPC Register."""
-    response.headers["X-MiniClassIsland-Server"] = "1"
+    response.headers["X-MiniClassIsland-Server"] = "miniclassisland"
+    response.headers["X-Server-Flavor"] = "miniclassisland"
     tenant_id = get_tenant_id_or_default()
     client_ip = get_client_ip_from_request(request)
     pairing_code = (code or request.headers.get("x-pairing-code") or "").strip().upper()
@@ -368,4 +408,216 @@ async def get_client_pairing_status(
         "registered": False,
         "code": pairing_row.code,
         "ServerFlavor": "miniclassisland",
+    }
+
+
+@router.post(
+    "/v1/client/{client_uid}/unregister",
+    tags=["Client"],
+)
+@router.post(
+    "/api/v1/client/{client_uid}/unregister",
+    tags=["Client"],
+)
+async def unregister_client_http(
+    request: Request,
+    response: Response,
+    client_uid: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Allow a registered client device to proactively unbind from the management server upon exiting management."""
+    from sqlalchemy import delete as sa_delete
+    from app.shared.db.models import PreRegisteredClient
+
+    response.headers["X-MiniClassIsland-Server"] = "miniclassisland"
+    response.headers["X-Server-Flavor"] = "miniclassisland"
+    tenant_id = get_tenant_id_or_default()
+    client_ip = get_client_ip_from_request(request)
+
+    rec = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.uid == client_uid,
+                ClientRecord.account_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if rec is None:
+        return {
+            "status": "ok",
+            "unregistered": False,
+            "message": "Already unregistered",
+        }
+
+    session_header = (
+        request.headers.get("x-client-session") or request.headers.get("session") or ""
+    ).strip()
+    sm = get_session_manager(request)
+    authorized = False
+    if session_header and sm is not None:
+        session_uid = await sm.validate_session(session_header, tenant_id=tenant_id)
+        if session_uid == client_uid:
+            authorized = True
+    if not authorized and _ip_matches(rec.ip, client_ip):
+        authorized = True
+    req_mac = (
+        (request.headers.get("x-client-mac") or "").strip().upper().replace(":", "-")
+    )
+    rec_mac = (rec.mac or "").strip().upper().replace(":", "-")
+    if not authorized and req_mac and rec_mac and req_mac == rec_mac:
+        authorized = True
+
+    if not authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized client unregistration request",
+        )
+
+    await db.execute(
+        sa_delete(ClientProfile).where(
+            ClientProfile.account_id == tenant_id,
+            ClientProfile.client_id == client_uid,
+        )
+    )
+    pre_rows = (
+        (
+            await db.execute(
+                select(PreRegisteredClient).where(
+                    PreRegisteredClient.account_id == tenant_id,
+                    PreRegisteredClient.bound_client_uid == client_uid,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for p in pre_rows:
+        p.bound_client_uid = ""
+    await db.delete(rec)
+    await db.commit()
+
+    if sm is not None:
+        await sm.set_client_offline(tenant_id, client_uid)
+    return {"status": "ok", "unregistered": True}
+
+
+@router.post(
+    "/v1/client/{client_uid}/hook-snapshot",
+    tags=["Client"],
+)
+@router.post(
+    "/api/v1/client/{client_uid}/hook-snapshot",
+    tags=["Client"],
+)
+async def report_client_hook_snapshot(
+    request: Request,
+    response: Response,
+    client_uid: str,
+    body: dict = Body(default={}),
+    db: AsyncSession = Depends(get_db),
+):
+    """Capture and store plugin settings catalog, plugin components catalog, hardware info, and extend state reported by client Hook."""
+    response.headers["X-MiniClassIsland-Server"] = "miniclassisland"
+    response.headers["X-Server-Flavor"] = "miniclassisland"
+    tenant_id = get_tenant_id_or_default()
+    client_ip = get_client_ip_from_request(request)
+
+    rec = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.uid == client_uid,
+                ClientRecord.account_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if rec is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Device not found",
+        )
+
+    session_header = (
+        request.headers.get("x-client-session") or request.headers.get("session") or ""
+    ).strip()
+    sm = get_session_manager(request)
+    authorized = False
+    if session_header and sm is not None:
+        session_uid = await sm.validate_session(session_header, tenant_id=tenant_id)
+        if session_uid == client_uid:
+            authorized = True
+    if not authorized and _ip_matches(rec.ip, client_ip):
+        authorized = True
+    req_mac = (
+        (request.headers.get("x-client-mac") or "").strip().upper().replace(":", "-")
+    )
+    rec_mac = (rec.mac or "").strip().upper().replace(":", "-")
+    if not authorized and req_mac and rec_mac and req_mac == rec_mac:
+        authorized = True
+
+    if not authorized:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unauthorized client hook snapshot request",
+        )
+
+    ext_ver = str(
+        body.get("extend_management_version")
+        or body.get("version")
+        or request.headers.get("x-extend-management-version")
+        or "2.0.0.3"
+    ).strip()
+    rec.extend_management_enabled = True
+    rec.extend_management_version = ext_ver
+    if sm is not None:
+        await sm.mark_client_extend_enabled(tenant_id, client_uid, version=ext_ver)
+
+    if "is_app_locked" in body and body["is_app_locked"] is not None:
+        rec.is_app_locked = bool(body["is_app_locked"])
+    elif "isAppLocked" in body and body["isAppLocked"] is not None:
+        rec.is_app_locked = bool(body["isAppLocked"])
+
+    settings_cat = (
+        body.get("plugin_settings")
+        if "plugin_settings" in body
+        else body.get("settingsCatalog")
+    )
+    if settings_cat is not None:
+        rec.plugin_settings_json = (
+            settings_cat
+            if isinstance(settings_cat, str)
+            else json.dumps(settings_cat, ensure_ascii=False)
+        )
+
+    comp_cat = (
+        body.get("plugin_components")
+        if "plugin_components" in body
+        else body.get("registeredComponents")
+    )
+    if comp_cat is not None:
+        rec.plugin_components_json = (
+            comp_cat
+            if isinstance(comp_cat, str)
+            else json.dumps(comp_cat, ensure_ascii=False)
+        )
+
+    hw_info = (
+        body.get("hardware_info")
+        if "hardware_info" in body
+        else body.get("hardwareInfo")
+    )
+    if hw_info is not None:
+        rec.hardware_info_json = (
+            hw_info
+            if isinstance(hw_info, str)
+            else json.dumps(hw_info, ensure_ascii=False)
+        )
+
+    rec.last_seen_at = datetime.now(timezone.utc)
+    await db.commit()
+    return {
+        "status": "ok",
+        "uid": client_uid,
+        "extend_management_enabled": rec.extend_management_enabled,
+        "extend_management_version": rec.extend_management_version,
+        "is_app_locked": rec.is_app_locked,
     }

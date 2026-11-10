@@ -1,6 +1,6 @@
 # MINI ClassIsland Backend Core 贡献指南 (`CONTRIBUTING.md`)
 
-欢迎为 **MINI ClassIsland Backend Core (`miniclassisland-core`)** 贡献代码！为确保集控核心在千级租户、万级终端连接下的稳定性与安全性，所有贡献者必须严格遵守以下开发与验证规范。
+欢迎为 **MINI ClassIsland Backend Core (`miniclassisland/core`)** 贡献代码！为确保集控核心在千级租户、万级终端连接下的稳定性与安全性，所有贡献者必须严格遵守以下开发与验证规范。
 
 ---
 

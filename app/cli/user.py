@@ -387,7 +387,7 @@ def set_role_cmd(
             user.role_code = role or "normal"
             await db.commit()
             await revoke_all_user_sessions(user.id)
-            if user.role_code == "banned":  # pragma: no cover
+            if user.role_code == "banned":
                 await handle_user_banned_in_community(user, db)
             print(f"✅ User {username} role set to {role}")
 

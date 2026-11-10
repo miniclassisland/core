@@ -78,7 +78,7 @@ async def _generate_unique_account_slug(db: AsyncSession) -> str:
         ).scalar_one_or_none()
         if not dup:
             return candidate
-    return f"account_{secrets.token_hex(6)}"  # pragma: no cover
+    return f"account_{secrets.token_hex(6)}"
 
 
 def validate_account_id_format(account_id: str) -> bool:
@@ -221,12 +221,10 @@ async def get_user_by_id(user_id: str, db: AsyncSession) -> Optional[User]:
 async def update_user(user_id: str, db: AsyncSession, **fields) -> Optional[User]:
     """Update user profile fields (User ID is strictly immutable)."""
     if "id" in fields and fields["id"] is not None:
-        raise PermissionError(
-            "User ID is immutable and cannot be modified"
-        )  # pragma: no cover
+        raise PermissionError("User ID is immutable and cannot be modified")
     fields.pop("id", None)
     user = await get_user_by_id(user_id, db)
-    if not user:  # pragma: no cover
+    if not user:
         return None
     for key, val in fields.items():
         if hasattr(user, key) and val is not None:
@@ -273,7 +271,9 @@ async def reject_user(user_id: str, db: AsyncSession) -> bool:
     return True
 
 
-async def _create_default_account(user: User, db: AsyncSession) -> Account:
+async def _create_default_account(
+    user: User, db: AsyncSession, quotas: Optional[dict[str, int]] = None
+) -> Account:
     """Automatically create default account space, quotas, and default resources for user."""
     now = datetime.now(timezone.utc)
     slug = await _generate_unique_account_slug(db)
@@ -298,7 +298,13 @@ async def _create_default_account(user: User, db: AsyncSession) -> Account:
     )
     db.add(member)
 
-    for key, val in _DEFAULT_QUOTAS:
+    quota_map = dict(_DEFAULT_QUOTAS)
+    if quotas:
+        for k, v in quotas.items():
+            if v is not None:
+                quota_map[str(k).strip()] = int(v)
+
+    for key, val in quota_map.items():
         db.add(
             AccountQuota(
                 id=str(uuid.uuid4()),
@@ -317,6 +323,7 @@ async def approve_user(
     db: AsyncSession,
     *,
     can_create_account: bool = False,
+    quotas: Optional[dict[str, int]] = None,
     base_url: Optional[str] = None,
     token: Optional[str] = None,
     group_id: Optional[int] = None,
@@ -328,20 +335,27 @@ async def approve_user(
         select(User).where(User.id == user_id, User.role_code == "pending")
     )
     user = result.scalar_one_or_none()
-    if not user:  # pragma: no cover
+    if not user:
         return None
 
     user.role_code = "normal"
     user.is_active = True
     user.can_create_account = can_create_account
 
-    await _create_default_account(user, db)
+    await _create_default_account(user, db, quotas=quotas)
     await db.commit()
     from app.shared.utils.community import notify_user_approved
 
+    default_max_clients = dict(_DEFAULT_QUOTAS).get("max_clients", 6)
+    effective_max_clients = (
+        int(quotas["max_clients"])
+        if quotas and "max_clients" in quotas and quotas["max_clients"] is not None
+        else default_max_clients
+    )
     await notify_user_approved(
         user,
         db,
+        max_clients=effective_max_clients,
         group_id=group_id,
         base_url=base_url,
         token=token,

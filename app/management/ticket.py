@@ -77,7 +77,7 @@ async def create_ticket(
             )
         )
     ).scalar_one()
-    if int(active_count) >= 20:  # pragma: no cover
+    if int(active_count) >= 20:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="未结案工单数量已达上限（20 个），请先等待处理或关闭已有工单",
@@ -239,7 +239,7 @@ async def reply_to_ticket(
         created_at=now,
     )
     db.add(message)
-    if ticket.status == "resolved":  # pragma: no cover
+    if ticket.status == "resolved":
         ticket.status = "open"
     ticket.updated_at = now
     ticket.last_reply_at = now

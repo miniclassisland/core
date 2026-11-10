@@ -17,13 +17,13 @@ _URL_CREDENTIALS_RE = re.compile(r"(://[^:/?#]*:)([^@]+)(@)")
 
 def mask_sensitive_setting(key: str, value: str) -> str:
     """Mask inline passwords in URL-like settings (e.g. redis_url, database_url)."""
-    if not value:  # pragma: no cover
+    if not value:
         return value
     k_lower = key.lower()
     if any(tok in k_lower for tok in ("password", "secret", "private_key")):
-        return "***"  # pragma: no cover
+        return "***"
     if "://" in value and "@" in value:
-        return _URL_CREDENTIALS_RE.sub(r"\1***\3", value)  # pragma: no cover
+        return _URL_CREDENTIALS_RE.sub(r"\1***\3", value)
     return value
 
 

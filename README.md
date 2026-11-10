@@ -1,4 +1,4 @@
-# MINI ClassIsland Backend Core (`miniclassisland-core`)
+# MINI ClassIsland Backend Core (`miniclassisland/core`)
 
 <p align="center">
   <a href="https://miniclassisland.com" target="_blank" rel="noopener noreferrer">
