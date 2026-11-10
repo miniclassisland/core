@@ -66,7 +66,7 @@ def _build_empty_manifest(
         CredentialSource=empty_src,
         ServerKind=1,
         OrganizationName=org_name,
-        CoreVersion="2.6.1",
+        CoreVersion="2.6.4",
         ServerFlavor="miniclassisland",
         ServerSoftware="MINI ClassIsland",
     )
@@ -152,7 +152,7 @@ async def get_client_manifest(
     )
     if raw_extend in ("1", "true", "yes"):
         ext_ver = (
-            request.headers.get("x-extend-management-version") or "2.0.0.3"
+            request.headers.get("x-extend-management-version") or "2.0.0.4"
         ).strip()
         sm_ext = get_session_manager(request)
         if sm_ext is not None:
@@ -258,7 +258,7 @@ async def get_client_manifest(
         CredentialSource=sources["Credentials"],
         ServerKind=1,
         OrganizationName=org_name,
-        CoreVersion="2.6.1",
+        CoreVersion="2.6.4",
         ServerFlavor="miniclassisland",
         ServerSoftware="MINI ClassIsland",
         ClientDisplayName=raw_display_name or "未命名设备",
@@ -564,7 +564,7 @@ async def report_client_hook_snapshot(
         body.get("extend_management_version")
         or body.get("version")
         or request.headers.get("x-extend-management-version")
-        or "2.0.0.3"
+        or "2.0.0.4"
     ).strip()
     rec.extend_management_enabled = True
     rec.extend_management_version = ext_ver

@@ -255,7 +255,7 @@ class ClientManifest(BaseModel):
     CredentialSource: Dict[str, Any]
     ServerKind: int = 1
     OrganizationName: str = "MINI ClassIsland Server"
-    CoreVersion: str = "2.6.1"
+    CoreVersion: str = "2.6.4"
     ServerFlavor: str = "miniclassisland"
     ServerSoftware: str = "MINI ClassIsland"
     MiniClassIsland: bool = True

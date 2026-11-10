@@ -226,9 +226,16 @@ async def test_coverage_admin_and_cli_and_schemas_and_services(
         assert slug_fb.startswith("account_") and len(slug_fb) == 20
 
     # 12. middlewares.py: record_ip_failure_async with is_initialized()=True, _is_pending_user_allowed_request on /account/{id}/info GET, AdminAuthMiddleware inactive user, AccountContextMiddleware pending user
-    await redis_util.get_redis(1).delete("cc:ip_fail:198.51.100.77")
-    with patch("app.shared.utils.config.is_initialized", return_value=True):
+    fake_redis_ip = AsyncMock()
+    fake_redis_ip.incr = AsyncMock(side_effect=[1, 2])
+    fake_redis_ip.expire = AsyncMock()
+    with (
+        patch("app.shared.utils.config.is_initialized", return_value=True),
+        patch("app.shared.utils.redis.get_redis", return_value=fake_redis_ip),
+    ):
         await middlewares.record_ip_failure_async("198.51.100.77")
+        await middlewares.record_ip_failure_async("198.51.100.77")
+    assert fake_redis_ip.expire.await_count == 1
     assert (
         middlewares._is_pending_user_allowed_request("/account/acct_1/info", "GET")
         is True

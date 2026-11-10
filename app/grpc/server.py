@@ -938,7 +938,10 @@ async def _sync_extend_response_to_client_record(
         "plugin.components.registry",
     ):
         rec.plugin_components_json = json.dumps(data, ensure_ascii=False)
-    elif action.startswith("hardware."):
+    elif action.startswith("hardware.") or action in (
+        "system.hardware_info",
+        "system.hardware",
+    ):
         rec.hardware_info_json = json.dumps(data, ensure_ascii=False)
 
 
