@@ -181,6 +181,7 @@ async def test_community_code_endpoint_and_snowluma_binding_flow(test_superadmin
         }
         assert onebot_calls[3][1] == {
             "user_id": 88888888,
+            "group_id": COMMUNITY_QQ_GROUP_ID,
             "message": "欢迎 Super Admin Test (superadmin_test) 加入交流群，您的 QQ 88888888 已自动绑定。如需解绑，请直接退出群聊或者联系运维",
         }
 
@@ -391,6 +392,7 @@ async def test_qq_bot_event_notifications_and_quote_reply_workflow(
             "send_private_msg",
             {
                 "user_id": 200001111,
+                "group_id": COMMUNITY_QQ_GROUP_ID,
                 "message": "您 (Applicant One) 的注册申请已经被批准，欢迎使用 MINI ClassIsland，当前配额最大允许注册 6 台设备",
                 "auto_escape": True,
             },
@@ -1035,6 +1037,7 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
             "send_private_msg",
             {
                 "user_id": 1234567890,
+                "group_id": COMMUNITY_QQ_GROUP_ID,
                 "message": "管理员已将您的 QQ 1234567890 与 Pending Member (pending_member) 解绑",
                 "auto_escape": True,
             },
@@ -1051,6 +1054,7 @@ async def test_pending_user_forced_viewer_and_admin_manual_qq_bind_rebind_unbind
             "send_private_msg",
             {
                 "user_id": 9876543210,
+                "group_id": COMMUNITY_QQ_GROUP_ID,
                 "message": "管理员已将您的 QQ 9876543210 与 Pending Member (pending_member) 绑定",
                 "auto_escape": True,
             },

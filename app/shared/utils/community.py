@@ -618,6 +618,7 @@ async def _send_private_msg_with_id(
             "send_private_msg",
             {
                 "user_id": int(qq_uin),
+                "group_id": target_group_id,
                 "message": message,
                 "auto_escape": True,
             },
@@ -632,7 +633,6 @@ async def _send_private_msg_with_id(
             "send_private_msg",
             {
                 "user_id": int(qq_uin),
-                "group_id": target_group_id,
                 "message": message,
                 "auto_escape": True,
             },
@@ -1610,6 +1610,7 @@ async def _approve_and_notify_member(
         try:
             pm_params: dict[str, Any] = {
                 "user_id": int(resolved_uin),
+                "group_id": target_group_id,
                 "message": reminder,
             }
             if onebot_caller is None:
@@ -1629,7 +1630,6 @@ async def _approve_and_notify_member(
                     "send_private_msg",
                     {
                         "user_id": int(resolved_uin),
-                        "group_id": target_group_id,
                         "message": reminder,
                         "auto_escape": True,
                     },
