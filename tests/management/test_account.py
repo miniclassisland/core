@@ -1702,7 +1702,7 @@ async def test_management_account_direct_helpers_and_edge_branches(
     # 1. Payload depth and size limits
     deep: dict = {}
     cur = deep
-    for _ in range(15):
+    for _ in range(account.MAX_NESTING_DEPTH + 5):
         cur["a"] = {}
         cur = cur["a"]
     with pytest.raises(HTTPException) as exc_depth:

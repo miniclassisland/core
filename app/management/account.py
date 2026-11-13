@@ -3514,7 +3514,7 @@ async def encode_credential_endpoint(
 
 # Safety limits
 MAX_PAYLOAD_BYTES = 512 * 1024  # 512 KB
-MAX_NESTING_DEPTH = 10
+MAX_NESTING_DEPTH = 64
 
 
 def _check_depth(obj, current: int = 0) -> int:
