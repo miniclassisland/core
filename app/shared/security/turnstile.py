@@ -186,3 +186,46 @@ async def require_turnstile_verification(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Turnstile human verification failed, please complete the captcha challenge and try again",
         )
+
+
+_TURNSTILE_STAGE_PREFIX = "mci:ts_stage:"
+TURNSTILE_STAGE_TOKEN_TTL_SECONDS = 300
+
+
+async def create_turnstile_stage_token(email: str) -> str:
+    """Issue a short-lived one-time token after email-check Turnstile succeeds."""
+    import json
+    import secrets
+    from app.shared.utils.config import REDIS_DB_SESSION
+    from app.shared.utils.redis import get_redis
+
+    token = secrets.token_urlsafe(32)
+    rd = get_redis(REDIS_DB_SESSION)
+    await rd.set(
+        f"{_TURNSTILE_STAGE_PREFIX}{token}",
+        json.dumps({"email": email.strip().lower()}, ensure_ascii=False),
+        ex=TURNSTILE_STAGE_TOKEN_TTL_SECONDS,
+    )
+    return token
+
+
+async def consume_turnstile_stage_token(token: str, email: str) -> bool:
+    """Validate and consume a one-time stage token bound to email."""
+    import json
+    from app.shared.utils.config import REDIS_DB_SESSION
+    from app.shared.utils.redis import get_redis
+
+    cleaned = (token or "").strip()
+    if not cleaned:
+        return False
+    rd = get_redis(REDIS_DB_SESSION)
+    key = f"{_TURNSTILE_STAGE_PREFIX}{cleaned}"
+    raw = await rd.get(key)
+    if not raw:
+        return False
+    await rd.delete(key)
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return False
+    return str(data.get("email") or "").strip().lower() == email.strip().lower()

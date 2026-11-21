@@ -1,5 +1,6 @@
+from datetime import datetime, timezone
 import time
-from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 
 from app.shared.security.auth import (
     get_current_user_id,
@@ -14,12 +15,20 @@ from app.shared.security.auth import (
     check_qr_poll_ip_rate_limit,
     create_qr_login_challenge,
     authorize_qr_login_challenge,
+    extract_qr_login_code,
+    get_qr_login_challenge_status,
     poll_qr_login_challenge,
     resolve_user_from_token,
     _cert_id_last_mint,
     _CERT_ID_MIN_SESSION_INTERVAL,
     _CERT_ROTATE_WINDOW,
     _CERT_SESSION_MAX_TTL,
+)
+from app.shared.services.sse import (
+    create_sse_response,
+    format_sse_frame,
+    subscribe_topic_channel,
+    wait_for_queue_event,
 )
 from app.shared.security.middlewares import record_ip_failure_async
 from app.shared.schemas.schemas import (
@@ -240,6 +249,87 @@ async def poll_web_qr_login(request: Request, code: str):
             detail="QR login poll rate limit exceeded",
         )
     return await poll_qr_login_challenge(code)
+
+
+@router.get("/qr-login/events")
+async def subscribe_web_qr_login_events(
+    request: Request,
+    code: str,
+    timeout_seconds: float | None = Query(default=60.0, ge=1.0, le=120.0),
+):
+    """Stream Server-Sent Events for a pending Web QR login challenge."""
+    client_ip = get_client_ip_from_request(request) or "unknown"
+    if not check_qr_poll_ip_rate_limit(client_ip):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="QR login poll rate limit exceeded",
+        )
+    clean_code = extract_qr_login_code(code)
+    if not clean_code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid QR login code",
+        )
+
+    async def _stream():
+        deadline = time.monotonic() + (timeout_seconds or 60.0)
+        keepalive = 15.0
+        async with subscribe_topic_channel(f"qr:{clean_code}") as queue:
+            yield format_sse_frame(
+                "connected",
+                {
+                    "topic": f"qr:{clean_code}",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            current = await get_qr_login_challenge_status(clean_code)
+            now_iso = datetime.now(timezone.utc).isoformat()
+            yield format_sse_frame(
+                "qr.updated",
+                {
+                    "event": "qr.updated",
+                    "type": "qr.updated",
+                    "ts": now_iso,
+                    "data": current,
+                },
+            )
+            if current.get("status") in ("authorized", "expired"):
+                return
+
+            expires_at = int(current.get("expires_at") or 0)
+            while True:
+                if await request.is_disconnected():
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                if expires_at and int(time.time()) >= expires_at:
+                    exp_env = {
+                        "event": "qr.updated",
+                        "type": "qr.updated",
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                        "data": {"code": clean_code, "status": "expired"},
+                    }
+                    yield format_sse_frame("qr.updated", exp_env)
+                    break
+                envelope = await wait_for_queue_event(
+                    queue,
+                    event_types=("qr.updated",),
+                    timeout_sec=min(keepalive, remaining),
+                )
+                if envelope is None:
+                    yield b": keepalive\n\n"
+                    continue
+                yield format_sse_frame(
+                    "qr.updated",
+                    envelope,
+                    event_id=str(envelope.get("id") or "") or None,
+                )
+                ev_status = str((envelope.get("data") or {}).get("status") or "")
+                if ev_status in ("authorized", "expired", "consumed"):
+                    break
+
+    return create_sse_response(_stream())
 
 
 @router.post("/qr-login/authorize")

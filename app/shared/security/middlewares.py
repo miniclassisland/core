@@ -192,6 +192,7 @@ _EXEMPT = {
     "/token/certificate/rotate",
     "/token/qr-login/create",
     "/token/qr-login/poll",
+    "/token/qr-login/events",
     "/token/qr-login/authorize",
     "/oobe/verify",
     "/oobe/configure",
@@ -203,6 +204,7 @@ _EXEMPT_PREFIXES = ("/user/availability/", "/fonts/", "/api/v1/fonts/")
 
 _PENDING_USER_ALLOWED_PATHS = {
     "/user/info",
+    "/user/events",
     "/user/certificate/issue",
     "/user/certificate/list",
     "/user/certificate/revoke",
@@ -232,8 +234,11 @@ def _is_pending_user_allowed_request(path: str, method: str) -> bool:
         "OPTIONS",
     ):
         if (
-            not path_lower.endswith(("/create", "/delete", "/command/get-config"))
+            not path_lower.endswith(
+                ("/create", "/delete", "/command/get-config", "/events")
+            )
             and "/credentials" not in path_lower
+            and "/screenshot/" not in path_lower
         ):
             return True
     return False
@@ -454,6 +459,8 @@ class TenantMiddleware(BaseHTTPMiddleware):
             or request.query_params.get("tenant")
         )
         if not slug:
+            if "/screenshot-upload/" in request.url.path:
+                return await call_next(request)
             return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
                 content={

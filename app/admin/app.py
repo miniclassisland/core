@@ -1,12 +1,14 @@
 """Super Admin API Application Definition."""
 
 import logging
+from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from app import __version__
+from app.shared.services.sse import create_sse_response, stream_topic_events
 from app.admin import router as admin_router
 from app.management.account import router as mgr_account_router
 from app.management.token import router as mgr_token_router
@@ -58,3 +60,20 @@ admin_app.include_router(fonts_router)
 async def root():
     """Admin API health check status endpoint."""
     return {"status": "ok", "message": "MINI ClassIsland Admin API is running"}
+
+
+@admin_app.get("/events", tags=["Realtime"])
+async def subscribe_admin_events(
+    request: Request,
+    max_events: Optional[int] = Query(default=None, ge=1, le=100),
+    timeout_seconds: Optional[float] = Query(default=None, ge=0.1, le=60.0),
+):
+    """Stream Super Admin real-time events (registrations, moderation updates)."""
+    return create_sse_response(
+        stream_topic_events(
+            "__admin__",
+            request,
+            max_events=max_events,
+            max_duration_seconds=timeout_seconds,
+        )
+    )

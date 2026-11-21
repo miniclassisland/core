@@ -2,13 +2,16 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from app.shared.literals import (
     ALLOWED_SETTINGS_KEYS as _ALLOWED_SETTINGS_KEYS,
+    APPROVAL_REQUEST_TYPES,
+    PERMISSION_REQUEST_KEYS,
     PWD_DIGIT,
     PWD_LOWER,
     PWD_UPPER,
+    QUOTA_REQUEST_KEYS,
     SCHEMA_SLUG_RE,
     SCHEMA_USERNAME_RE,
     TICKET_CATEGORIES,
@@ -57,6 +60,7 @@ class UserRegisterRequest(BaseModel):
     role_code: Optional[str] = Field(default=None, max_length=32)
     can_create_account: Optional[bool] = None
     cf_turnstile_response: Optional[str] = Field(default=None, max_length=4096)
+    turnstile_stage_token: Optional[str] = Field(default=None, max_length=256)
 
     @field_validator("password")
     @classmethod
@@ -87,6 +91,7 @@ class UserLoginRequest(BaseModel):
     email: EmailStr = Field(..., description="Login email address")
     password: str = Field(..., max_length=128)
     cf_turnstile_response: Optional[str] = Field(default=None, max_length=4096)
+    turnstile_stage_token: Optional[str] = Field(default=None, max_length=256)
 
 
 class EmailAvailabilityRequest(BaseModel):
@@ -414,6 +419,8 @@ class ApproveUserRequest(BaseModel):
     feature_ota: Optional[int] = Field(default=None, ge=-1)
     feature_audit: Optional[int] = Field(default=None, ge=-1)
     feature_risk: Optional[int] = Field(default=None, ge=-1)
+    feature_remote_edit: Optional[int] = Field(default=None, ge=-1)
+    feature_assist_another: Optional[int] = Field(default=None, ge=-1)
 
     def resolved_quotas(self) -> Dict[str, int]:
         """Collect quota overrides from dict and top-level fields."""
@@ -429,6 +436,8 @@ class ApproveUserRequest(BaseModel):
             ("feature_ota", "feature.ota"),
             ("feature_audit", "feature.audit"),
             ("feature_risk", "feature.risk"),
+            ("feature_remote_edit", "feature.remote_edit"),
+            ("feature_assist_another", "feature.assist_another"),
         ):
             val = getattr(self, field_name, None)
             if val is not None:
@@ -734,3 +743,122 @@ class QrLoginAuthorizeRequest(BaseModel):
     code: str = Field(..., min_length=1, max_length=512)
     cert_id: Optional[str] = Field(default=None, max_length=128)
     cert_secret: Optional[str] = Field(default=None, max_length=256)
+
+
+# ---- 13. RemoteEdit & AssistAnother Session Schemas ----
+
+
+class EditSessionCreateRequest(BaseModel):
+    """Create a RemoteEdit or AssistAnother sandboxed editing session from the console."""
+
+    mode: Literal["RemoteEdit", "AssistAnother"]
+    editor_client_uid: str = Field(..., min_length=1, max_length=128)
+    target_client_uid: Optional[str] = Field(default=None, max_length=128)
+    initial_view: Literal[
+        "profile",
+        "classplan",
+        "timelayout",
+        "subjects",
+        "settings",
+        "components",
+        "policy",
+        "credentials",
+    ] = "profile"
+    resource_targets: Optional[Dict[str, str]] = None
+
+
+class EditSessionClientSyncRequest(BaseModel):
+    """Debounced client-side delta sync payload for RemoteEdit or AssistAnother."""
+
+    changes: Dict[str, Any] = Field(default_factory=dict)
+    base_versions: Optional[Dict[str, int]] = None
+    force: bool = False
+    notify_clients: bool = False
+    sequence: Optional[int] = Field(default=None, ge=0)
+
+
+# ---- 14. Quota & Permission Approval Request Schemas ----
+
+
+def _has_unsafe_control_chars(value: str) -> bool:
+    return any((ord(ch) < 32 and ch not in "\t\n\r") or ord(ch) == 127 for ch in value)
+
+
+class QuotaPermissionRequestCreate(BaseModel):
+    """Submit a dedicated approval request for quota increase or feature permission."""
+
+    request_type: str = Field(..., min_length=1, max_length=32)
+    target_key: str = Field(..., min_length=1, max_length=64)
+    requested_value: int = Field(default=1)
+    reason: str = Field(..., min_length=1, max_length=2000)
+
+    @field_validator("request_type")
+    @classmethod
+    def _check_request_type(cls, v: str) -> str:
+        val = v.strip().lower()
+        if val not in APPROVAL_REQUEST_TYPES:
+            raise ValueError("无效的申请类型，仅支持 quota 或 permission")
+        return val
+
+    @field_validator("target_key")
+    @classmethod
+    def _check_target_key(cls, v: str) -> str:
+        val = v.strip()
+        if val not in QUOTA_REQUEST_KEYS and val not in PERMISSION_REQUEST_KEYS:
+            raise ValueError("无效的目标配额或权限项")
+        return val
+
+    @field_validator("reason")
+    @classmethod
+    def _check_reason(cls, v: str) -> str:
+        val = v.strip()
+        if not val:
+            raise ValueError("请填写申请理由")
+        if _has_unsafe_control_chars(val):
+            raise ValueError("申请理由包含非法控制字符")
+        return val
+
+
+class QuotaPermissionRequestReview(BaseModel):
+    """Super administrator review payload when approving or rejecting a request."""
+
+    approved_value: Optional[int] = Field(default=None)
+    review_note: str = Field(default="", max_length=1000)
+
+    @field_validator("review_note")
+    @classmethod
+    def _check_review_note(cls, v: str) -> str:
+        val = v.strip()
+        if _has_unsafe_control_chars(val):
+            raise ValueError("审批备注包含非法控制字符")
+        return val
+
+
+class QuotaPermissionRequestOut(BaseModel):
+    """Serialized quota/permission approval request."""
+
+    id: str
+    account_id: str
+    account_name: str = ""
+    account_slug: str = ""
+    user_id: str
+    request_type: str
+    target_key: str
+    current_value: int
+    requested_value: int
+    approved_value: Optional[int] = None
+    reason: str
+    status: str
+    review_note: str = ""
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+    user: Optional[Dict[str, Any]] = None
+
+
+class QuotaPermissionRequestListOut(BaseModel):
+    """Paginated list of quota/permission approval requests."""
+
+    total: int
+    items: List[QuotaPermissionRequestOut]

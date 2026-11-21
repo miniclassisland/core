@@ -400,6 +400,36 @@ class TicketMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class QuotaPermissionRequest(Base):
+    """Dedicated approval request for tenant quota increases and feature permissions."""
+
+    __tablename__ = "quota_permission_requests"
+    __table_args__ = (
+        Index("ix_qpr_account_status", "account_id", "status"),
+        Index("ix_qpr_account_target_status", "account_id", "target_key", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String, primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    account_id: Mapped[str] = mapped_column(String(64), index=True)
+    user_id: Mapped[str] = mapped_column(String(64), index=True)
+    request_type: Mapped[str] = mapped_column(String(32), index=True)
+    target_key: Mapped[str] = mapped_column(String(64), index=True)
+    current_value: Mapped[int] = mapped_column(Integer, default=0)
+    requested_value: Mapped[int] = mapped_column(Integer)
+    approved_value: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
+    review_note: Mapped[str] = mapped_column(Text, default="")
+    reviewed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    reviewed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class CommunityBinding(Base):
     """Binding between a MINI ClassIsland user and a QQ group member."""
 

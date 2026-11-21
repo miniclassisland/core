@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared.db.session import get_db, AsyncSessionLocal
 from app.shared.db.models import User, SystemConfig
+from app.shared.services.sse import create_sse_response, stream_topic_events
 from app.shared.utils.community import (
     get_user_community_binding,
     mask_qq_uin,
@@ -60,7 +61,11 @@ from app.shared.services.user import (
     login_user,
 )
 from app.shared.security.middlewares import record_ip_failure_async
-from app.shared.security.turnstile import require_turnstile_verification
+from app.shared.security.turnstile import (
+    consume_turnstile_stage_token,
+    create_turnstile_stage_token,
+    require_turnstile_verification,
+)
 from app.shared.utils.config import REDIS_DB_AUTH
 from app.shared.utils.logging import get_client_ip_from_request
 from app.shared.utils.redis import get_redis
@@ -81,12 +86,22 @@ async def apply_user(
     client_ip = (
         get_client_ip_from_request(request) if hasattr(request, "headers") else ""
     )
-    await require_turnstile_verification(
-        payload.cf_turnstile_response,
-        remote_ip=client_ip,
-        db=db,
-        expected_action="register",
-    )
+    if payload.turnstile_stage_token:
+        ok = await consume_turnstile_stage_token(
+            payload.turnstile_stage_token, payload.email
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TURNSTILE_STAGE_TOKEN_EXPIRED",
+            )
+    else:
+        await require_turnstile_verification(
+            payload.cf_turnstile_response,
+            remote_ip=client_ip,
+            db=db,
+            expected_action="register",
+        )
     cfg_rows = (
         (
             await db.execute(
@@ -169,7 +184,8 @@ async def check_mail_availability(
     )
     result = await db.execute(select(User.id).where(User.email == payload.email))
     exists = result.scalar_one_or_none() is not None
-    return {"available": not exists}
+    stage_token = await create_turnstile_stage_token(payload.email)
+    return {"available": not exists, "turnstile_token": stage_token}
 
 
 @router.get("/availability/username", tags=["Availability"])
@@ -203,12 +219,22 @@ async def user_login(
     client_ip = (
         get_client_ip_from_request(request) if hasattr(request, "headers") else ""
     )
-    await require_turnstile_verification(
-        payload.cf_turnstile_response,
-        remote_ip=client_ip,
-        db=db,
-        expected_action="login",
-    )
+    if payload.turnstile_stage_token:
+        ok = await consume_turnstile_stage_token(
+            payload.turnstile_stage_token, payload.email
+        )
+        if not ok:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="TURNSTILE_STAGE_TOKEN_EXPIRED",
+            )
+    else:
+        await require_turnstile_verification(
+            payload.cf_turnstile_response,
+            remote_ip=client_ip,
+            db=db,
+            expected_action="login",
+        )
     try:
         token, user, needs_2fa = await login_user(payload.email, payload.password, db)
     except ValueError as exc:
@@ -256,32 +282,40 @@ async def get_user_info(
     )
 
 
+@router.get("/events", tags=["User", "Realtime"])
+async def subscribe_user_events(
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+    max_events: int | None = Query(default=None, ge=1, le=100),
+    timeout_seconds: float | None = Query(default=None, ge=0.1, le=60.0),
+):
+    """Stream real-time status/approval events for the current authenticated user."""
+    return create_sse_response(
+        stream_topic_events(
+            f"user:{user_id}",
+            request,
+            max_events=max_events,
+            max_duration_seconds=timeout_seconds,
+        )
+    )
+
+
 @router.post("/info/email", tags=["UserInfo"])
 async def change_email(
     body: EmailUpdate,
     db: AsyncSession = Depends(get_db),
     uid: str = Depends(get_current_user_id),
 ):
-    """Update current user's email address (restricted to Super Admin only)."""
+    """Self-service email modification is disabled for all users."""
     user = (await db.execute(select(User).where(User.id == uid))).scalar_one_or_none()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="User not found"
         )
-    if user.role_code != "superadmin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Email modification is disabled for standard users; please contact a Super Administrator",
-        )
-    dup = await db.execute(select(User).where(User.email == body.email, User.id != uid))
-    if dup.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email is already registered",
-        )
-    user.email = body.email
-    await db.commit()
-    return {"status": "ok", "message": "Email updated"}
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="已禁用用户自行修改绑定邮箱的能力",
+    )
 
 
 @router.post("/info/username", tags=["UserInfo"])

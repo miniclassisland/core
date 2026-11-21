@@ -266,8 +266,19 @@ async def reject_user(user_id: str, db: AsyncSession) -> bool:
     await db.delete(user)
     await db.commit()
     from app.shared.security.auth import revoke_all_user_sessions
+    from app.shared.services.sse import publish_topic_event
 
     await revoke_all_user_sessions(user_id)
+    await publish_topic_event(
+        "__admin__",
+        "registration.updated",
+        {"user_id": user_id, "action": "rejected"},
+    )
+    await publish_topic_event(
+        f"user:{user_id}",
+        "user.updated",
+        {"user_id": user_id, "action": "rejected"},
+    )
     return True
 
 
@@ -346,7 +357,7 @@ async def approve_user(
     await db.commit()
     from app.shared.utils.community import notify_user_approved
 
-    default_max_clients = dict(_DEFAULT_QUOTAS).get("max_clients", 6)
+    default_max_clients = dict(_DEFAULT_QUOTAS).get("max_clients", 2)
     effective_max_clients = (
         int(quotas["max_clients"])
         if quotas and "max_clients" in quotas and quotas["max_clients"] is not None

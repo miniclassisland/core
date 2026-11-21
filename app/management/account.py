@@ -7,11 +7,20 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.shared.db.session import get_db
+from app.shared.db.session import AsyncSessionLocal, get_db
 from app.shared.db.models import (
     Account,
     AccountMember,
@@ -75,8 +84,35 @@ from app.shared.services.quota import (
     get_bandwidth_mb,
     check_quota,
 )
-from app.shared.schemas.schemas import QuotaOut, QuotaSetRequest
+from app.shared.schemas.schemas import (
+    QuotaOut,
+    QuotaSetRequest,
+    EditSessionCreateRequest,
+)
 from app.shared.literals import AUDIT_EVENT_NAMES, CONFIG_TYPE_NAMES, DEFAULT_RESOURCES
+from app.shared.services.edit_session import (
+    EDIT_SESSION_TTL_SECONDS,
+    RESOURCE_TO_PROFILE_ATTR,
+    create_edit_session,
+    delete_edit_session,
+    dispatch_signed_extend_command,
+    get_edit_session,
+    list_account_edit_sessions,
+    notify_clients_for_resource_update,
+    poll_completed_config_upload,
+    sanitize_edit_session_summary,
+)
+from app.shared.services.screenshot_upload import (
+    SCREENSHOT_CHUNK_SIZE_BYTES,
+    get_screenshot_blob,
+    issue_screenshot_upload_token,
+)
+from app.shared.services.sse import (
+    create_sse_response,
+    publish_account_event,
+    publish_topic_event,
+    stream_account_events,
+)
 from app.shared.runtime import get_session_manager, get_command_servicer
 from app.shared.utils.config import BASE_DOMAIN
 from app.shared.utils.tenant import invalidate_cached_account
@@ -1484,8 +1520,27 @@ async def reject_pairing(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Pairing code not found"
         )
+    target_uid = row.client_uid
+    target_code = row.code
     await db.delete(row)
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "pairing.updated",
+        {"pairing_id": pairing_id, "client_uid": target_uid, "status": "rejected"},
+    )
+    if target_uid:
+        await publish_topic_event(
+            f"pairing:{target_uid}",
+            "pairing.status",
+            {
+                "status": "rejected",
+                "approved": False,
+                "registered": False,
+                "client_uid": target_uid,
+                "code": target_code,
+            },
+        )
     return {"status": "ok", "message": f"Pairing code {pairing_id} rejected"}
 
 
@@ -1518,6 +1573,27 @@ async def approve_pairing_code(
     if body and isinstance(body.get("preset_profile"), dict):
         row.preset_profile_json = json.dumps(body["preset_profile"], ensure_ascii=False)
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "pairing.updated",
+        {
+            "pairing_id": row.id,
+            "code": row.code,
+            "client_uid": row.client_uid,
+            "status": "approved",
+        },
+    )
+    if row.client_uid:
+        await publish_topic_event(
+            f"pairing:{row.client_uid}",
+            "pairing.status",
+            {
+                "status": "approved",
+                "approved": True,
+                "client_uid": row.client_uid,
+                "code": row.code,
+            },
+        )
     return {"status": "ok", "message": f"Pairing code {pairing_id} approved"}
 
 
@@ -2465,6 +2541,11 @@ async def delete_client(
     )
     await db.delete(record)
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "client.status",
+        {"uid": client_id, "online": False, "removed": True},
+    )
     return {"status": "ok", "message": "Deleted"}
 
 
@@ -2500,6 +2581,15 @@ async def rename_client(
     if "client_id" in body and body["client_id"] is not None:
         record.client_id = str(body["client_id"]).strip()
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "client.status",
+        {
+            "uid": client_id,
+            "client_id": record.client_id,
+            "display_name": record.display_name,
+        },
+    )
 
     from app.Protobuf.Enum import CommandTypes_pb2
 
@@ -2580,6 +2670,11 @@ async def disable_client(
     sm = get_session_manager(request)
     if sm:
         await sm.set_client_offline(account_id, client_id)
+    await publish_account_event(
+        account_id,
+        "client.status",
+        {"uid": client_id, "is_disabled": True, "online": False},
+    )
     return {"status": "ok", "message": "Client disabled", "client_id": client_id}
 
 
@@ -2608,6 +2703,11 @@ async def enable_client(
         )
     record.is_disabled = False
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "client.status",
+        {"uid": client_id, "is_disabled": False},
+    )
     return {"status": "ok", "message": "Client enabled", "client_id": client_id}
 
 
@@ -2729,6 +2829,21 @@ async def batch_client_action(
                 count += 1
 
     await db.commit()
+    if action in (
+        "lock",
+        "unlock",
+        "enable",
+        "disable",
+        "delete",
+        "remove",
+        "disconnect",
+        "assign_profile",
+    ):
+        await publish_account_event(
+            account_id,
+            "client.status",
+            {"batch": True, "action": action, "uids": [str(u) for u in uids]},
+        )
     return {"status": "ok", "action": action, "affected": count}
 
 
@@ -3013,6 +3128,11 @@ async def lock_client_app(
         request, account_id, client_id, True, db
     )
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "client.status",
+        {"uid": client_id, "is_app_locked": True},
+    )
     return {
         "status": "success" if delivered else "queued",
         "delivered": delivered,
@@ -3052,6 +3172,11 @@ async def unlock_client_app(
         request, account_id, client_id, False, db
     )
     await db.commit()
+    await publish_account_event(
+        account_id,
+        "client.status",
+        {"uid": client_id, "is_app_locked": False},
+    )
     return {
         "status": "success" if delivered else "queued",
         "delivered": delivered,
@@ -3185,6 +3310,8 @@ _ALLOWED_EXTEND_COMMAND_PREFIXES = (
     "client.",
     "lock.",
     "app.",
+    "edit_session.",
+    "assist.",
 )
 
 
@@ -3272,12 +3399,36 @@ async def send_extend_command(
         )
     )
     await db.commit()
+    if action in ("lock.enable", "app.lock"):
+        await publish_account_event(
+            account_id,
+            "client.status",
+            {"uid": client_id, "is_app_locked": True},
+        )
+    elif action in ("lock.disable", "app.unlock"):
+        await publish_account_event(
+            account_id,
+            "client.status",
+            {"uid": client_id, "is_app_locked": False},
+        )
+
+    effective_payload = body.payload
+    if action == "remote.screenshot":
+        effective_payload = dict(body.payload or {})
+        effective_payload["uploadToken"] = await issue_screenshot_upload_token(
+            account_id,
+            client_id,
+            req_guid,
+            ttl_seconds=max(120, int(body.ttl_seconds or 120) + 180),
+        )
+        effective_payload["requestGuid"] = req_guid
+        effective_payload["chunkSizeBytes"] = SCREENSHOT_CHUNK_SIZE_BYTES
 
     envelope = sm.build_signed_command_envelope(
         request_guid=req_guid,
         client_uid=client_id,
         action=action,
-        payload=body.payload,
+        payload=effective_payload,
         ttl_seconds=body.ttl_seconds,
     )
     envelope_bytes = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
@@ -3369,11 +3520,22 @@ async def broadcast_extend_command(
                 uploaded_at=now,
             )
         )
+        per_client_payload = body.payload
+        if action == "remote.screenshot":
+            per_client_payload = dict(body.payload or {})
+            per_client_payload["uploadToken"] = await issue_screenshot_upload_token(
+                account_id,
+                uid_str,
+                req_guid,
+                ttl_seconds=max(120, int(body.ttl_seconds or 120) + 180),
+            )
+            per_client_payload["requestGuid"] = req_guid
+            per_client_payload["chunkSizeBytes"] = SCREENSHOT_CHUNK_SIZE_BYTES
         envelope = sm.build_signed_command_envelope(
             request_guid=req_guid,
             client_uid=uid_str,
             action=action,
-            payload=body.payload,
+            payload=per_client_payload,
             ttl_seconds=body.ttl_seconds,
         )
         envelope_bytes = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
@@ -3573,6 +3735,499 @@ def _validate_resource_name(name: str) -> str:
     return cleaned
 
 
+_EDIT_VIEW_SCOPES: dict[str, list[str]] = {
+    "classplan": ["ClassPlan"],
+    "timelayout": ["TimeLayout"],
+    "subjects": ["Subjects"],
+    "settings": ["DefaultSettings"],
+    "components": ["Components"],
+    "policy": ["Policy"],
+    "credentials": ["Credentials"],
+    "profile": ["ClassPlan", "TimeLayout", "Subjects"],
+}
+
+
+def _resolve_edit_view_scopes(initial_view: str) -> tuple[list[str], list[str]]:
+    """Return (editable_allowed_scopes, resource_lookup_scopes) for initial_view."""
+    allowed = list(
+        _EDIT_VIEW_SCOPES.get(initial_view, ["ClassPlan", "TimeLayout", "Subjects"])
+    )
+    lookup = list(allowed)
+    if "ClassPlan" in allowed:
+        for dep in ("TimeLayout", "Subjects"):
+            if dep not in lookup:
+                lookup.append(dep)
+    elif "TimeLayout" in allowed:
+        if "Subjects" not in lookup:
+            lookup.append("Subjects")
+    return allowed, lookup
+
+
+@router.post(
+    "/account/{account_id}/edit-session/create",
+    tags=["Extend", "Resource"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def create_account_edit_session(
+    account_id: str,
+    request: Request,
+    body: EditSessionCreateRequest,
+    uid: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Console-only entrypoint to start a sandboxed RemoteEdit or pure-relay AssistAnother session."""
+    role = getattr(request.state, "role_in_account", "owner")
+    if role == "viewer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Viewer role cannot initiate edit sessions",
+        )
+
+    is_admin_or_owner = role in ("owner", "admin")
+    if not is_admin_or_owner and body.initial_view in ("policy", "credentials"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only account owner or admin can edit Policy or Credentials",
+        )
+
+    quota_key = (
+        "feature.remote_edit" if body.mode == "RemoteEdit" else "feature.assist_another"
+    )
+    if not await check_quota(account_id, quota_key, db):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"当前账户未开通 {quota_key} 功能配额（默认禁用），请联系管理员或提交工单调整配额",
+        )
+
+    editor_rec = (
+        await db.execute(
+            select(ClientRecord).where(
+                ClientRecord.account_id == account_id,
+                ClientRecord.uid == body.editor_client_uid,
+            )
+        )
+    ).scalar_one_or_none()
+    if editor_rec is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Editor client not found"
+        )
+    if editor_rec.is_disabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Editor client is disabled"
+        )
+    if not editor_rec.extend_management_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Editor client does not have Extend Management Engine installed",
+        )
+    if editor_rec.is_app_locked:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Editor client is currently locked",
+        )
+
+    sm = get_session_manager(request)
+    servicer = get_command_servicer(request)
+    if (
+        sm is None
+        or servicer is None
+        or not await sm.is_client_online(account_id, editor_rec.uid)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Editor client is offline"
+        )
+
+    allowed_scopes, lookup_scopes = _resolve_edit_view_scopes(body.initial_view)
+
+    requested_targets = body.resource_targets or {}
+    for res_type, res_name in requested_targets.items():
+        if res_type not in RESOURCE_TO_PROFILE_ATTR or res_type not in MODEL_MAP:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid resource type: {res_type}",
+            )
+        _validate_resource_name(res_name)
+        if not is_admin_or_owner and res_type in ("Policy", "Credentials"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only account owner or admin can edit Policy or Credentials",
+            )
+        if res_type not in lookup_scopes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Scope '{res_type}' is not allowed for view '{body.initial_view}'",
+            )
+
+    target_uid: Optional[str] = (body.target_client_uid or "").strip() or None
+    target_display_name = ""
+    resource_targets: dict[str, str] = {}
+    base_versions: dict[str, int] = {}
+    relay_snapshot: Optional[dict[str, Any]] = None
+    capture_guid: Optional[str] = None
+    target_plugin_components: list[Any] = []
+    target_plugin_settings: list[Any] = []
+
+    if body.mode == "RemoteEdit":
+        prof_rows = (
+            (
+                await db.execute(
+                    select(ClientProfile).where(ClientProfile.account_id == account_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        prof_map = {p.client_id: p for p in prof_rows}
+        default_prof = prof_map.get("__default__")
+        ref_prof = prof_map.get(target_uid) if target_uid else None
+        if target_uid:
+            target_rec = (
+                await db.execute(
+                    select(ClientRecord).where(
+                        ClientRecord.account_id == account_id,
+                        ClientRecord.uid == target_uid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if target_rec is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Target client not found",
+                )
+            target_display_name = target_rec.display_name or target_rec.uid
+
+        for res_type in lookup_scopes:
+            if res_type in requested_targets:
+                resolved_name = _validate_resource_name(requested_targets[res_type])
+            else:
+                attr = RESOURCE_TO_PROFILE_ATTR[res_type]
+                val = getattr(ref_prof, attr, None) if ref_prof is not None else None
+                if val is None and default_prof is not None:
+                    val = getattr(default_prof, attr, None)
+                resolved_name = val or "default"
+            resource_targets[res_type] = resolved_name
+
+            model = MODEL_MAP[res_type]
+            res_rec = (
+                await db.execute(
+                    select(model).where(
+                        model.account_id == account_id,
+                        model.name == resolved_name,
+                    )
+                )
+            ).scalar_one_or_none()
+            if res_rec is None and res_type in requested_targets:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Resource {res_type}/{resolved_name} not found",
+                )
+            if res_type in allowed_scopes:
+                base_versions[res_type] = (
+                    (res_rec.version or 1) if res_rec is not None else 0
+                )
+    else:
+        if not target_uid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="target_client_uid is required for AssistAnother",
+            )
+        if target_uid == editor_rec.uid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Editor client and target client cannot be the same device",
+            )
+        target_rec = (
+            await db.execute(
+                select(ClientRecord).where(
+                    ClientRecord.account_id == account_id,
+                    ClientRecord.uid == target_uid,
+                )
+            )
+        ).scalar_one_or_none()
+        if target_rec is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Target client not found",
+            )
+        if target_rec.is_disabled:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Target client is disabled",
+            )
+        if not target_rec.extend_management_enabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Target client does not have Extend Management Engine installed",
+            )
+        if not await sm.is_client_online(account_id, target_uid):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Target client is offline",
+            )
+
+        target_display_name = target_rec.display_name or target_rec.uid
+        parsed_components = _parse_json_safe(target_rec.plugin_components_json)
+        if isinstance(parsed_components, dict) and isinstance(
+            parsed_components.get("components"), list
+        ):
+            target_plugin_components = parsed_components["components"]
+        elif isinstance(parsed_components, list):
+            target_plugin_components = parsed_components
+        parsed_settings = _parse_json_safe(target_rec.plugin_settings_json)
+        if isinstance(parsed_settings, dict) and isinstance(
+            parsed_settings.get("settings"), list
+        ):
+            target_plugin_settings = parsed_settings["settings"]
+        elif isinstance(parsed_settings, list):
+            target_plugin_settings = parsed_settings
+
+        # AssistAnother is strictly an ephemeral E2E relay: capture live runtime snapshot
+        # directly from target client B without reading or mutating Resource/ClientProfile tables.
+        delivered_capture, capture_guid = await dispatch_signed_extend_command(
+            account_id=account_id,
+            client_uid=target_uid,
+            action="assist.capture_snapshot",
+            payload={
+                "scopes": lookup_scopes,
+                "initial_view": body.initial_view,
+            },
+            sm=sm,
+            servicer=servicer,
+            db=db,
+            ttl_seconds=30,
+            record_upload=True,
+        )
+        if not delivered_capture:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to deliver snapshot capture command to target client",
+            )
+        snapshot = await poll_completed_config_upload(
+            account_id, capture_guid, timeout_sec=5.0
+        )
+        if snapshot is None:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Timed out waiting for target client live snapshot",
+            )
+        relay_snapshot = snapshot
+
+    session_data, raw_token = await create_edit_session(
+        mode=body.mode,
+        account_id=account_id,
+        role=role,
+        created_by_user_id=uid,
+        editor_client_uid=editor_rec.uid,
+        editor_display_name=editor_rec.display_name or editor_rec.uid,
+        target_client_uid=target_uid,
+        target_display_name=target_display_name,
+        initial_view=body.initial_view,
+        allowed_scopes=allowed_scopes,
+        resource_targets=resource_targets,
+        base_versions=base_versions,
+        relay_snapshot=relay_snapshot,
+        capture_request_guid=capture_guid,
+        target_plugin_components=target_plugin_components,
+        target_plugin_settings=target_plugin_settings,
+    )
+
+    open_payload = {
+        "session_id": session_data["session_id"],
+        "token": raw_token,
+        "mode": session_data["mode"],
+        "account_id": account_id,
+        "editor_client_uid": editor_rec.uid,
+        "target_client_uid": target_uid,
+        "target_display_name": target_display_name,
+        "initial_view": session_data["initial_view"],
+        "allowed_scopes": allowed_scopes,
+        "resource_targets": resource_targets,
+        "base_versions": base_versions,
+        "expires_in_seconds": EDIT_SESSION_TTL_SECONDS,
+    }
+    delivered_open, open_guid = await dispatch_signed_extend_command(
+        account_id=account_id,
+        client_uid=editor_rec.uid,
+        action="edit_session.open",
+        payload=open_payload,
+        sm=sm,
+        servicer=servicer,
+        db=db,
+        ttl_seconds=60,
+        record_upload=False,
+    )
+    if not delivered_open:
+        await delete_edit_session(session_data["session_id"], account_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to deliver edit_session.open command to editor client",
+        )
+
+    summary = sanitize_edit_session_summary(session_data)
+    await publish_account_event(
+        account_id,
+        "edit_session.updated",
+        {
+            "session_id": summary["session_id"],
+            "mode": summary["mode"],
+            "action": "created",
+            "initial_view": summary.get("initial_view", ""),
+            "allowed_scopes": summary.get("allowed_scopes", []),
+            "resource_targets": summary.get("resource_targets", {}),
+            "editor_client_uid": summary.get("editor_client_uid", ""),
+            "target_client_uid": summary.get("target_client_uid"),
+        },
+    )
+    return {
+        "status": "success",
+        "command_request_guid": open_guid,
+        "session": summary,
+    }
+
+
+@router.get(
+    "/account/{account_id}/edit-session/list",
+    tags=["Extend", "Resource"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def list_account_edit_sessions_endpoint(
+    account_id: str,
+):
+    """List active redacted RemoteEdit / AssistAnother sessions for the tenant."""
+    return {"sessions": await list_account_edit_sessions(account_id)}
+
+
+@router.delete(
+    "/account/{account_id}/edit-session/{session_id}",
+    tags=["Extend", "Resource"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def close_account_edit_session_endpoint(
+    account_id: str,
+    session_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Terminate an active RemoteEdit / AssistAnother session and notify the editor client."""
+    role = getattr(request.state, "role_in_account", "owner")
+    if role == "viewer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Viewer role cannot close edit sessions",
+        )
+    existing = await get_edit_session(session_id)
+    if existing is None or existing.get("account_id") != account_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Edit session not found",
+        )
+    await delete_edit_session(session_id, account_id)
+    await publish_account_event(
+        account_id,
+        "edit_session.updated",
+        {
+            "session_id": session_id,
+            "mode": existing.get("mode", ""),
+            "action": "closed",
+        },
+    )
+
+    sm = get_session_manager(request)
+    servicer = get_command_servicer(request)
+    if sm is not None and servicer is not None:
+        try:
+            await dispatch_signed_extend_command(
+                account_id=account_id,
+                client_uid=existing["editor_client_uid"],
+                action="edit_session.close",
+                payload={"session_id": session_id, "reason": "closed_by_console"},
+                sm=sm,
+                servicer=servicer,
+                db=db,
+                ttl_seconds=60,
+                record_upload=False,
+            )
+        except Exception:
+            pass
+
+    return {"status": "success", "session_id": session_id}
+
+
+@router.get(
+    "/account/{account_id}/screenshot/{request_guid}",
+    tags=["Client", "Extend"],
+    dependencies=[Depends(setup_tenant_context)],
+)
+async def download_client_screenshot(
+    account_id: str,
+    request_guid: str,
+):
+    """Stream reassembled screenshot binary image for an authorized account member."""
+    result = await get_screenshot_blob(account_id, request_guid)
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Screenshot not found or expired",
+        )
+    blob, meta = result
+    media_type = str(meta.get("mime_type") or "image/png")
+    sha256_hex = str(meta.get("sha256") or "")
+    headers = {
+        "Cache-Control": "private, max-age=60",
+    }
+    if sha256_hex:
+        headers["X-Screenshot-Sha256"] = sha256_hex
+    return Response(content=blob, media_type=media_type, headers=headers)
+
+
+@router.get(
+    "/account/{account_id}/events",
+    tags=["Account", "Realtime"],
+)
+async def subscribe_account_events(
+    account_id: str,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+    max_events: Optional[int] = Query(default=None, ge=1, le=100),
+    timeout_seconds: Optional[float] = Query(default=None, ge=0.1, le=60.0),
+):
+    """Open an authenticated Server-Sent Events (SSE) stream for account updates."""
+    from app.shared.utils.tenant import schema_ctx, set_search_path, tenant_ctx
+
+    # Validate account and membership in a short-lived DB session so no pool connection stays open
+    async with AsyncSessionLocal() as db:
+        account = (
+            await db.execute(select(Account).where(Account.id == account_id))
+        ).scalar_one_or_none()
+        if not account or not account.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Account invalid or non-existent",
+            )
+        role = await _get_effective_account_role(account_id, user_id, db)
+        if not role:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Unauthorized access: You are not a member of this account",
+            )
+        t_tok = tenant_ctx.set(account.id)
+        s_tok = schema_ctx.set(f"tenant_{account.slug}")
+        try:
+            await set_search_path(db)
+        finally:
+            schema_ctx.reset(s_tok)
+            tenant_ctx.reset(t_tok)
+
+    return create_sse_response(
+        stream_account_events(
+            account_id,
+            request,
+            max_events=max_events,
+            max_duration_seconds=timeout_seconds,
+        )
+    )
+
+
 @router.get(
     "/account/{account_id}/{resource_type}/create",
     response_model=StatusResponse,
@@ -3626,6 +4281,16 @@ async def create_data(
     from app.client.get import invalidate_resource_cache
 
     invalidate_resource_cache(account_id, resource_type, name)
+    await publish_account_event(
+        account_id,
+        "resource.updated",
+        {
+            "resource_type": resource_type,
+            "name": name,
+            "version": 1,
+            "action": "create",
+        },
+    )
     return StatusResponse(status="success", message=f"Created {name}")
 
 
@@ -3696,12 +4361,20 @@ async def delete_data(
     from app.client.get import invalidate_resource_cache
 
     invalidate_resource_cache(account_id, resource_type, name)
+    await publish_account_event(
+        account_id,
+        "resource.updated",
+        {
+            "resource_type": resource_type,
+            "name": name,
+            "action": "delete",
+        },
+    )
     return StatusResponse(status="success", message=f"Deleted {name}")
 
 
 @router.patch(
     "/account/{account_id}/{resource_type}/update",
-    response_model=StatusResponse,
     tags=["Resource"],
     dependencies=[Depends(setup_tenant_context)],
 )
@@ -3709,8 +4382,10 @@ async def patch_data(
     account_id: str,
     resource_type: str,
     name: str,
+    request: Request,
     payload: dict = Body(...),
     version: Optional[int] = None,
+    sync: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """Recursively merge incremental update to configuration file (with optimistic lock)."""
@@ -3762,7 +4437,32 @@ async def patch_data(
     from app.client.get import invalidate_resource_cache
 
     invalidate_resource_cache(account_id, resource_type, name)
-    return StatusResponse(status="success", message="Merged successfully")
+    await publish_account_event(
+        account_id,
+        "resource.updated",
+        {
+            "resource_type": resource_type,
+            "name": name,
+            "version": next_version,
+            "action": "patch",
+        },
+    )
+    resp: dict[str, Any] = {
+        "status": "success",
+        "message": "Merged successfully",
+        "name": name,
+        "version": next_version,
+    }
+    if sync:
+        resp["sync"] = await notify_clients_for_resource_update(
+            account_id,
+            resource_type,
+            name,
+            db,
+            servicer=get_command_servicer(request),
+            sm=get_session_manager(request),
+        )
+    return resp
 
 
 @router.get(
@@ -3796,13 +4496,11 @@ async def get_resource_token(
 
 @router.post(
     "/account/{account_id}/{resource_type}/write",
-    response_model=StatusResponse,
     tags=["Resource"],
     dependencies=[Depends(setup_tenant_context)],
 )
 @router.put(
     "/account/{account_id}/{resource_type}/write",
-    response_model=StatusResponse,
     tags=["Resource"],
     dependencies=[Depends(setup_tenant_context)],
 )
@@ -3810,8 +4508,10 @@ async def write_data_endpoint(
     account_id: str,
     resource_type: str,
     name: str,
+    request: Request,
     payload: dict = Body(...),
     version: Optional[int] = None,
+    sync: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
     """Overwriting data write endpoint for configuration file (with version conflict check)."""
@@ -3852,7 +4552,32 @@ async def write_data_endpoint(
     from app.client.get import invalidate_resource_cache
 
     invalidate_resource_cache(account_id, resource_type, name)
-    return StatusResponse(status="success", message=f"{name} written successfully")
+    await publish_account_event(
+        account_id,
+        "resource.updated",
+        {
+            "resource_type": resource_type,
+            "name": name,
+            "version": next_version,
+            "action": "write",
+        },
+    )
+    resp: dict[str, Any] = {
+        "status": "success",
+        "message": f"{name} written successfully",
+        "name": name,
+        "version": next_version,
+    }
+    if sync:
+        resp["sync"] = await notify_clients_for_resource_update(
+            account_id,
+            resource_type,
+            name,
+            db,
+            servicer=get_command_servicer(request),
+            sm=get_session_manager(request),
+        )
+    return resp
 
 
 @router.post(

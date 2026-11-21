@@ -208,7 +208,7 @@ async def test_management_user_endpoints(test_superadmin_user):
         assert r_info.status_code == 200
         assert r_info.json()["username"] == "mgmt_user"
 
-        # Email update: regular user is forbidden (403), Super Admin is allowed
+        # Email update: self-service email modification is disabled (403) for all roles including superadmin
         r_em_forbidden = await client.post(
             "/user/info/email", json={"email": "mgmt_new@school.com"}, headers=headers
         )
@@ -216,19 +216,12 @@ async def test_management_user_endpoints(test_superadmin_user):
 
         sa_sid_early = await create_session_token(test_superadmin_user)
         sa_headers_early = {"Authorization": f"Bearer {sa_sid_early}"}
-        r_em_dup = await client.post(
-            "/user/info/email",
-            json={"email": "other@school.com"},
-            headers=sa_headers_early,
-        )
-        assert r_em_dup.status_code == 400
-
-        r_em_ok = await client.post(
+        r_em_sa_forbidden = await client.post(
             "/user/info/email",
             json={"email": "superadmin_new@school.com"},
             headers=sa_headers_early,
         )
-        assert r_em_ok.status_code == 200
+        assert r_em_sa_forbidden.status_code == 403
 
         # Turnstile rejection test when invalid test token is sent
         r_ts_fail_login = await client.post(

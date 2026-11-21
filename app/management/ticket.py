@@ -26,7 +26,10 @@ from app.shared.services.ticket import (
     message_to_out,
     ticket_to_out,
 )
-from app.shared.utils.community import notify_superadmin_new_ticket
+from app.shared.utils.community import (
+    notify_superadmin_new_ticket,
+    notify_superadmin_ticket_reply,
+)
 
 
 def _no_store(response: Response) -> None:
@@ -248,6 +251,13 @@ async def reply_to_ticket(
     ticket.user_unread = False
     await db.commit()
     await db.refresh(message)
+    replier = (
+        await db.execute(select(User).where(User.id == user_id))
+    ).scalar_one_or_none()
+    if replier is not None:
+        await notify_superadmin_ticket_reply(
+            replier, ticket.subject, message.content, db
+        )
     return message_to_out(message)
 
 

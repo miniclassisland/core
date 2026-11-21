@@ -40,6 +40,8 @@ from app.shared.utils.audit import decode_audit_payload_json
 from app.shared.security.middlewares import get_cc_state
 from app.shared.services.pairing import check_approved, create_pairing_request
 from app.shared.services.quota import check_quota, record_bandwidth_bytes
+from app.shared.services.sse import publish_account_event
+from app.shared.literals import AUDIT_EVENT_NAMES
 
 # Protobuf package imports
 from app.Protobuf.Service import (
@@ -479,6 +481,12 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                             client_mac=request.ClientMac,
                             client_ip=peer_ip,
                         )
+                        if tid and tid != "default":
+                            await publish_account_event(
+                                tid,
+                                "pairing.updated",
+                                {"client_uid": cuid, "code": code, "status": "pending"},
+                            )
                         logger.info(
                             "Pairing intercept triggered: uid=%s code=%s", cuid, code
                         )
@@ -550,6 +558,12 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
             db.add(record)
             await db.commit()
 
+        if acct_id and acct_id != "default":
+            await publish_account_event(
+                acct_id,
+                "client.status",
+                {"uid": cuid, "registered": True},
+            )
         logger.info("Client device registered: uid=%s ip=%s", cuid, peer_ip)
         return ClientRegisterScRsp_pb2.ClientRegisterScRsp(
             Retcode=Retcode_pb2.Registered,
@@ -638,6 +652,12 @@ class ClientRegisterServicer(ClientRegister_pb2_grpc.ClientRegisterServicer):
                 await db.commit()
 
         await self._sm.set_client_offline(tid, target_cuid)
+        if tid and tid != "default":
+            await publish_account_event(
+                tid,
+                "client.status",
+                {"uid": target_cuid, "online": False, "removed": True},
+            )
         logger.info("Client device unregistered: uid=%s", target_cuid)
         return ClientRegisterScRsp_pb2.ClientRegisterScRsp(Retcode=Retcode_pb2.Success)
 
@@ -763,6 +783,13 @@ class ClientCommandDeliverServicer(
         except Exception:
             pass
 
+        if tid and tid != "default":
+            await publish_account_event(
+                tid,
+                "client.status",
+                {"uid": real_cuid, "online": True},
+            )
+
         if old_q is not None and old_q is not queue:
             while not old_q.empty():
                 try:
@@ -842,6 +869,12 @@ class ClientCommandDeliverServicer(
                     if not t_set:
                         self.tenant_clients.pop(tid, None)
                 await self._sm.set_client_offline(tid, real_cuid)
+                if tid and tid != "default":
+                    await publish_account_event(
+                        tid,
+                        "client.status",
+                        {"uid": real_cuid, "online": False},
+                    )
 
     async def send_command(self, tid: str, cuid: str, cmd) -> bool:
         """API push command to specific online client."""
@@ -945,6 +978,58 @@ async def _sync_extend_response_to_client_record(
         rec.hardware_info_json = json.dumps(data, ensure_ascii=False)
 
 
+async def _emit_upload_completed_events(
+    account_id: str,
+    client_uid: str,
+    request_guid: str,
+    payload_str: str,
+    config_type: int,
+    uploaded_at: datetime,
+    ext_enabled: bool,
+) -> None:
+    """Broadcast command.completed (and client.status for extend responses) over SSE."""
+    if not account_id:
+        return
+    action_name = ""
+    if payload_str and payload_str.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(payload_str)
+            if isinstance(parsed, dict):
+                action_name = str(
+                    parsed.get("action") or parsed.get("Action") or ""
+                ).strip()
+        except Exception:
+            action_name = ""
+
+    payload_bytes = len(payload_str.encode("utf-8"))
+    truncated = payload_bytes > 512 * 1024
+    await publish_account_event(
+        account_id,
+        "command.completed",
+        {
+            "request_guid": request_guid,
+            "client_uid": client_uid,
+            "action": action_name,
+            "config_type": config_type,
+            "status": "completed",
+            "payload": "" if truncated else payload_str,
+            "payload_truncated": truncated,
+            "uploaded_at": uploaded_at.isoformat(),
+        },
+    )
+    if client_uid and (ext_enabled or action_name):
+        await publish_account_event(
+            account_id,
+            "client.status",
+            {
+                "client_uid": client_uid,
+                "reason": "extend_response",
+                "request_guid": request_guid,
+                "action": action_name,
+            },
+        )
+
+
 class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
     """Client configuration upload service."""
 
@@ -993,6 +1078,16 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                     )
                 ).scalar_one_or_none()
 
+            if (
+                existing is not None
+                and getattr(existing, "status", "") == "completed"
+                and '"screenshotReady"' in (existing.payload or "")
+            ):
+                return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
+                    Retcode=Retcode_pb2.Success,
+                    Message="Already finalized via REST",
+                )
+
             if existing and getattr(existing, "status", "pending") == "pending":
                 if (
                     tid
@@ -1028,9 +1123,10 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                                 Retcode=Retcode_pb2.InvalidRequest,
                                 Message="Unauthorized client IP for upload request",
                             )
+                now_utc = datetime.now(timezone.utc)
                 existing.payload = payload_str
                 existing.status = "completed"
-                existing.uploaded_at = datetime.now(timezone.utc)
+                existing.uploaded_at = now_utc
                 if real_cuid:
                     existing.client_uid = real_cuid
                 target_uid = real_cuid or existing.client_uid
@@ -1039,6 +1135,15 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                         db, target_uid, payload_str, ext_enabled, ext_ver
                     )
                 await db.commit()
+                await _emit_upload_completed_events(
+                    account_id=existing.account_id or tid or "default",
+                    client_uid=target_uid or "",
+                    request_guid=existing.request_guid or req_guid_str,
+                    payload_str=payload_str,
+                    config_type=int(getattr(existing, "config_type", 0) or 0),
+                    uploaded_at=now_utc,
+                    ext_enabled=ext_enabled,
+                )
                 return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
                     Retcode=Retcode_pb2.Success, Message="Upload successful"
                 )
@@ -1048,27 +1153,42 @@ class ConfigUploadServicer(ConfigUpload_pb2_grpc.ConfigUploadServicer):
                     Retcode=Retcode_pb2.InvalidRequest, Message="Session expired"
                 )
 
+            now_utc = datetime.now(timezone.utc)
             if existing is not None:
                 existing.payload = payload_str
                 existing.status = "completed"
-                existing.uploaded_at = datetime.now(timezone.utc)
+                existing.uploaded_at = now_utc
                 existing.client_uid = real_cuid
+                resolved_guid = existing.request_guid or req_guid_str
+                resolved_account_id = existing.account_id or tid or "default"
+                resolved_cfg_type = int(getattr(existing, "config_type", 0) or 0)
             else:
+                resolved_guid = req_guid_str or f"upload-{int(time.time() * 1000)}"
+                resolved_account_id = tid or "default"
+                resolved_cfg_type = 0
                 db.add(
                     ConfigUploadRecord(
-                        request_guid=req_guid_str
-                        or f"upload-{int(time.time() * 1000)}",
-                        account_id=tid or "default",
+                        request_guid=resolved_guid,
+                        account_id=resolved_account_id,
                         client_uid=real_cuid,
                         status="completed",
                         payload=payload_str,
-                        uploaded_at=datetime.now(timezone.utc),
+                        uploaded_at=now_utc,
                     )
                 )
             await _sync_extend_response_to_client_record(
                 db, real_cuid, payload_str, ext_enabled, ext_ver
             )
             await db.commit()
+            await _emit_upload_completed_events(
+                account_id=resolved_account_id,
+                client_uid=real_cuid,
+                request_guid=resolved_guid,
+                payload_str=payload_str,
+                config_type=resolved_cfg_type,
+                uploaded_at=now_utc,
+                ext_enabled=ext_enabled,
+            )
 
         return ConfigUploadScRsp_pb2.ConfigUploadScRsp(
             Retcode=Retcode_pb2.Success, Message="Upload successful"
@@ -1120,18 +1240,52 @@ class AuditServicer(Audit_pb2_grpc.AuditServicer):
             if tid and tid != "default":
                 if not await check_quota(tid, "feature.audit", db):
                     return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.InvalidRequest)
-            db.add(
-                AuditLog(
-                    account_id=tid or "default",
-                    client_uid=real_cuid,
-                    event=event_code,
-                    payload=base64.b64encode(raw_payload).decode("ascii"),
-                    decoded_json=decoded_str,
-                    timestamp_utc=int(getattr(request, "TimestampUtc", 0) or 0),
-                    received_at=datetime.now(timezone.utc),
-                )
+            now_utc = datetime.now(timezone.utc)
+            audit_row = AuditLog(
+                account_id=tid or "default",
+                client_uid=real_cuid,
+                event=event_code,
+                payload=base64.b64encode(raw_payload).decode("ascii"),
+                decoded_json=decoded_str,
+                timestamp_utc=int(getattr(request, "TimestampUtc", 0) or 0),
+                received_at=now_utc,
             )
+            db.add(audit_row)
             await db.commit()
+            await db.refresh(audit_row)
+
+        event_acct = tid or "default"
+        if event_acct != "default":
+            ts_iso = (
+                audit_row.received_at.isoformat()
+                if audit_row.received_at
+                else now_utc.isoformat()
+            )
+            try:
+                decoded_obj = json.loads(decoded_str) if decoded_str else {}
+            except Exception:
+                decoded_obj = {}
+            await publish_account_event(
+                event_acct,
+                "audit.created",
+                {
+                    "id": audit_row.id,
+                    "client_uid": real_cuid,
+                    "event": event_code,
+                    "event_type": event_code,
+                    "event_name": AUDIT_EVENT_NAMES.get(
+                        event_code, f"Event_{event_code}"
+                    ),
+                    "decoded": (
+                        decoded_obj.get("data", decoded_obj)
+                        if isinstance(decoded_obj, dict)
+                        else {}
+                    ),
+                    "timestamp_utc": audit_row.timestamp_utc,
+                    "received_at": ts_iso,
+                    "logged_at": ts_iso,
+                },
+            )
         return AuditScRsp_pb2.AuditScRsp(Retcode=Retcode_pb2.Success)
 
 

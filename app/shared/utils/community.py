@@ -56,6 +56,9 @@ _QQ_UIN_RE = re.compile(r"^[1-9][0-9]{4,19}$")
 _REDIS_USER_CODE_PREFIX = "community:user_code:"
 _REDIS_CODE_USER_PREFIX = "community:code_user:"
 _REDIS_REG_MSG_PREFIX = "community:reg_msg:"
+_REDIS_PROCESSED_MSG_PREFIX = "community:processed_msg:"
+_PROCESSED_MSG_TTL_SECONDS = 30 * 86400  # 30 days
+_QR_LOGIN_MAX_MESSAGE_AGE_SECONDS = 600  # 10 minutes
 _REDIS_LIFECYCLE_MODE_KEY = "community:lifecycle_mode"
 _REDIS_PENDING_RESTART_KEY = "community:pending_restart"
 
@@ -513,6 +516,35 @@ def format_superadmin_ticket_report(user: User, subject: str, content: str) -> s
     return f"用户 {format_user_identity(user)} 发起工单：{subject}\n{content}"
 
 
+def format_superadmin_ticket_reply_report(
+    user: User, subject: str, content: str
+) -> str:
+    """Format the superadmin private report when a user replies to a ticket."""
+    return f"用户 {format_user_identity(user)} 回复工单：{subject}\n{content}"
+
+
+def format_superadmin_approval_request_report(
+    user: User,
+    account_name: str,
+    request_type: str,
+    target_key: str,
+    requested_value: int,
+    reason: str,
+) -> str:
+    """Format the superadmin private report when a tenant submits a quota/permission approval request."""
+    type_label = "增开配额" if request_type == "quota" else "申请权限"
+    val_text = (
+        "开通"
+        if request_type == "permission"
+        else ("不限制" if requested_value == -1 else str(requested_value))
+    )
+    return (
+        f"用户 {format_user_identity(user)} 为租户「{account_name}」提交了{type_label}申请\n"
+        f"申请项：{target_key} → {val_text}\n"
+        f"理由：{reason}"
+    )
+
+
 def format_superadmin_group_join_report(
     user: User, qq_uin: str, qq_nick: str = ""
 ) -> str:
@@ -813,6 +845,19 @@ async def notify_superadmin_new_registration(
     onebot_caller: Optional[OneBotCaller] = None,
 ) -> list[tuple[str, Optional[str]]]:
     """Notify bound Super Administrators when a new user registers, and record message_id for quote-reply approval."""
+    from app.shared.services.sse import publish_topic_event
+
+    await publish_topic_event(
+        "__admin__",
+        "registration.created",
+        {
+            "user_id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "display_name": user.display_name,
+            "role_code": user.role_code,
+        },
+    )
     msg = format_superadmin_registration_report(user)
     delivered = await _send_private_msg_to_superadmins(
         db,
@@ -843,6 +888,63 @@ async def notify_superadmin_new_ticket(
 ) -> bool:
     """Notify bound Super Administrators when a user creates a new support ticket."""
     msg = format_superadmin_ticket_report(user, subject, content)
+    delivered = await _send_private_msg_to_superadmins(
+        db,
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return len(delivered) > 0
+
+
+async def notify_superadmin_ticket_reply(
+    user: User,
+    subject: str,
+    content: str,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Notify bound Super Administrators when a user posts a follow-up reply to a ticket."""
+    msg = format_superadmin_ticket_reply_report(user, subject, content)
+    delivered = await _send_private_msg_to_superadmins(
+        db,
+        msg,
+        group_id=group_id,
+        base_url=base_url,
+        token=token,
+        client=client,
+        onebot_caller=onebot_caller,
+    )
+    return len(delivered) > 0
+
+
+async def notify_superadmin_new_approval_request(
+    user: User,
+    account_name: str,
+    request_type: str,
+    target_key: str,
+    requested_value: int,
+    reason: str,
+    db: AsyncSession,
+    *,
+    group_id: Optional[int] = None,
+    base_url: Optional[str] = None,
+    token: Optional[str] = None,
+    client: Optional[httpx.AsyncClient] = None,
+    onebot_caller: Optional[OneBotCaller] = None,
+) -> bool:
+    """Notify bound Super Administrators when a tenant submits a quota/permission approval request."""
+    msg = format_superadmin_approval_request_report(
+        user, account_name, request_type, target_key, requested_value, reason
+    )
     delivered = await _send_private_msg_to_superadmins(
         db,
         msg,
@@ -893,6 +995,27 @@ async def notify_user_approved(
     onebot_caller: Optional[OneBotCaller] = None,
 ) -> bool:
     """Send a private message to ``user`` if bound when their registration is approved."""
+    from app.shared.services.sse import publish_topic_event
+
+    await publish_topic_event(
+        "__admin__",
+        "registration.updated",
+        {
+            "user_id": user.id,
+            "action": "approved",
+            "role_code": user.role_code,
+        },
+    )
+    await publish_topic_event(
+        f"user:{user.id}",
+        "user.updated",
+        {
+            "user_id": user.id,
+            "action": "approved",
+            "role_code": user.role_code,
+            "is_active": bool(user.is_active),
+        },
+    )
     binding = (
         await db.execute(
             select(CommunityBinding).where(CommunityBinding.user_id == user.id)
@@ -919,7 +1042,7 @@ async def notify_user_approved(
                 .limit(1)
             )
         ).scalar_one_or_none()
-        resolved_max_clients = int(q_val) if q_val is not None else 6
+        resolved_max_clients = int(q_val) if q_val is not None else 2
     msg = format_user_approved_notification(user, max_clients=resolved_max_clients)
     return await _send_private_msg(
         qq_uin,
@@ -960,8 +1083,8 @@ async def notify_account_device_quota_changed(
         .all()
     )
     qmap = {q.quota_key: q.max_value for q in quota_rows}
-    max_clients = int(qmap.get("max_clients", 6))
-    max_grpc = int(qmap.get("max_grpc_connections", 4))
+    max_clients = int(qmap.get("max_clients", 2))
+    max_grpc = int(qmap.get("max_grpc_connections", 1))
 
     rows = (
         await db.execute(
@@ -1961,11 +2084,8 @@ def _extract_quoted_text(res_or_item: dict[str, Any]) -> str:
     """Extract plain text from a ``get_msg`` response or quoted source payload."""
     if not isinstance(res_or_item, dict):
         return ""
-    data = (
-        res_or_item.get("data")
-        if isinstance(res_or_item.get("data"), dict)
-        else res_or_item
-    )
+    raw_data = res_or_item.get("data")
+    data = raw_data if isinstance(raw_data, dict) else res_or_item
     msg = data.get("message")
     if isinstance(msg, list):
         return "".join(
@@ -1979,6 +2099,157 @@ def _extract_quoted_text(res_or_item: dict[str, Any]) -> str:
         return _CQ_TAG_RE.sub("", msg).strip()
     raw = str(data.get("raw_message") or "").strip()
     return _CQ_TAG_RE.sub("", raw).strip()
+
+
+async def _is_reply_msg_processed(msg_id: str) -> bool:
+    """Return True if ``msg_id`` has already been processed in memory or Redis."""
+    if not msg_id:
+        return False
+    with _lock:
+        if msg_id in _processed_reply_msg_ids:
+            return True
+    try:
+        r = get_redis(REDIS_DB_AUTH)
+        exists = await r.exists(f"{_REDIS_PROCESSED_MSG_PREFIX}{msg_id}")
+        if exists:
+            with _lock:
+                _processed_reply_msg_ids.add(msg_id)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _mark_reply_msg_processed(msg_id: str) -> None:
+    """Record ``msg_id`` as processed in both memory and Redis (persisted across restarts)."""
+    if not msg_id:
+        return
+    with _lock:
+        _processed_reply_msg_ids.add(msg_id)
+    try:
+        r = get_redis(REDIS_DB_AUTH)
+        await r.set(
+            f"{_REDIS_PROCESSED_MSG_PREFIX}{msg_id}",
+            "1",
+            ex=_PROCESSED_MSG_TTL_SECONDS,
+        )
+    except Exception:
+        pass
+
+
+def _extract_event_msg_id(event: dict[str, Any]) -> str:
+    for key in ("message_id", "msgId", "msg_id"):
+        val = event.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _extract_event_sender_uin(event: dict[str, Any]) -> str:
+    if event.get("user_id") is not None and str(event["user_id"]).strip():
+        return str(event["user_id"]).strip()
+    sender = event.get("sender")
+    if isinstance(sender, dict) and sender.get("user_id") is not None:
+        val = str(sender["user_id"]).strip()
+        if val:
+            return val
+    for key in ("senderUin", "sender_uin"):
+        val = event.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
+def _extract_event_timestamp(event: dict[str, Any]) -> Optional[float]:
+    for key in ("time", "msgTime", "timestamp"):
+        raw = event.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            ts = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if ts > 1e12:
+            ts /= 1000.0
+        if ts > 0:
+            return ts
+    return None
+
+
+def _extract_elements_text(event: dict[str, Any]) -> str:
+    """Extract plain text from NTQQ/NapCat ``elements`` array if present."""
+    elements = event.get("elements")
+    if not isinstance(elements, list):
+        return ""
+    parts: list[str] = []
+    for el in elements:
+        if not isinstance(el, dict):
+            continue
+        text_el = el.get("textElement")
+        if isinstance(text_el, dict) and text_el.get("content"):
+            parts.append(str(text_el["content"]))
+    return "".join(parts)
+
+
+def _extract_event_group_id(event: dict[str, Any]) -> Optional[int]:
+    """Extract group ID for group temporary sessions from a OneBot/NapCat event."""
+    candidates = [
+        event.get("group_id"),
+        event.get("temp_source"),
+        event.get("groupCode"),
+    ]
+    sender = event.get("sender")
+    if isinstance(sender, dict):
+        candidates.append(sender.get("group_id"))
+    for raw in candidates:
+        if raw is None or raw == "":
+            continue
+        try:
+            gid = int(str(raw).strip())
+            if gid > 0:
+                return gid
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _normalize_recent_contact_event(
+    contact: dict[str, Any], allowed_uins: set[str]
+) -> Optional[dict[str, Any]]:
+    """Convert a NapCat/OneBot ``get_recent_contact`` entry (including temp sessions) into a message event."""
+    if not isinstance(contact, dict):
+        return None
+    msg = (
+        contact.get("lastestMsg")
+        or contact.get("latestMsg")
+        or contact.get("last_msg")
+        or contact.get("message")
+    )
+    if not isinstance(msg, dict):
+        return None
+    # Skip outgoing messages sent by the bot itself (NTQQ sendType == 1)
+    if msg.get("sendType") == 1:
+        return None
+
+    ev = dict(msg)
+    peer_uin = str(contact.get("peerUin") or contact.get("user_id") or "").strip()
+    sender_uin = _extract_event_sender_uin(ev)
+    self_id = str(ev.get("self_id") or "").strip()
+    if self_id and sender_uin and sender_uin == self_id:
+        return None
+    if not sender_uin and peer_uin:
+        ev["user_id"] = int(peer_uin) if peer_uin.isdigit() else peer_uin
+        sender_uin = peer_uin
+    if not sender_uin or sender_uin not in allowed_uins:
+        return None
+
+    if ev.get("group_id") is None:
+        for key in ("group_id", "temp_source", "groupCode"):
+            val = contact.get(key)
+            if val is not None and str(val).strip():
+                ev["group_id"] = val
+                break
+    return ev
 
 
 async def handle_onebot_qr_login_event(
@@ -2007,27 +2278,36 @@ async def handle_onebot_qr_login_event(
                 onebot_caller=onebot_caller,
             )
 
-    msg_id = str(event.get("message_id") or "").strip()
-    if msg_id:
-        with _lock:
-            if msg_id in _processed_reply_msg_ids:
-                return None
+    if event.get("sendType") == 1:
+        return None
 
-    sender_uin = ""
-    if event.get("user_id") is not None:
-        sender_uin = str(event["user_id"]).strip()
-    elif (
-        isinstance(event.get("sender"), dict)
-        and event["sender"].get("user_id") is not None
-    ):
-        sender_uin = str(event["sender"]["user_id"]).strip()
+    msg_id = _extract_event_msg_id(event)
+    if msg_id and await _is_reply_msg_processed(msg_id):
+        return None
+
+    sender_uin = _extract_event_sender_uin(event)
     if not sender_uin:
+        return None
+    self_id = str(event.get("self_id") or "").strip()
+    if self_id and sender_uin == self_id:
         return None
 
     _, plain_text = _extract_reply_id_and_text(event)
     raw_msg = str(event.get("raw_message") or "")
-    m = _QR_LOGIN_LINK_RE.search(plain_text) or _QR_LOGIN_LINK_RE.search(raw_msg)
+    elements_text = _extract_elements_text(event)
+    m = (
+        _QR_LOGIN_LINK_RE.search(plain_text)
+        or _QR_LOGIN_LINK_RE.search(raw_msg)
+        or _QR_LOGIN_LINK_RE.search(elements_text)
+    )
     if not m:
+        return None
+
+    # Ignore stale historical QR login messages (e.g. replayed from history after a restart)
+    msg_ts = _extract_event_timestamp(event)
+    if msg_ts is not None and (time.time() - msg_ts) > _QR_LOGIN_MAX_MESSAGE_AGE_SECONDS:
+        if msg_id:
+            await _mark_reply_msg_processed(msg_id)
         return None
 
     deeplink = f"miniclassisland://qr-login/{m.group(1).strip()}"
@@ -2047,14 +2327,16 @@ async def handle_onebot_qr_login_event(
         return None
 
     if msg_id:
-        with _lock:
-            _processed_reply_msg_ids.add(msg_id)
+        await _mark_reply_msg_processed(msg_id)
 
     from app.shared.security.auth import authorize_qr_login_challenge
 
     authorized = await authorize_qr_login_challenge(deeplink, user.id)
+    event_group_id = _extract_event_group_id(event)
     target_group_id = int(
-        group_id if group_id is not None else (binding.group_id or SNOWLUMA_QQ_GROUP_ID)
+        group_id
+        if group_id is not None
+        else (event_group_id or binding.group_id or SNOWLUMA_QQ_GROUP_ID)
     )
     display = (user.display_name or "").strip() or user.username
     reply_msg = (
@@ -2119,11 +2401,9 @@ async def handle_onebot_registration_reply_event(
     if qr_handled is not None:
         return qr_handled
 
-    msg_id = str(event.get("message_id") or "").strip()
-    if msg_id:
-        with _lock:
-            if msg_id in _processed_reply_msg_ids:
-                return None
+    msg_id = _extract_event_msg_id(event)
+    if msg_id and await _is_reply_msg_processed(msg_id):
+        return None
 
     sender_uin = ""
     if event.get("user_id") is not None:
@@ -2192,8 +2472,7 @@ async def handle_onebot_registration_reply_event(
         return None
 
     if msg_id:
-        with _lock:
-            _processed_reply_msg_ids.add(msg_id)
+        await _mark_reply_msg_processed(msg_id)
 
     from app.shared.services.user import approve_user, reject_user
 
@@ -2275,6 +2554,47 @@ async def poll_snowluma_superadmin_replies_once(
         return []
 
     results: list[dict[str, Any]] = []
+
+    # 1. Poll recent contacts first so group temporary sessions (non-friend private messages)
+    #    are also captured alongside friend chats.
+    try:
+        recent_res = await _call_onebot(
+            "get_recent_contact",
+            {"count": 50},
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
+        )
+        if recent_res.get("status") == "ok" and recent_res.get("retcode", 0) == 0:
+            recent_data = recent_res.get("data")
+            contacts: list[Any] = []
+            if isinstance(recent_data, list):
+                contacts = recent_data
+            elif isinstance(recent_data, dict):
+                for key in ("contacts", "list", "items", "messages"):
+                    if isinstance(recent_data.get(key), list):
+                        contacts = recent_data[key]
+                        break
+            for contact in contacts:
+                ev = _normalize_recent_contact_event(contact, seen_uins)
+                if ev is None:
+                    continue
+                handled = await handle_onebot_registration_reply_event(
+                    ev,
+                    db,
+                    base_url=base_url,
+                    token=token,
+                    group_id=group_id,
+                    client=client,
+                    onebot_caller=onebot_caller,
+                )
+                if handled and handled.get("handled"):
+                    results.append(handled)
+    except Exception:
+        pass
+
+    # 2. Poll friend private message history for each bound user / superadmin.
     for uin in poll_uins:
         try:
             res = await _call_onebot(

@@ -11,6 +11,7 @@ from app.shared.utils.config import REDIS_URL
 logger = logging.getLogger(__name__)
 
 _pools: dict[int, Any] = {}
+_binary_pools: dict[int, Any] = {}
 _lock = asyncio.Lock()
 _max_conn = int(os.environ.get("REDIS_MAX_CONNECTIONS", "2000"))
 
@@ -70,9 +71,31 @@ def get_redis(db: int = 0) -> Any:
     return pool
 
 
+def get_binary_redis(db: int = 0) -> Any:
+    """Get binary-safe Redis instance (decode_responses=False) for specified logical DB."""
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    pool = _binary_pools.get(db)
+    pool_loop = getattr(pool, "_active_loop", None) if pool else None
+
+    if pool is None or (current_loop is not None and pool_loop is not current_loop):
+        pool = aioredis.from_url(
+            _build_url(db), decode_responses=False, max_connections=_max_conn
+        )
+        setattr(pool, "_active_loop", current_loop)
+        _binary_pools[db] = pool
+    return pool
+
+
 async def close_redis() -> None:
     """Safely close all Redis connection pools."""
     for db in list(_pools.keys()):
         await _pools[db].aclose()
     _pools.clear()
+    for db in list(_binary_pools.keys()):
+        await _binary_pools[db].aclose()
+    _binary_pools.clear()
     logger.info("All Redis connection pools safely closed")

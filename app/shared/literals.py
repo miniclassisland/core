@@ -57,12 +57,14 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]{1,62}[a-z0-9]$")
 SAFE_IDENTIFIER_RE = re.compile(r"^[a-z0-9_\-]+$")
 
 DEFAULT_QUOTAS = [
-    ("max_clients", 6),
-    ("max_grpc_connections", 4),
+    ("max_clients", 2),
+    ("max_grpc_connections", 1),
     ("max_bandwidth_mb", 100),
     ("feature.ota", 1),
-    ("feature.audit", 1),
-    ("feature.risk", 1),
+    ("feature.audit", 0),
+    ("feature.risk", 0),
+    ("feature.remote_edit", 0),
+    ("feature.assist_another", 0),
 ]
 
 SYSTEM_ROLES = [
@@ -84,6 +86,22 @@ ROLE_SUPERADMIN = "superadmin"
 TICKET_STATUSES = ("open", "in_progress", "resolved", "closed")
 TICKET_PRIORITIES = ("low", "normal", "high", "urgent")
 TICKET_CATEGORIES = ("account", "client", "bug", "feature", "other")
+
+# ---- 3.2 Quota & Permission Approval Requests ----
+APPROVAL_REQUEST_TYPES = ("quota", "permission")
+APPROVAL_REQUEST_STATUSES = ("pending", "approved", "rejected", "cancelled")
+QUOTA_REQUEST_KEYS = (
+    "max_clients",
+    "max_grpc_connections",
+    "max_bandwidth_mb",
+)
+PERMISSION_REQUEST_KEYS = (
+    "feature.ota",
+    "feature.audit",
+    "feature.risk",
+    "feature.remote_edit",
+    "feature.assist_another",
+)
 
 
 # ---- 4. Schemas ----

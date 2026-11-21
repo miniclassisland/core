@@ -9,6 +9,7 @@ from sqlalchemy import select, func, delete
 
 from app.shared.db.session import AsyncSessionLocal
 from app.shared.db.models import PairingCode, ClientProfile
+from app.shared.services.sse import publish_account_event
 from app.shared.utils.tenant import set_search_path
 from app.shared.literals import PAIRING_CHARSET, PAIRING_CODE_LEN
 
@@ -25,15 +26,14 @@ def generate_code() -> str:
     return "".join(secrets.choice(_CHARSET) for _ in range(_CODE_LEN))
 
 
-async def create_pairing_request(
-    tenant_id: str,
+async def _upsert_pairing_code(
+    effective_tid: str,
     client_uid: str,
-    client_id: str = "",
-    client_mac: str = "",
-    client_ip: str = "",
+    client_id: str,
+    client_mac: str,
+    client_ip: str,
 ) -> str:
-    """Physical client requests a pairing code prior to long-connection registration."""
-    effective_tid = tenant_id or "default"
+    """Create or update a pending PairingCode row inside a short-lived DB session."""
     async with AsyncSessionLocal() as db:
         await set_search_path(db)
         stmt = (
@@ -109,6 +109,26 @@ async def create_pairing_request(
             client_uid,
         )
         return code
+
+
+async def create_pairing_request(
+    tenant_id: str,
+    client_uid: str,
+    client_id: str = "",
+    client_mac: str = "",
+    client_ip: str = "",
+) -> str:
+    """Physical client requests a pairing code prior to long-connection registration."""
+    effective_tid = tenant_id or "default"
+    code = await _upsert_pairing_code(
+        effective_tid, client_uid, client_id, client_mac, client_ip
+    )
+    await publish_account_event(
+        effective_tid,
+        "pairing.updated",
+        {"code": code, "client_uid": client_uid, "status": "pending"},
+    )
+    return code
 
 
 async def check_approved(client_uid: str, tenant_id: str) -> bool:

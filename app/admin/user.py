@@ -39,6 +39,7 @@ from app.shared.services.user import (
     validate_username_format,
     is_name_reserved,
 )
+from app.shared.services.sse import publish_topic_event
 from app.shared.literals import MSG_USER_NOT_FOUND, SYSTEM_ROLES
 from app.shared.utils.community import (
     admin_bind_or_rebind_user_qq,
@@ -277,6 +278,27 @@ async def update_user_info(
         and updated.is_active
     ):
         await notify_user_approved(updated, db)
+    else:
+        await publish_topic_event(
+            f"user:{user_id}",
+            "user.updated",
+            {
+                "user_id": user_id,
+                "action": "updated",
+                "role_code": updated.role_code,
+                "is_active": bool(updated.is_active),
+            },
+        )
+        if was_pending and updated.role_code == "banned":
+            await publish_topic_event(
+                "__admin__",
+                "registration.updated",
+                {
+                    "user_id": user_id,
+                    "action": "banned",
+                    "role_code": updated.role_code,
+                },
+            )
     if not updated.is_active or updated.role_code == "banned":
         await revoke_all_user_sessions(user_id)
     if updated.role_code == "banned":
@@ -304,6 +326,7 @@ async def delete_user(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=MSG_USER_NOT_FOUND
         )
+    was_pending = user.role_code == "pending"
     user_ticket_ids = select(Ticket.id).where(Ticket.user_id == user_id)
     await db.execute(
         delete(TicketMessage).where(
@@ -320,6 +343,17 @@ async def delete_user(
     await db.commit()
     await revoke_all_user_sessions(user_id)
     await delete_recovery_codes(user_id)
+    await publish_topic_event(
+        f"user:{user_id}",
+        "user.updated",
+        {"user_id": user_id, "action": "deleted"},
+    )
+    if was_pending:
+        await publish_topic_event(
+            "__admin__",
+            "registration.updated",
+            {"user_id": user_id, "action": "deleted"},
+        )
     return {"status": "deleted"}
 
 

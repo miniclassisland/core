@@ -57,6 +57,9 @@ async def check_quota(
         return True
     quota = await get_quota_record(account_id, quota_key, db)
     if not quota:
+        # New edit/assist capability flags default to disabled even on legacy accounts without a seeded row
+        if quota_key in ("feature.remote_edit", "feature.assist_another"):
+            return False
         return True  # Unlimited if not set
     if quota.max_value == -1:
         return True  # -1 represents no limit

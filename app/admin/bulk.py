@@ -114,8 +114,25 @@ async def process_batch(
             res.append({"action": op.action, "name": clean_name, "status": "success"})
         await db.commit()
         from app.client.get import invalidate_resource_cache
+        from app.shared.services.sse import publish_account_event
 
         invalidate_resource_cache(acct_id)
+        for op in req.operations:
+            clean_name = _validate_resource_name(op.name)
+            if op.resource_type in MODEL_MAP:
+                await publish_account_event(
+                    acct_id,
+                    "resource.updated",
+                    {
+                        "resource_type": op.resource_type,
+                        "name": clean_name,
+                        "action": str(
+                            op.action.value
+                            if hasattr(op.action, "value")
+                            else op.action
+                        ),
+                    },
+                )
         return {"status": "success", "results": res}
     except HTTPException:
         await db.rollback()

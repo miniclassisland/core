@@ -876,18 +876,18 @@ async def run_comprehensive_e2e_suite() -> None:
                 )
                 assert r_def.status_code == 200, r_def.text
 
-                # Verify new default quotas (max_clients=6, max_grpc_connections=4, max_bandwidth_mb=100)
+                # Verify new default quotas (max_clients=2, max_grpc_connections=1, max_bandwidth_mb=100)
                 r_q = await mgmt.get(f"/account/{acct_id}/quota", headers=owner_hdr)
                 assert r_q.status_code == 200, r_q.text
                 q_defaults = {
                     item["quota_key"]: item["max_value"] for item in r_q.json()
                 }
                 assert (
-                    q_defaults.get("max_clients") == 6
-                ), f"Expected 6, got {q_defaults}"
+                    q_defaults.get("max_clients") == 2
+                ), f"Expected 2, got {q_defaults}"
                 assert (
-                    q_defaults.get("max_grpc_connections") == 4
-                ), f"Expected 4, got {q_defaults}"
+                    q_defaults.get("max_grpc_connections") == 1
+                ), f"Expected 1, got {q_defaults}"
                 assert (
                     q_defaults.get("max_bandwidth_mb") == 100
                 ), f"Expected 100, got {q_defaults}"

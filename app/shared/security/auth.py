@@ -957,7 +957,36 @@ async def authorize_qr_login_challenge(
             "authorized_at": str(now),
         },
     )
+    from app.shared.services.sse import publish_topic_event
+
+    await publish_topic_event(
+        f"qr:{code}",
+        "qr.updated",
+        {"code": code, "status": "authorized", "user_id": user_id},
+    )
     return True
+
+
+async def get_qr_login_challenge_status(code_or_uri: str) -> dict[str, Any]:
+    """Read current QR login challenge status without consuming an authorized token."""
+    code = extract_qr_login_code(code_or_uri)
+    if not code or not _verify_qr_login_code_stateless(code):
+        return {"status": "expired", "code": code}
+    rd = get_redis(REDIS_DB_AUTH)
+    key = f"{_QR_LOGIN_PREFIX}:{code}"
+    data = await rd.hgetall(key)
+    if not data:
+        return {"status": "expired", "code": code}
+    now = int(time.time())
+    expires_at = int(data.get("expires_at") or 0)
+    if expires_at <= now:
+        await rd.delete(key)
+        return {"status": "expired", "code": code}
+    return {
+        "status": str(data.get("status") or "pending"),
+        "code": code,
+        "expires_at": expires_at,
+    }
 
 
 async def poll_qr_login_challenge(code_or_uri: str) -> dict[str, Any]:

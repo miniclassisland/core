@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from .account import router as account_router
+from .approval_request import router as approval_request_router
 from .bulk import router as bulk_router
 from .community import router as community_router
 from .settings import router as settings_router
@@ -14,6 +15,7 @@ from app.shared.version import router as version_router
 router = APIRouter()
 
 router.include_router(account_router)
+router.include_router(approval_request_router)
 router.include_router(user_router)
 router.include_router(totp_router)
 router.include_router(settings_router)
