@@ -289,9 +289,8 @@ class AdminAuthMiddleware(BaseHTTPMiddleware):
                         },
                     )
                 if u.role_code == "pending":
-                    if (
-                        self._require_superadmin
-                        or not _is_pending_user_allowed_request(path, request.method)
+                    if self._require_superadmin or not _is_pending_user_allowed_request(
+                        path, request.method
                     ):
                         return JSONResponse(
                             status_code=status.HTTP_403_FORBIDDEN,

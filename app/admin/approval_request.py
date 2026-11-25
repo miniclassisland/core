@@ -51,7 +51,9 @@ async def _get_request_joined(
     row = (
         await db.execute(
             select(QuotaPermissionRequest, Account, User)
-            .join(Account, Account.id == QuotaPermissionRequest.account_id, isouter=True)
+            .join(
+                Account, Account.id == QuotaPermissionRequest.account_id, isouter=True
+            )
             .join(User, User.id == QuotaPermissionRequest.user_id, isouter=True)
             .where(QuotaPermissionRequest.id == request_id)
         )
@@ -134,7 +136,9 @@ async def list_all_approval_requests(
         await db.execute(
             select(func.count(QuotaPermissionRequest.id))
             .select_from(QuotaPermissionRequest)
-            .join(Account, Account.id == QuotaPermissionRequest.account_id, isouter=True)
+            .join(
+                Account, Account.id == QuotaPermissionRequest.account_id, isouter=True
+            )
             .join(User, User.id == QuotaPermissionRequest.user_id, isouter=True)
             .where(*filters)
         )
@@ -143,7 +147,9 @@ async def list_all_approval_requests(
     rows = (
         await db.execute(
             select(QuotaPermissionRequest, Account, User)
-            .join(Account, Account.id == QuotaPermissionRequest.account_id, isouter=True)
+            .join(
+                Account, Account.id == QuotaPermissionRequest.account_id, isouter=True
+            )
             .join(User, User.id == QuotaPermissionRequest.user_id, isouter=True)
             .where(*filters)
             .order_by(QuotaPermissionRequest.created_at.desc())

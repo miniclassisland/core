@@ -112,9 +112,7 @@ async def list_account_approval_requests(
         filters.append(QuotaPermissionRequest.request_type == norm_type)
 
     total = (
-        await db.execute(
-            select(func.count(QuotaPermissionRequest.id)).where(*filters)
-        )
+        await db.execute(select(func.count(QuotaPermissionRequest.id)).where(*filters))
     ).scalar_one()
     rows = (
         (

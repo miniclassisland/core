@@ -1855,19 +1855,23 @@ async def poll_snowluma_group_requests_once(
                     and bound_user.role_code != "banned"
                     and (bound_user.role_code == "pending" or bound_user.is_active)
                 ):
-                    approved, private_sent, reminder, _, resolved_nick = (
-                        await _approve_and_notify_member(
-                            flag,
-                            requester_uin,
-                            target_group_id,
-                            bound_user,
-                            requester_nick=requester_nick,
-                            db=db,
-                            base_url=base_url,
-                            token=token,
-                            client=client,
-                            onebot_caller=onebot_caller,
-                        )
+                    (
+                        approved,
+                        private_sent,
+                        reminder,
+                        _,
+                        resolved_nick,
+                    ) = await _approve_and_notify_member(
+                        flag,
+                        requester_uin,
+                        target_group_id,
+                        bound_user,
+                        requester_nick=requester_nick,
+                        db=db,
+                        base_url=base_url,
+                        token=token,
+                        client=client,
+                        onebot_caller=onebot_caller,
                     )
                     if approved:
                         existing_qq_bind.is_joined = True
@@ -1961,19 +1965,23 @@ async def poll_snowluma_group_requests_once(
             )
             continue
 
-        approved, private_sent, reminder, resolved_uin, resolved_nick = (
-            await _approve_and_notify_member(
-                flag,
-                requester_uin,
-                target_group_id,
-                user,
-                requester_nick=requester_nick,
-                db=db,
-                base_url=base_url,
-                token=token,
-                client=client,
-                onebot_caller=onebot_caller,
-            )
+        (
+            approved,
+            private_sent,
+            reminder,
+            resolved_uin,
+            resolved_nick,
+        ) = await _approve_and_notify_member(
+            flag,
+            requester_uin,
+            target_group_id,
+            user,
+            requester_nick=requester_nick,
+            db=db,
+            base_url=base_url,
+            token=token,
+            client=client,
+            onebot_caller=onebot_caller,
         )
         if not approved:
             continue
@@ -2305,7 +2313,10 @@ async def handle_onebot_qr_login_event(
 
     # Ignore stale historical QR login messages (e.g. replayed from history after a restart)
     msg_ts = _extract_event_timestamp(event)
-    if msg_ts is not None and (time.time() - msg_ts) > _QR_LOGIN_MAX_MESSAGE_AGE_SECONDS:
+    if (
+        msg_ts is not None
+        and (time.time() - msg_ts) > _QR_LOGIN_MAX_MESSAGE_AGE_SECONDS
+    ):
         if msg_id:
             await _mark_reply_msg_processed(msg_id)
         return None

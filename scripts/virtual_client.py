@@ -182,8 +182,9 @@ class VirtualClassIslandClient:
     cluster_name: str = "cluster-alpha"
     client_uid: str = field(default_factory=lambda: str(uuid.uuid4()))
     mac_address: str = field(
-        default_factory=lambda: "AA:BB:CC:"
-        + ":".join(f"{secrets.randbits(8):02X}" for _ in range(3))
+        default_factory=lambda: (
+            "AA:BB:CC:" + ":".join(f"{secrets.randbits(8):02X}" for _ in range(3))
+        )
     )
     host_map: dict[str, str] = field(default_factory=dict)
 
@@ -826,13 +827,13 @@ async def run_comprehensive_e2e_suite() -> None:
                     }
                     r = await mgmt.get(f"/account/{acct_id}/info", headers=hdr)
                     if u_idx in account_members_map[a_idx]:
-                        assert (
-                            r.status_code == 200
-                        ), f"Member U{u_idx} denied on A{a_idx}: {r.status_code} {r.text}"
+                        assert r.status_code == 200, (
+                            f"Member U{u_idx} denied on A{a_idx}: {r.status_code} {r.text}"
+                        )
                     else:
-                        assert (
-                            r.status_code == 403
-                        ), f"Non-member U{u_idx} allowed on A{a_idx}: {r.status_code} {r.text}"
+                        assert r.status_code == 403, (
+                            f"Non-member U{u_idx} allowed on A{a_idx}: {r.status_code} {r.text}"
+                        )
                     rbac_checks += 1
 
             # 2.2 Create 3 Profile Clusters ('cluster-alpha', 'cluster-beta', 'cluster-gamma') in all 12 accounts
@@ -855,9 +856,9 @@ async def run_comprehensive_e2e_suite() -> None:
                             json=payload,
                             headers=active_hdr,
                         )
-                        assert (
-                            resp.status_code == 200
-                        ), f"Write failed on A{a_idx}/{rtype}/{c_name}: {resp.text}"
+                        assert resp.status_code == 200, (
+                            f"Write failed on A{a_idx}/{rtype}/{c_name}: {resp.text}"
+                        )
 
                 # Set account __default__ profile to cluster-alpha
                 r_def = await mgmt.post(
@@ -882,15 +883,15 @@ async def run_comprehensive_e2e_suite() -> None:
                 q_defaults = {
                     item["quota_key"]: item["max_value"] for item in r_q.json()
                 }
-                assert (
-                    q_defaults.get("max_clients") == 2
-                ), f"Expected 2, got {q_defaults}"
-                assert (
-                    q_defaults.get("max_grpc_connections") == 1
-                ), f"Expected 1, got {q_defaults}"
-                assert (
-                    q_defaults.get("max_bandwidth_mb") == 100
-                ), f"Expected 100, got {q_defaults}"
+                assert q_defaults.get("max_clients") == 2, (
+                    f"Expected 2, got {q_defaults}"
+                )
+                assert q_defaults.get("max_grpc_connections") == 1, (
+                    f"Expected 1, got {q_defaults}"
+                )
+                assert q_defaults.get("max_bandwidth_mb") == 100, (
+                    f"Expected 100, got {q_defaults}"
+                )
 
                 # Elevate quotas for the 200-client matrix stress test (~17 clients per account)
                 async with AsyncSessionLocal() as db:
@@ -983,9 +984,9 @@ async def run_comprehensive_e2e_suite() -> None:
                             Retcode_pb2.Registered,
                         ), f"Client {vc.class_identity} register failed: {ret} {msg}"
                     else:
-                        assert (
-                            ret == Retcode_pb2.PairingRequired
-                        ), f"Expected PairingRequired for {vc.class_identity}, got {ret}"
+                        assert ret == Retcode_pb2.PairingRequired, (
+                            f"Expected PairingRequired for {vc.class_identity}, got {ret}"
+                        )
 
             await asyncio.gather(*(_first_register(vc) for vc in virtual_clients))
 
@@ -1089,9 +1090,9 @@ async def run_comprehensive_e2e_suite() -> None:
             async def _handshake_worker(vc: VirtualClassIslandClient) -> None:
                 async with sem:
                     hs_ret, hs_msg = await vc.handshake(cached_pub_key=cached_pub_key)
-                    assert (
-                        hs_ret == Retcode_pb2.Success
-                    ), f"Handshake failed for {vc.class_identity}: {hs_msg}"
+                    assert hs_ret == Retcode_pb2.Success, (
+                        f"Handshake failed for {vc.class_identity}: {hs_msg}"
+                    )
 
             await asyncio.gather(*(_handshake_worker(vc) for vc in virtual_clients))
             print(
@@ -1115,30 +1116,30 @@ async def run_comprehensive_e2e_suite() -> None:
                     # 1. Verify Subjects matches exact account & cluster
                     subs = vc.local_resources["Subjects"]["Subjects"]
                     sub_names = [s["Name"] for s in subs.values()]
-                    assert (
-                        f"Subject_{expected_tag}" in sub_names
-                    ), f"Client {vc.class_identity} expected Subject_{expected_tag}, got {sub_names}"
+                    assert f"Subject_{expected_tag}" in sub_names, (
+                        f"Client {vc.class_identity} expected Subject_{expected_tag}, got {sub_names}"
+                    )
 
                     # 2. Verify TimeLayout matches exact account & cluster
                     tls = vc.local_resources["TimeLayout"]["TimeLayouts"]
                     tl_names = [t["Name"] for t in tls.values()]
-                    assert (
-                        f"TimeLayout_{expected_tag}" in tl_names
-                    ), f"Client {vc.class_identity} expected TimeLayout_{expected_tag}, got {tl_names}"
+                    assert f"TimeLayout_{expected_tag}" in tl_names, (
+                        f"Client {vc.class_identity} expected TimeLayout_{expected_tag}, got {tl_names}"
+                    )
 
                     # 3. Verify ClassPlan matches exact account & cluster AND its TimeLayoutId & SubjectId match the GUIDs!
                     cps = vc.local_resources["ClassPlan"]["ClassPlans"]
                     cp_names = [c["Name"] for c in cps.values()]
-                    assert (
-                        f"ClassPlan_{expected_tag}" in cp_names
-                    ), f"Client {vc.class_identity} expected ClassPlan_{expected_tag}, got {cp_names}"
+                    assert f"ClassPlan_{expected_tag}" in cp_names, (
+                        f"Client {vc.class_identity} expected ClassPlan_{expected_tag}, got {cp_names}"
+                    )
                     cp_obj = next(iter(cps.values()))
-                    assert (
-                        cp_obj["TimeLayoutId"] in tls
-                    ), "ClassPlan.TimeLayoutId foreign key GUID mismatch!"
-                    assert (
-                        cp_obj["Classes"][0]["SubjectId"] in subs
-                    ), "ClassPlan.Classes[0].SubjectId foreign key GUID mismatch!"
+                    assert cp_obj["TimeLayoutId"] in tls, (
+                        "ClassPlan.TimeLayoutId foreign key GUID mismatch!"
+                    )
+                    assert cp_obj["Classes"][0]["SubjectId"] in subs, (
+                        "ClassPlan.Classes[0].SubjectId foreign key GUID mismatch!"
+                    )
 
                     # 4. Verify DefaultSettings matches exact account & cluster
                     ds = vc.local_resources["DefaultSettings"]
@@ -1179,9 +1180,9 @@ async def run_comprehensive_e2e_suite() -> None:
                 await asyncio.sleep(0.2)
 
             online_pongs = sum(1 for vc in virtual_clients if vc.pong_count >= 1)
-            assert (
-                online_pongs == num_clients
-            ), f"Expected {num_clients} clients with Pong >= 1, got {online_pongs}"
+            assert online_pongs == num_clients, (
+                f"Expected {num_clients} clients with Pong >= 1, got {online_pongs}"
+            )
 
             # 5.1 Verify online status across all 12 accounts via Management API
             for a_idx in range(num_accounts):
@@ -1194,12 +1195,12 @@ async def run_comprehensive_e2e_suite() -> None:
                     vc.client_uid for vc in virtual_clients if vc.account_index == a_idx
                 }
                 actual_uids = {c["uid"] for c in c_list}
-                assert (
-                    actual_uids == expected_uids
-                ), f"Account {a_idx} client list mismatch!"
-                assert all(
-                    c["online"] is True for c in c_list
-                ), f"Some clients in Account {a_idx} reported offline!"
+                assert actual_uids == expected_uids, (
+                    f"Account {a_idx} client list mismatch!"
+                )
+                assert all(c["online"] is True for c in c_list), (
+                    f"Some clients in Account {a_idx} reported offline!"
+                )
 
             # 5.2 Cross-Account Broadcast Test: Broadcast a unique notification in each of the 12 accounts
             for a_idx in range(num_accounts):
@@ -1221,9 +1222,9 @@ async def run_comprehensive_e2e_suite() -> None:
             # Verify every client ONLY received its own account's broadcast notification!
             for vc in virtual_clients:
                 expected_msg = f"ExclusiveMsg_Account_{vc.account_index:02d}"
-                assert vc.received_notifications == [
-                    expected_msg
-                ], f"Client {vc.class_identity} received wrong notifications: {vc.received_notifications}"
+                assert vc.received_notifications == [expected_msg], (
+                    f"Client {vc.class_identity} received wrong notifications: {vc.received_notifications}"
+                )
 
             # 5.3 Dynamic Hot Cluster Update: Modify 'cluster-beta' Subjects in Account 0..5 and batch-sync only cluster-beta clients
             for a_idx in range(6):
@@ -1253,9 +1254,9 @@ async def run_comprehensive_e2e_suite() -> None:
                     json={"action": "sync", "uids": beta_uids},
                     headers=hdr,
                 )
-                assert (
-                    r_batch_sync.status_code == 200
-                ), f"Batch sync failed on A{a_idx}: {r_batch_sync.status_code} {r_batch_sync.text}"
+                assert r_batch_sync.status_code == 200, (
+                    f"Batch sync failed on A{a_idx}: {r_batch_sync.status_code} {r_batch_sync.text}"
+                )
 
             # 5.4 Dynamic Profile Cluster Reassignment: Switch first client of each account from its cluster to 'cluster-gamma' with auto_sync=True
             switched_clients: list[VirtualClassIslandClient] = []
@@ -1320,9 +1321,9 @@ async def run_comprehensive_e2e_suite() -> None:
                         s["Name"]
                         for s in vc.local_resources["Subjects"]["Subjects"].values()
                     ]
-                    assert (
-                        f"HotUpdated_{tag}_v2" in sub_names
-                    ), f"Hot update missing on {vc.class_identity}: {sub_names}"
+                    assert f"HotUpdated_{tag}_v2" in sub_names, (
+                        f"Hot update missing on {vc.class_identity}: {sub_names}"
+                    )
 
             # Verify dynamically switched clients now hold cluster-gamma resources
             for vc in switched_clients:
@@ -1380,9 +1381,9 @@ async def run_comprehensive_e2e_suite() -> None:
                     vc.client_uid for vc in virtual_clients if vc.account_index == a_idx
                 }
                 logged_uids = {item["client_uid"] for item in logs}
-                assert logged_uids.issubset(
-                    expected_uids
-                ), f"Cross-tenant audit log leak in Account {a_idx}!"
+                assert logged_uids.issubset(expected_uids), (
+                    f"Cross-tenant audit log leak in Account {a_idx}!"
+                )
                 assert len(logged_uids) == len(expected_uids)
 
             # Stop all 200 command streams cleanly
@@ -1447,9 +1448,9 @@ async def run_comprehensive_e2e_suite() -> None:
                 host_map=host_map,
             )
             q_ret, q_msg, _ = await extra_vc.register()
-            assert (
-                q_ret == Retcode_pb2.InvalidRequest and "max_clients" in q_msg
-            ), f"Expected max_clients rejection, got {q_ret}: {q_msg}"
+            assert q_ret == Retcode_pb2.InvalidRequest and "max_clients" in q_msg, (
+                f"Expected max_clients rejection, got {q_ret}: {q_msg}"
+            )
 
             # Meanwhile, an already-registered client in Account 0 can still re-register (idempotent update)!
             re_ret, _, _ = await acct0_clients[0].register()
@@ -1492,9 +1493,9 @@ async def run_comprehensive_e2e_suite() -> None:
                 except grpc.aio.AioRpcError as rpc_err:
                     if rpc_err.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
                         grpc_quota_blocked = True
-            assert (
-                grpc_quota_blocked
-            ), "3rd concurrent gRPC stream was NOT blocked by max_grpc_connections=2!"
+            assert grpc_quota_blocked, (
+                "3rd concurrent gRPC stream was NOT blocked by max_grpc_connections=2!"
+            )
 
             await acct0_clients[0].stop_command_stream()
             await acct0_clients[1].stop_command_stream()
@@ -1512,9 +1513,9 @@ async def run_comprehensive_e2e_suite() -> None:
                 f"http://127.0.0.1:{client_port}/api/v1/client/{acct0_clients[0].client_uid}/manifest",
                 headers={"Host": f"{account_slugs[0]}.miniclassisland.com"},
             )
-            assert (
-                r_bw_blocked.status_code == 429
-            ), f"Expected 429 on bandwidth quota exceeded, got {r_bw_blocked.status_code}"
+            assert r_bw_blocked.status_code == 429, (
+                f"Expected 429 on bandwidth quota exceeded, got {r_bw_blocked.status_code}"
+            )
             async with AsyncSessionLocal() as db:
                 await set_quota(acct0_id, "max_bandwidth_mb", 100, db)
 

@@ -53,7 +53,7 @@ def generate_grpc():
     api_init = out_dir / "__init__.py"
     try:
         api_init.write_text(
-            "import sys\n" "sys.modules['Protobuf'] = sys.modules[__name__]\n",
+            "import sys\nsys.modules['Protobuf'] = sys.modules[__name__]\n",
             encoding="utf-8",
         )
     except Exception:

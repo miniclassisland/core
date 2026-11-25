@@ -76,7 +76,9 @@ async def flush_bandwidth_bytes(
         else:
             candidate_ids = list(_BANDWIDTH_BYTES.keys())
 
-        to_flush: dict[str, tuple[int, int]] = {}  # account_id -> (flushed_mb, consumed_bytes)
+        to_flush: dict[
+            str, tuple[int, int]
+        ] = {}  # account_id -> (flushed_mb, consumed_bytes)
         for aid in candidate_ids:
             raw = _BANDWIDTH_BYTES.get(aid, 0)
             if raw <= 0:
@@ -91,7 +93,8 @@ async def flush_bandwidth_bytes(
                 to_flush[aid] = (flushed_mb, flushed_mb * _BYTES_PER_MB)
             elif (
                 raw >= _BANDWIDTH_IDLE_MIN_BYTES
-                and (now - _BANDWIDTH_LAST_TOUCH.get(aid, now)) >= _BANDWIDTH_IDLE_FLUSH_SEC
+                and (now - _BANDWIDTH_LAST_TOUCH.get(aid, now))
+                >= _BANDWIDTH_IDLE_FLUSH_SEC
             ):
                 to_flush[aid] = (1, raw)
 

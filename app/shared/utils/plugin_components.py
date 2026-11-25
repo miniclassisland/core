@@ -19,11 +19,7 @@ def normalize_plugin_component_item(item: Any) -> dict[str, Any] | None:
         return None
 
     cid = str(
-        item.get("id")
-        or item.get("Id")
-        or item.get("guid")
-        or item.get("Guid")
-        or ""
+        item.get("id") or item.get("Id") or item.get("guid") or item.get("Guid") or ""
     ).strip()
     if not cid:
         return None

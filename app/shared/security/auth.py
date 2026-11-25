@@ -185,7 +185,9 @@ def require_role(min_priority: int):
             else (
                 100
                 if user.role_code == "superadmin"
-                else 80 if user.role_code == "admin" else 0
+                else 80
+                if user.role_code == "admin"
+                else 0
             )
         )
         if priority < min_priority:

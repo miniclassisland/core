@@ -481,9 +481,9 @@ async def poll_completed_config_upload(
             await wait_for_queue_event(
                 queue,
                 event_types=("command.completed",),
-                predicate=lambda env: str(
-                    (env.get("data") or {}).get("request_guid") or ""
-                )
-                == request_guid,
+                predicate=lambda env: (
+                    str((env.get("data") or {}).get("request_guid") or "")
+                    == request_guid
+                ),
                 timeout_sec=min(remaining, 1.0),
             )

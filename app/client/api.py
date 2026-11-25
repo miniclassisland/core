@@ -872,9 +872,9 @@ def _collect_account_plugin_metadata(
                             existing = comp_map.get(cid)
                             if existing is None:
                                 comp_map[cid] = normalized
-                            elif normalized.get("isComponentContainer") and not existing.get(
+                            elif normalized.get(
                                 "isComponentContainer"
-                            ):
+                            ) and not existing.get("isComponentContainer"):
                                 existing["isComponentContainer"] = True
                                 existing["isContainer"] = True
                         else:
