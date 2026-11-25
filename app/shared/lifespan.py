@@ -27,6 +27,10 @@ from app.shared.utils.community import (
     start_snowluma_poller,
     stop_snowluma_poller,
 )
+from app.shared.services.quota import (
+    start_bandwidth_flusher,
+    stop_bandwidth_flusher,
+)
 from app.shared.utils.logging import get_port_logger, PORT_TAG_GRPC
 from app.shared.runtime import runtime_hub
 
@@ -60,6 +64,7 @@ async def _startup(app: FastAPI):
     get_turnstile_client()
     await notify_service_startup_recovery()
     start_snowluma_poller()
+    start_bandwidth_flusher()
 
     # Dynamically import serve_grpc to prevent compilation issues when protobufs are missing
     try:
@@ -103,6 +108,7 @@ async def _shutdown(app: FastAPI):
     logger.info("Closing Turnstile HTTP client...")
     await close_turnstile_client()
     await stop_snowluma_poller()
+    await stop_bandwidth_flusher()
     executor = getattr(app.state, "thread_executor", None)
     if executor:
         executor.shutdown(wait=False)

@@ -860,12 +860,28 @@ def _collect_account_plugin_metadata(
                     if isinstance(parsed, dict)
                     else (parsed if isinstance(parsed, list) else [])
                 )
+                from app.shared.utils.plugin_components import (
+                    normalize_plugin_component_item,
+                )
+
                 for idx, item in enumerate(items):
                     if isinstance(item, dict):
-                        cid = str(
-                            item.get("id") or item.get("guid") or f"{row.uid}:{idx}"
-                        )
-                        comp_map.setdefault(cid, item)
+                        normalized = normalize_plugin_component_item(item)
+                        if normalized is not None:
+                            cid = normalized["id"]
+                            existing = comp_map.get(cid)
+                            if existing is None:
+                                comp_map[cid] = normalized
+                            elif normalized.get("isComponentContainer") and not existing.get(
+                                "isComponentContainer"
+                            ):
+                                existing["isComponentContainer"] = True
+                                existing["isContainer"] = True
+                        else:
+                            cid = str(
+                                item.get("id") or item.get("guid") or f"{row.uid}:{idx}"
+                            )
+                            comp_map.setdefault(cid, item)
             except Exception:
                 pass
         raw_set = getattr(row, "plugin_settings_json", None)

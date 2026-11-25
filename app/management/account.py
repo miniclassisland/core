@@ -2384,14 +2384,17 @@ async def list_account_plugin_components(
         elif isinstance(parsed, list):
             comp_list = parsed
         for item in comp_list:
-            if not isinstance(item, dict):
+            from app.shared.utils.plugin_components import (
+                normalize_plugin_component_item,
+            )
+
+            normalized = normalize_plugin_component_item(item)
+            if normalized is None:
                 continue
-            cid = str(item.get("id") or item.get("guid") or "").strip()
-            if not cid:
-                continue
+            cid = normalized["id"]
             existing = comp_map.get(cid)
             if existing is None:
-                entry = dict(item)
+                entry = normalized
                 entry["source_clients"] = [
                     {
                         "uid": rec.uid,
@@ -2400,6 +2403,11 @@ async def list_account_plugin_components(
                 ]
                 comp_map[cid] = entry
             else:
+                if normalized.get("isComponentContainer") and not existing.get(
+                    "isComponentContainer"
+                ):
+                    existing["isComponentContainer"] = True
+                    existing["isContainer"] = True
                 sources = existing.setdefault("source_clients", [])
                 if not any(s.get("uid") == rec.uid for s in sources):
                     sources.append(
